@@ -1,5 +1,8 @@
 /**
- * Storage-backed FIFO outbox for `/api/sync` POSTs (SPEC §6).
+ * Storage-backed FIFO outbox for `/api/sync` and `/api/highlights` POSTs
+ * (SPEC §6). Entries route by `kind`: highlight entries go to
+ * `/api/highlights`; everything else — including legacy persisted entries
+ * that predate the `kind` field — is a sync entry and goes to `/api/sync`.
  *
  * All dependencies (key/value storage, fetch) are injected so the module is
  * pure logic — unit tests run against an in-memory store and a mocked fetch,
@@ -15,18 +18,31 @@
  * - The one unavoidable window: the POST succeeded but the worker died
  *   before the deletion persisted. That entry is sent again on the next
  *   flush. This is fine — the server upsert is tolerant of duplicates
- *   (live re-save is a bump, backfill conflict is DO NOTHING), so
- *   at-least-once is the intended contract.
- * - On any failure (network error or non-2xx) flush stops immediately,
- *   preserving FIFO order; the failed entry and everything after it stay
- *   queued for the next flush (event-driven or the 5-minute alarm).
+ *   (live re-save is a bump, backfill conflict is DO NOTHING, a duplicate
+ *   highlight row is allowed and low-stakes), so at-least-once is the
+ *   intended contract.
+ * - Failure handling (SPEC §6):
+ *   - Sync entries: ANY failure (network error or non-2xx) stops the flush
+ *     immediately, preserving FIFO order; the failed entry and everything
+ *     after it stay queued for the next flush (event-driven or the
+ *     5-minute alarm).
+ *   - Highlight entries — poison rule: a definitive 4xx (anything except
+ *     401) means the server rejected this exact payload and always will
+ *     (e.g. 409: no bookmark matches the URL), so the entry is DROPPED,
+ *     the deletion is persisted, and the flush CONTINUES with the next
+ *     entry. 401 (token problem — applies to every entry behind it), 5xx,
+ *     and network errors halt the flush with the entry retained, exactly
+ *     like sync entries.
  */
 
 import type {
 	ExtensionConfig,
+	HighlightOutboxEntry,
+	HighlightPayload,
 	OutboxEntry,
 	SyncBookmark,
 	SyncMode,
+	SyncOutboxEntry,
 	SyncPayload,
 } from "./types";
 import { CONFIG_KEY, DEFAULT_BASE_URL, OUTBOX_KEY } from "./types";
@@ -61,19 +77,28 @@ export interface Outbox {
 	/** Append an entry to the tail of the queue and persist. */
 	enqueue(entry: OutboxEntry): Promise<void>;
 	/**
-	 * Drain the queue FIFO: POST each entry to `/api/sync`, deleting it from
-	 * storage on 2xx; stop on the first failure. No-op when unconfigured
-	 * (missing token) or when a flush is already in flight.
+	 * Drain the queue FIFO: POST each entry to its endpoint by kind, deleting
+	 * it from storage on 2xx; stop or drop-and-continue on failure per the
+	 * header comment. No-op when unconfigured (missing token) or when a flush
+	 * is already in flight.
 	 */
 	flush(): Promise<void>;
 }
 
-/** Build a new outbox entry with a fresh unique id. */
+/** Build a new sync outbox entry with a fresh unique id. */
 export function createEntry(
 	mode: SyncMode,
 	bookmarks: SyncBookmark[],
-): OutboxEntry {
-	return { id: crypto.randomUUID(), mode, bookmarks };
+): SyncOutboxEntry {
+	return { id: crypto.randomUUID(), kind: "sync", mode, bookmarks };
+}
+
+/** Build a new highlight outbox entry with a fresh unique id. */
+export function createHighlightEntry(
+	url: string,
+	text: string,
+): HighlightOutboxEntry {
+	return { id: crypto.randomUUID(), kind: "highlight", url, text };
 }
 
 export function createOutbox(deps: OutboxDeps): Outbox {
@@ -122,13 +147,23 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 				const entry = queue[0];
 				if (entry === undefined) return;
 
-				const payload: SyncPayload = {
-					mode: entry.mode,
-					bookmarks: entry.bookmarks,
-				};
+				// Route by kind. Anything without `kind: "highlight"` — including
+				// legacy entries persisted before the field existed — is sync.
+				const isHighlight = entry.kind === "highlight";
+				let endpoint: string;
+				let payload: SyncPayload | HighlightPayload;
+				if (entry.kind === "highlight") {
+					endpoint = `${baseUrl}/api/highlights`;
+					// Body is exactly SPEC §8 — no outbox id, no kind.
+					payload = { url: entry.url, text: entry.text };
+				} else {
+					endpoint = `${baseUrl}/api/sync`;
+					payload = { mode: entry.mode, bookmarks: entry.bookmarks };
+				}
+
 				let response: MinimalResponse;
 				try {
-					response = await fetchFn(`${baseUrl}/api/sync`, {
+					response = await fetchFn(endpoint, {
 						method: "POST",
 						headers: {
 							"Content-Type": "application/json",
@@ -140,7 +175,24 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 					// Network error: stop, keep this entry and everything after it.
 					return;
 				}
-				if (!response.ok) return; // Non-2xx: same — retry later, in order.
+				if (!response.ok) {
+					// Poison rule (highlight entries ONLY, SPEC §6): a definitive
+					// 4xx other than 401 will never succeed — drop the entry,
+					// persist the drop, and continue with the rest of the queue.
+					if (
+						isHighlight &&
+						response.status !== 401 &&
+						response.status >= 400 &&
+						response.status < 500
+					) {
+						const rest = (await readQueue()).filter((e) => e.id !== entry.id);
+						await storage.set(OUTBOX_KEY, rest);
+						continue;
+					}
+					// Everything else (sync failures, highlight 401/5xx): stop,
+					// keep this entry and everything after it — retry later.
+					return;
+				}
 
 				// Acked: persist the deletion immediately (see header comment).
 				const remaining = (await readQueue()).filter((e) => e.id !== entry.id);

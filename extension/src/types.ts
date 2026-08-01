@@ -22,12 +22,41 @@ export interface SyncPayload {
 	bookmarks: SyncBookmark[];
 }
 
-/** One outbox entry = one future POST to `/api/sync`. */
-export interface OutboxEntry {
+/** Body of `POST {baseUrl}/api/highlights` (SPEC §8). */
+export interface HighlightPayload {
+	url: string;
+	text: string;
+}
+
+/**
+ * One outbox entry = one future POST to `/api/sync`.
+ *
+ * `kind` is optional for backward compatibility: entries persisted to
+ * `chrome.storage.local` before highlights shipped have no `kind` field.
+ * Everywhere in the codebase, anything without `kind: "highlight"` is a
+ * sync entry (SPEC §6).
+ */
+export interface SyncOutboxEntry {
 	id: string;
+	kind?: "sync";
 	mode: SyncMode;
 	bookmarks: SyncBookmark[];
 }
+
+/** One outbox entry = one future POST to `/api/highlights`. */
+export interface HighlightOutboxEntry {
+	id: string;
+	kind: "highlight";
+	url: string;
+	text: string;
+}
+
+/**
+ * A queued outbox entry, routed by `kind` at flush time. Discriminate with
+ * `entry.kind === "highlight"` — never with `=== "sync"`, which would
+ * misclassify legacy entries missing the field.
+ */
+export type OutboxEntry = SyncOutboxEntry | HighlightOutboxEntry;
 
 /** Config persisted from the options page. */
 export interface ExtensionConfig {
@@ -39,6 +68,9 @@ export const DEFAULT_BASE_URL = "https://smultron.redpine.software";
 
 /** Max bookmarks per `/api/sync` request (SPEC §8). */
 export const SYNC_BATCH_LIMIT = 500;
+
+/** Max highlight text length in chars (SPEC §6/§8): selections are truncated. */
+export const HIGHLIGHT_TEXT_LIMIT = 10_000;
 
 /** `chrome.storage.local` keys. */
 export const CONFIG_KEY = "config";

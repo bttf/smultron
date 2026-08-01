@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	createEntry,
+	createHighlightEntry,
 	createOutbox,
 	type FetchLike,
 	type KeyValueStorage,
 	type MinimalResponse,
 } from "./outbox";
-import type { OutboxEntry } from "./types";
+import type {
+	HighlightOutboxEntry,
+	OutboxEntry,
+	SyncOutboxEntry,
+} from "./types";
 import { CONFIG_KEY, OUTBOX_KEY } from "./types";
 
 const OK: MinimalResponse = { ok: true, status: 200 };
@@ -26,7 +31,12 @@ function fakeStorage(initial: Record<string, unknown> = {}): FakeStorage {
 	};
 }
 
-function entry(id: string, mode: "live" | "backfill" = "live"): OutboxEntry {
+function entry(
+	id: string,
+	mode: "live" | "backfill" = "live",
+): SyncOutboxEntry {
+	// Deliberately no `kind` field: this is the legacy persisted shape, which
+	// must keep routing as sync everywhere (backward compat).
 	return {
 		id,
 		mode,
@@ -39,6 +49,15 @@ function entry(id: string, mode: "live" | "backfill" = "live"): OutboxEntry {
 				folderPath: "Bookmarks Bar/Dev",
 			},
 		],
+	};
+}
+
+function highlight(id: string): HighlightOutboxEntry {
+	return {
+		id,
+		kind: "highlight",
+		url: `https://example.com/${id}`,
+		text: `Highlight ${id}`,
 	};
 }
 
@@ -66,7 +85,17 @@ describe("enqueue", () => {
 		const one = createEntry("backfill", bookmarks);
 		const two = createEntry("backfill", bookmarks);
 		expect(one.mode).toBe("backfill");
+		expect(one.kind).toBe("sync");
 		expect(one.bookmarks).toEqual(bookmarks);
+		expect(one.id).not.toBe(two.id);
+	});
+
+	it("createHighlightEntry assigns unique ids and keeps kind/url/text", () => {
+		const one = createHighlightEntry("https://example.com/a", "snippet");
+		const two = createHighlightEntry("https://example.com/a", "snippet");
+		expect(one.kind).toBe("highlight");
+		expect(one.url).toBe("https://example.com/a");
+		expect(one.text).toBe("snippet");
 		expect(one.id).not.toBe(two.id);
 	});
 });
@@ -251,5 +280,145 @@ describe("flush", () => {
 		// storage; the in-flight entry is only removed after its 2xx.
 		expect(snapshots).toEqual([["a", "b", "c"], ["b", "c"], ["c"]]);
 		expect(queueIds(storage)).toEqual([]);
+	});
+});
+
+describe("flush kind-routing (SPEC §6)", () => {
+	it("posts a mixed FIFO queue [sync, highlight] in order to the right endpoints with the right bodies", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [createEntry("live", entry("a").bookmarks), highlight("h")],
+		});
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		const [syncUrl, syncInit] = fetchFn.mock.calls[0] ?? [];
+		expect(syncUrl).toBe("https://api.test/api/sync");
+		expect(JSON.parse(syncInit?.body ?? "")).toEqual({
+			mode: "live",
+			bookmarks: entry("a").bookmarks,
+		});
+		const [hlUrl, hlInit] = fetchFn.mock.calls[1] ?? [];
+		expect(hlUrl).toBe("https://api.test/api/highlights");
+		expect(hlInit?.headers).toEqual({
+			"Content-Type": "application/json",
+			Authorization: "Bearer tok-123",
+		});
+		// Body is exactly SPEC §8 — url + text only; no outbox id, no kind.
+		expect(JSON.parse(hlInit?.body ?? "")).toEqual({
+			url: "https://example.com/h",
+			text: "Highlight h",
+		});
+		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("routes legacy entries WITHOUT a kind field as sync", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [entry("legacy")], // entry() builds the pre-kind shape
+		});
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledWith(
+			"https://api.test/api/sync",
+			expect.anything(),
+		);
+		expect(queueIds(storage)).toEqual([]);
+	});
+});
+
+describe("flush failure handling per kind (SPEC §6 poison rule)", () => {
+	it("drops a highlight on 400, persists the drop, and continues with later entries", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [highlight("bad"), entry("after")],
+		});
+		const droppedSnapshots: string[][] = [];
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValueOnce({ ok: false, status: 400 })
+			.mockImplementation(async () => {
+				// By the time the next entry is posted, the drop is persisted.
+				droppedSnapshots.push(queueIds(storage));
+				return OK;
+			});
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		expect(droppedSnapshots).toEqual([["after"]]);
+		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("drops a highlight on 409 (no matching bookmark) and continues", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [highlight("orphan"), highlight("ok"), entry("sync")],
+		});
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValueOnce({ ok: false, status: 409 })
+			.mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(3);
+		const posted = fetchFn.mock.calls.map(([url]) => url);
+		expect(posted).toEqual([
+			"https://api.test/api/highlights",
+			"https://api.test/api/highlights",
+			"https://api.test/api/sync",
+		]);
+		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("halts on highlight 401 (token problem), keeping the entry and everything after it", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [highlight("h"), entry("after")],
+		});
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValue({ ok: false, status: 401 });
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		expect(queueIds(storage)).toEqual(["h", "after"]);
+	});
+
+	it("halts on highlight 5xx, keeping the entry for retry", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [highlight("h"), entry("after")],
+		});
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValue({ ok: false, status: 503 });
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		expect(queueIds(storage)).toEqual(["h", "after"]);
+	});
+
+	it("halts on highlight network error, keeping the entry for retry", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [highlight("h"), entry("after")],
+		});
+		const fetchFn = vi.fn<FetchLike>().mockRejectedValue(new Error("offline"));
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		expect(queueIds(storage)).toEqual(["h", "after"]);
+	});
+
+	it("still halts sync entries on 4xx (409) — poison rule is highlight-only", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [createEntry("live", entry("a").bookmarks), highlight("h")],
+		});
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValue({ ok: false, status: 409 });
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		// Both the failed sync entry and the highlight behind it stay queued.
+		const queue = storage.data[OUTBOX_KEY] as OutboxEntry[];
+		expect(queue).toHaveLength(2);
+		expect(queue[1]?.kind).toBe("highlight");
 	});
 });
