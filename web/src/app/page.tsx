@@ -1,9 +1,9 @@
 // / (home) — SPEC §7 gating: no session -> /login; wrong email -> signed out
 // (getAuthState) -> /not-allowed; authed but unpaired -> PairingGate blocks
-// the happy path; paired -> feed placeholder (milestone 6 replaces the
-// placeholder <main> below).
+// the happy path; paired -> the feed (Feed, src/components/feed.tsx).
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { Feed } from "../components/feed";
 import { PairingGate } from "../components/pairing";
 import { db } from "../db";
 import { getAuthState } from "../lib/auth";
@@ -43,16 +43,7 @@ export default async function Home() {
 				</nav>
 			</header>
 
-			{pairing.paired ? (
-				<main className="flex flex-1 flex-col items-center justify-center gap-2 p-16">
-					<h1 className="text-3xl font-semibold tracking-tight">
-						Smultronstället
-					</h1>
-					<p className="text-muted-foreground">Feed coming in m6.</p>
-				</main>
-			) : (
-				<PairingGate hasToken={pairing.hasToken} />
-			)}
+			{pairing.paired ? <Feed /> : <PairingGate hasToken={pairing.hasToken} />}
 		</div>
 	);
 }
