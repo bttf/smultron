@@ -1,12 +1,12 @@
 // Extension API token auth — SPEC §7 (API auth).
 // `Authorization: Bearer <token>` → sha256 → lookup in smultron.api_tokens.
 // The raw token is never stored; the hash is the lookup key. Hashes are
-// hex-encoded sha256 — token generation (pairing flow, milestone 5) must use
-// the same encoding.
-import { createHash } from "node:crypto";
+// hex-encoded sha256 via the SAME `hashToken` used at generation time
+// (pairing.ts), so the encodings can never drift.
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { apiTokens } from "../db/schema";
+import { hashToken } from "./pairing";
 
 export type ApiTokenAuth = {
 	userId: string;
@@ -33,7 +33,7 @@ export async function authenticateApiToken(
 		return null;
 	}
 
-	const tokenHash = createHash("sha256").update(token, "utf8").digest("hex");
+	const tokenHash = hashToken(token);
 
 	const rows = await db
 		.select({ userId: apiTokens.userId, pairedAt: apiTokens.pairedAt })
