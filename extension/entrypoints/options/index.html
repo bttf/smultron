@@ -2,9 +2,134 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Smultronstället Options</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fdfcfb;
+        --fg: #1f1a17;
+        --muted: #6f6660;
+        --border: #d8d2cc;
+        --accent: #b02a2a;
+        --field-bg: #ffffff;
+        --ok: #1d7a3d;
+        --err: #b02a2a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #171412;
+          --fg: #ece7e2;
+          --muted: #9a918a;
+          --border: #3c3631;
+          --accent: #e05252;
+          --field-bg: #211d1a;
+          --ok: #4fc06f;
+          --err: #ff7a7a;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.5 system-ui, sans-serif;
+        display: flex;
+        justify-content: center;
+      }
+      main {
+        width: min(28rem, 100% - 3rem);
+        padding: 2.5rem 0 3rem;
+      }
+      h1 {
+        font-size: 1.3rem;
+        margin: 0 0 0.25rem;
+      }
+      .subtitle {
+        margin: 0 0 1.75rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        font-size: 0.85rem;
+        margin: 1.1rem 0 0.3rem;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.5rem 0.65rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--field-bg);
+        color: var(--fg);
+        font: inherit;
+      }
+      input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+        border-color: transparent;
+      }
+      .hint {
+        margin: 0.3rem 0 0;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      button {
+        margin-top: 1.5rem;
+        padding: 0.55rem 1.4rem;
+        border: none;
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      #status {
+        margin-top: 1rem;
+        font-size: 0.9rem;
+        min-height: 1.4em;
+      }
+      #status.ok {
+        color: var(--ok);
+      }
+      #status.err {
+        color: var(--err);
+      }
+    </style>
   </head>
   <body>
-    <script type="module" src="./main.ts"></script>
+    <main>
+      <h1>Smultronstället</h1>
+      <p class="subtitle">Pair this extension with your bookmarks site.</p>
+      <form id="config-form">
+        <label for="token">API token</label>
+        <input
+          id="token"
+          name="token"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Paste the token from the pairing dialog"
+        />
+        <label for="base-url">API base URL</label>
+        <input
+          id="base-url"
+          name="base-url"
+          type="url"
+          spellcheck="false"
+          placeholder="https://smultron.redpine.software (or http://localhost:3000 for dev)"
+        />
+        <p class="hint">Leave empty for the default: https://smultron.redpine.software</p>
+        <button id="save" type="submit">Save &amp; pair</button>
+      </form>
+      <p id="status"></p>
+      <script type="module" src="./main.ts"></script>
+    </main>
   </body>
 </html>
