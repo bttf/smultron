@@ -67,3 +67,28 @@ export const apiTokens = smultron
 			.default(sql`now()`),
 	})
 	.enableRLS();
+
+export const highlights = smultron
+	.table(
+		"highlights",
+		{
+			id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+			userId: uuid("user_id").notNull(),
+			bookmarkId: bigint("bookmark_id", { mode: "number" })
+				.notNull()
+				.references(() => bookmarks.id),
+			// Immutable snippet; no edit support.
+			text: text().notNull(),
+			createdAt: timestamp("created_at", { withTimezone: true })
+				.notNull()
+				.default(sql`now()`),
+		},
+		(table) => [
+			// Fetching a bookmark's highlights in order.
+			index("highlights_bookmark_id_created_at_idx").on(
+				table.bookmarkId,
+				table.createdAt,
+			),
+		],
+	)
+	.enableRLS();
