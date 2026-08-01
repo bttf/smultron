@@ -111,7 +111,7 @@ Upsert on `(user_id, url_normalized)`:
 ### Site auth
 
 -   Supabase Google OAuth via `@supabase/ssr` (PKCE, cookie sessions).
--   Post-login gate: if `session.user.email !== ALLOWED_EMAIL`, sign out and show a "not allowed" page. (Multi-user later = replace this check.)
+-   Post-login gate: if `session.user.email !== ALLOWED_EMAIL`, sign out and show a "not allowed" page. `ALLOWED_EMAIL` is optional (approved 2026-08-01): unset/empty disables the gate — any Google account may sign in, with per-user data isolation; set = single-user gate as above.
 
 ### Extension pairing
 
@@ -120,7 +120,7 @@ Upsert on `(user_id, url_normalized)`:
     2. Dialog polls `GET /api/pairing-status` every few seconds.
     3. Extension options page saves the token and sends `POST /api/hello`; server verifies hash, sets `paired_at`.
     4. Dialog sees `paired: true` → unlocks the feed.
--   "Regenerate token" available in site settings (invalidates old token).
+-   "Regenerate token" available in site settings — invalidates the old token, resets `paired_at` to null (the extension must save the new token and re-hello), and refreshes `api_tokens.created_at`. A user with no `api_tokens` row at all is treated as unpaired. (Recorded from implementation, 2026-08-01.)
 
 ### API auth
 
@@ -139,8 +139,8 @@ All inputs Zod-validated; unknown fields rejected.
                          dateAddedMs?: number; folderPath?: string }> }  // max 500
     ```
     Server normalizes URLs and applies §5 semantics. Returns `{inserted, bumped, skipped}`.
--   `GET /api/bookmarks?q=&cursor=&archived=` — session auth. No `q`: feed ordered `updated_at desc`, cursor-paginated (50/page), `archived_at is null` unless `archived=1`. With `q`: FTS (`websearch_to_tsquery('simple', q)`) OR trgm similarity/substring on title + url_normalized, ordered by rank then recency.
--   `PATCH /api/bookmarks/:id` — session auth; body subset of `{ title, tags, archived }` (`archived: true|false` sets/clears `archived_at`).
+-   `GET /api/bookmarks?q=&cursor=&archived=` — session auth. No `q`: feed ordered `updated_at desc`, cursor-paginated (50/page), `archived_at is null` unless `archived=1` (`archived=1` returns ONLY archived rows — it is the archived view, not an "include archived" flag). With `q`: FTS (`websearch_to_tsquery('simple', q)`) OR trgm similarity/substring on title + url_normalized, ordered by rank then recency; search returns a single page of 50 with no cursor. (Recorded from implementation, 2026-08-01.)
+-   `PATCH /api/bookmarks/:id` — session auth; body subset of `{ title, tags, archived }` (`archived: true|false` sets/clears `archived_at`). Site edits NEVER bump `updated_at` — only live sync does (§5).
 
 ## 9. UI (site)
 

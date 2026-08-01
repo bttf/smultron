@@ -16,6 +16,7 @@
 // never redirected — they 401 on their own.
 import { createServerClient } from "@supabase/ssr";
 import { type NextRequest, NextResponse } from "next/server";
+import { isEmailAllowed } from "./lib/allowedEmail";
 
 // Pages reachable without a session.
 const PUBLIC_PATHS = new Set(["/login", "/not-allowed"]);
@@ -71,7 +72,7 @@ export async function proxy(request: NextRequest) {
 
 	if (
 		user &&
-		user.email !== process.env.ALLOWED_EMAIL &&
+		!isEmailAllowed(user.email) &&
 		!isApi &&
 		pathname !== "/not-allowed"
 	) {

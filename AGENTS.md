@@ -9,7 +9,7 @@ Personal bookmarks app: a Chrome extension captures the user's Chrome bookmarks 
 
 ## Repo layout
 
-pnpm workspace monorepo, TypeScript everywhere, Node 20, pnpm 9.
+pnpm workspace monorepo, TypeScript everywhere, Node ≥20 (22 in practice), pnpm 9/10 (no `packageManager` pin — deliberate, so the globally installed pnpm keeps working).
 
 ```
 web/         Next.js (App Router) site + API routes — deploys to Vercel
@@ -23,6 +23,13 @@ docs/        SPEC.md and other docs
 -   **extension/**: WXT (Vite-based MV3 toolkit) · vanilla TS service worker + options page — no UI framework
 -   **DB**: Supabase Postgres, everything in the dedicated **`smultron` schema** (Drizzle `pgSchema('smultron')`)
 -   **Tooling**: Biome (lint + format) · Vitest
+
+### Hard-won environment notes (don't relearn these)
+
+-   `vite` is pinned to `^7` via root `pnpm.overrides`: vite 8 (rolldown) has a broken native-binding install on darwin-arm64. Remove the pin only after verifying WXT + Vitest builds on vite 8.
+-   Next.js 16 renamed the middleware convention: the file is `web/src/proxy.ts` exporting `proxy()`. Next 16 differs from most training data — read the guides shipped in `web/node_modules/next/dist/docs/` before writing Next code (see `web/AGENTS.md`). `cookies()`, `params`, `searchParams` are async.
+-   DB-touching tests run on PGlite applying the REAL migrations from `web/drizzle/` in `meta/_journal.json` order, with `auth.users` stubbed (pattern: `web/src/lib/sync.test.ts`). Never hand-mock SQL semantics.
+-   API token hashing is hex-encoded sha256 with ONE implementation: `hashToken` in `web/src/lib/pairing.ts` (`apiTokenAuth.ts` imports it). Don't introduce a second encoding.
 
 ## Commands
 
@@ -47,7 +54,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=   # auth client only
 SUPABASE_SERVICE_ROLE_KEY=       # server-side API routes only
 DATABASE_URL=                    # pooled connection (port 6543) — runtime queries
 DIRECT_URL=                      # direct connection (port 5432) — migrations only
-ALLOWED_EMAIL=                   # the single Google account allowed to sign in
+ALLOWED_EMAIL=                   # optional: the single Google account allowed to sign in; unset = any Google account (open multi-user)
 APP_URL=                         # http://localhost:3000 in dev; https://smultron.redpine.software in prod
 ```
 

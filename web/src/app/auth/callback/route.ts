@@ -2,6 +2,7 @@
 // after Google sign-in; we exchange the code for a cookie session (PKCE),
 // then gate on ALLOWED_EMAIL: wrong account -> sign out + /not-allowed.
 import { NextResponse } from "next/server";
+import { isEmailAllowed } from "../../../lib/allowedEmail";
 import { createSupabaseServerClient } from "../../../lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -29,9 +30,7 @@ export async function GET(request: Request) {
 		);
 	}
 
-	const email = data.user?.email;
-	const allowed = process.env.ALLOWED_EMAIL;
-	if (!allowed || !email || email !== allowed) {
+	if (!isEmailAllowed(data.user?.email)) {
 		// SPEC §7: sign out and show the "not allowed" page.
 		try {
 			await supabase.auth.signOut();

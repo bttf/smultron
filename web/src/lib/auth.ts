@@ -1,6 +1,7 @@
 // Site session auth — SPEC §7 (Site auth). Supabase Google OAuth session,
 // gated to the single ALLOWED_EMAIL (exact match). This is THE helper later
 // milestones use to guard /api/bookmarks* and pages.
+import { isEmailAllowed } from "./allowedEmail";
 import { createSupabaseServerClient } from "./supabase/server";
 
 export type AuthedUser = { id: string; email: string };
@@ -30,8 +31,7 @@ export async function getAuthState(): Promise<AuthState> {
 		return { status: "unauthenticated" };
 	}
 
-	const allowed = process.env.ALLOWED_EMAIL;
-	if (!allowed || !user.email || user.email !== allowed) {
+	if (!isEmailAllowed(user.email)) {
 		try {
 			await supabase.auth.signOut();
 		} catch {
@@ -40,7 +40,7 @@ export async function getAuthState(): Promise<AuthState> {
 		return { status: "forbidden" };
 	}
 
-	return { status: "authed", user: { id: user.id, email: user.email } };
+	return { status: "authed", user: { id: user.id, email: user.email ?? "" } };
 }
 
 /**
