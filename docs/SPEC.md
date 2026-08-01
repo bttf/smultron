@@ -67,7 +67,7 @@ Applied to compute `url_normalized`; the original is stored untouched in `url`.
 2. Lowercase scheme and host.
 3. Strip fragment (`#...`).
 4. Remove tracking params: any `utm_*`, `fbclid`, `gclid`. **Keep all other query params** (often meaningful). Preserve remaining param order.
-5. Strip a single trailing slash from the path (but keep root `/` as-is: `https://x.com/` → `https://x.com`).
+5. Strip a single trailing slash from the path (but keep root `/` as-is: `https://x.com/` → `https://x.com`). Strip only when the path ends in exactly one slash — a path ending in multiple slashes (`/a//`) is left untouched, keeping normalization idempotent (approved 2026-08-01).
 
 One implementation in `web/src/lib/normalizeUrl.ts`, exhaustively unit-tested.
 
@@ -80,7 +80,7 @@ Two write modes, distinguished by a `mode` field in the sync payload:
 Upsert on `(user_id, url_normalized)`:
 
 -   **Insert** if new: `created_at = updated_at = now()` (or event's `dateAdded` if present), tags = `[folderPath]`.
--   **On conflict (re-save)**: `updated_at = now()`, `archived_at = null` (unarchive), `title = excluded.title`, `chrome_id = excluded.chrome_id`. Tags are NOT touched on re-save (site-owned after insert).
+-   **On conflict (re-save)**: `updated_at = now()`, `archived_at = null` (unarchive), `title = excluded.title`, `chrome_id = excluded.chrome_id`, `url = excluded.url` (the raw form refreshes to the newest spelling; approved 2026-08-01). Tags are NOT touched on re-save (site-owned after insert).
 
 This is the ONLY path that bumps `updated_at`.
 
