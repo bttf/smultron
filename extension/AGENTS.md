@@ -9,7 +9,7 @@ Vanilla TS only — no UI framework anywhere (root AGENTS.md). Read `docs/SPEC.m
 
 ## Contracts
 
--   **Outbox** (`src/outbox.ts`): at-least-once, in-order FIFO. Flush is sequential, stops on the first failure (network or non-2xx), persists each deletion immediately after its 2xx. Duplicate delivery after a worker death is expected and safe (server upsert tolerates it) — don't "fix" it. Every entry currently POSTs to `/api/sync`; per-entry endpoint routing is a known future change (see `docs/ROADMAP.md` highlights section).
+-   **Outbox** (`src/outbox.ts`): at-least-once, in-order FIFO. Flush is sequential, persists each deletion immediately after its 2xx. Duplicate delivery after a worker death is expected and safe (server tolerates it) — don't "fix" it. Entries route by `kind` (sync → `/api/sync`, highlight → `/api/highlights`; entries without `kind` are legacy sync entries). Failure handling per SPEC §6: sync entries halt the flush on any failure; highlight entries drop on definitive 4xx (except 401) and continue.
 -   **Payload** (`src/types.ts`) mirrors SPEC §8 exactly: raw URLs, Chrome `dateAdded` ms as-is — never normalize client-side (Hard rule #3).
 -   MV3: register every listener synchronously at the top level of `defineBackground` — no awaits before `addListener`, or Chrome won't re-deliver events after worker death.
 -   `onChanged`/`onMoved`/`onRemoved` are intentionally not listened to (SPEC §5).

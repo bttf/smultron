@@ -60,10 +60,10 @@ APP_URL=                         # http://localhost:3000 in dev; https://smultro
 
 ## Hard rules (do not violate)
 
-1. **Backfill/reconciliation never bumps `updated_at`.** Only live `chrome.bookmarks.onCreated` events bump. Backfill upserts are `ON CONFLICT DO NOTHING`. See SPEC §Sync semantics.
+1. **Backfill/reconciliation never bumps `updated_at`.** Only live captures bump: `chrome.bookmarks.onCreated` events and highlight inserts (`/api/highlights`). Backfill upserts are `ON CONFLICT DO NOTHING`. See SPEC §Sync semantics.
 2. **All data access goes through API routes using the service-role connection.** The `smultron` schema is NOT exposed to PostgREST; RLS is enabled with no anon policies. Never query the DB from the client; never ship the service-role key client-side.
 3. **URL normalization happens server-side only** — one implementation in `web/`, unit-tested. The extension always sends raw URLs.
-4. **Soft deletes only.** Never `DELETE` a bookmark row; set/clear `archived_at`.
+4. **Soft deletes only (bookmarks).** Never `DELETE` a bookmark row; set/clear `archived_at`. Highlights are hard-delete by design (SPEC §3).
 5. **supabase-js is for auth only.** All reads/writes go through Drizzle.
 6. **No realtime.** The feed polls via SWR. Do not add Supabase Realtime.
 
@@ -76,5 +76,5 @@ APP_URL=                         # http://localhost:3000 in dev; https://smultro
 
 -   Zod-validate every API route input; reject unknown fields.
 -   Keep migrations in `web/drizzle/` under version control; schema changes go through `db:generate`, never hand-edited SQL against prod.
--   Vitest coverage is required for: URL normalization, upsert/bump/unarchive semantics, outbox queue behavior.
+-   Vitest coverage is required for: URL normalization, upsert/bump/unarchive semantics, outbox queue behavior (incl. kind-routing + poison rule), highlight insert/bump/unarchive/409 semantics, the `textFragment` helper.
 -   Small PRs / commits scoped to one milestone step (see SPEC §Milestones).

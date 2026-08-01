@@ -48,7 +48,17 @@ create table smultron.api_tokens (
   paired_at   timestamptz,               -- set on first /api/hello
   created_at  timestamptz not null default now()
 );
+
+create table smultron.highlights (
+  id           bigint generated always as identity primary key,
+  user_id      uuid not null references auth.users(id),
+  bookmark_id  bigint not null references smultron.bookmarks(id),
+  text         text not null,            -- immutable snippet; no edit support
+  created_at   timestamptz not null default now()
+);
 ```
+
+Highlights are **hard-deleted** (the soft-delete rule is scoped to bookmarks): a highlight is a low-stakes, easily-recreated capture, not deliberate curation. Duplicate texts per bookmark are allowed (no unique constraint).
 
 Indexes:
 
@@ -56,6 +66,7 @@ Indexes:
 -   GIN on `to_tsvector('simple', title || ' ' || url_normalized)` for FTS
 -   `gin (title gin_trgm_ops)` and `gin (url_normalized gin_trgm_ops)` via `pg_trgm` for fuzzy/substring
 -   btree on `(user_id, updated_at desc) where archived_at is null` for the feed
+-   btree on `highlights (bookmark_id, created_at)` for fetching a bookmark's highlights in order
 
 Extensions required: `pg_trgm`. RLS: `alter table ... enable row level security` with **no policies** — the service role bypasses RLS; nothing else can read. Do not add the `smultron` schema to Supabase's "Exposed schemas" (PostgREST must not see it).
 
@@ -82,7 +93,7 @@ Upsert on `(user_id, url_normalized)`:
 -   **Insert** if new: `created_at = updated_at = now()` (or event's `dateAdded` if present), tags = `[folderPath]`.
 -   **On conflict (re-save)**: `updated_at = now()`, `archived_at = null` (unarchive), `title = excluded.title`, `chrome_id = excluded.chrome_id`, `url = excluded.url` (the raw form refreshes to the newest spelling; approved 2026-08-01). Tags are NOT touched on re-save (site-owned after insert).
 
-This is the ONLY path that bumps `updated_at`.
+Live captures — this path and highlight inserts (below) — are the ONLY paths that bump `updated_at`.
 
 ### `backfill` (initial full import and startup reconciliation sweep)
 
@@ -91,18 +102,29 @@ Upsert on `(user_id, url_normalized)`:
 -   **Insert** if new: `created_at = updated_at = dateAdded` when available, else `now()`.
 -   **On conflict**: `DO NOTHING`. Never bump, never unarchive, never overwrite title/tags.
 
+### `highlight` (from the context menu, via `POST /api/highlights`)
+
+Server normalizes the URL and looks up `smultron.bookmarks` by `(user_id, url_normalized)`:
+
+-   **Found**: insert the highlight row, and on the bookmark set `updated_at = now()`, `archived_at = null` — a highlight is a live capture in Chrome, so it resurfaces and unarchives the bookmark exactly like a live re-save (approved 2026-08-01). Title/tags/created_at untouched.
+-   **Missing**: `409` — the extension drops the event (poison rule, §6) instead of retrying forever. Normally unreachable: the outbox's FIFO ordering guarantees the bookmark's insert is either acked or queued ahead of the highlight.
+
 ### Other Chrome events
 
 `onChanged`, `onMoved`, `onRemoved`: **ignored** by design.
 
 ## 6. Extension (`extension/`, WXT, MV3)
 
--   `manifest`: permissions `bookmarks`, `storage`, `alarms`; `host_permissions` for `APP_URL`.
+-   `manifest`: permissions `bookmarks`, `storage`, `alarms`, `contextMenus`; `host_permissions` for `APP_URL`.
 -   **Service worker**:
     -   `onCreated` listener → enqueue `{mode:'live', bookmark}` in outbox → flush.
     -   `chrome.runtime.onStartup` + `onInstalled` → reconciliation sweep: `chrome.bookmarks.getTree()`, flatten (skip folders; capture each bookmark's folder path), send in batches of ~500 as `{mode:'backfill', bookmarks:[...]}` → also flush outbox.
     -   Folder path = `/`-joined ancestor folder titles, e.g. `Bookmarks Bar/Dev/Postgres`.
--   **Outbox** (`chrome.storage.local`): append event → attempt POST → delete on 2xx. On failure keep queued; retry via `chrome.alarms` (e.g. every 5 min) with the queue flushed FIFO. Queue survives worker death and browser restarts.
+-   **Highlights capture**: context-menu item ("Add highlight in Smultronstället", `contexts: ['selection']`, fixed id, re-created idempotently on `onInstalled`). `onClicked`:
+    1.  Read `info.selectionText` (truncated to 10 000 chars) and `info.pageUrl`.
+    2.  `chrome.bookmarks.search({url: pageUrl})`; if not bookmarked, `chrome.bookmarks.create(...)` (default folder, i.e. "Other Bookmarks") and enqueue its live entry DIRECTLY via the shared enqueue helper — don't rely on the `onCreated` listener's relative timing; its independent duplicate enqueue is harmless (live re-save is idempotent). A URL-variant miss in `search` creating a second Chrome bookmark is acceptable — the server dedupes by normalized URL.
+    3.  Enqueue `{kind:'highlight', url: pageUrl, text}` after the bookmark entry, then flush. FIFO ordering guarantees the server sees the bookmark first.
+-   **Outbox** (`chrome.storage.local`): append event → attempt POST → delete on 2xx. On failure keep queued; retry via `chrome.alarms` (e.g. every 5 min) with the queue flushed FIFO. Queue survives worker death and browser restarts. Entries route by kind: sync entries → `/api/sync`, highlight entries → `/api/highlights`. **Poison rule (highlight entries ONLY, approved 2026-08-01)**: a definitive 4xx (anything except 401) drops the entry and continues the flush; 401/5xx/network errors keep it queued. Sync entries keep the original halt-on-any-failure behavior. Pre-existing queued entries (no `kind` field) are treated as sync entries.
 -   **Options page**: fields for API token and API base URL (default prod, overridable for dev). On save, send `POST /api/hello` with the token; show success/failure.
 -   Extension sends **raw** URLs and Chrome's `dateAdded` (ms epoch) as-is.
 
@@ -140,12 +162,16 @@ All inputs Zod-validated; unknown fields rejected.
     ```
     Server normalizes URLs and applies §5 semantics. Returns `{inserted, bumped, skipped}`.
 -   `GET /api/bookmarks?q=&cursor=&archived=` — session auth. No `q`: feed ordered `updated_at desc`, cursor-paginated (50/page), `archived_at is null` unless `archived=1` (`archived=1` returns ONLY archived rows — it is the archived view, not an "include archived" flag). With `q`: FTS (`websearch_to_tsquery('simple', q)`) OR trgm similarity/substring on title + url_normalized, ordered by rank then recency; search returns a single page of 50 with no cursor. (Recorded from implementation, 2026-08-01.)
--   `PATCH /api/bookmarks/:id` — session auth; body subset of `{ title, tags, archived }` (`archived: true|false` sets/clears `archived_at`). Site edits NEVER bump `updated_at` — only live sync does (§5).
+-   `PATCH /api/bookmarks/:id` — session auth; body subset of `{ title, tags, archived }` (`archived: true|false` sets/clears `archived_at`). Site edits NEVER bump `updated_at` — only live captures do (§5).
+-   `POST /api/highlights` — token auth (same as `/api/sync`); body `{ url: string; text: string }` (`text`: `min(1).max(10000)`), unknown fields rejected. Applies §5 highlight semantics (insert + bump + unarchive); `409` when no bookmark matches the normalized URL. Returns the created highlight `{id, bookmarkId, text, createdAt}`.
+-   `DELETE /api/highlights/:id` — session auth; ownership-checked hard delete; `404` when not found/not owned.
+-   `GET /api/bookmarks` responses include each bookmark's `highlights: Array<{id, text, createdAt}>` ordered `created_at asc` (nested — no separate fetch; approved 2026-08-01).
 
 ## 9. UI (site)
 
 -   **Feed**: reverse-chron cards (favicon via Google s2, title, host, relative time, tag chips). SWR polling ~10s. Instant search box filtering via `/api/bookmarks?q=` (debounced ~150ms).
 -   **Row actions**: edit title, edit tags, archive. Archived view toggle; unarchive from there.
+-   **Highlights on cards**: highlight count + expandable list; each highlight has a hard-delete button (no confirmation — low stakes) and links out to the bookmark URL with a generated `#:~:text=` fragment (built at render time from the stored text by `web/src/lib/textFragment.ts`: exact match for short selections ≲150 chars, `textStart,textEnd` word-boundary split for longer ones, percent-encoding `-`/`&`/`,` per the text-fragment spec; unit-tested). Highlight text is NOT in feed search (v1).
 -   **Empty state**: "Install the extension" with pairing instructions if paired but 0 bookmarks; pairing dialog if unpaired (§7).
 -   Dark-mode friendly, keyboard-first search (`/` focuses the box). Keep it minimal — this is a personal tool.
 
@@ -166,6 +192,7 @@ All inputs Zod-validated; unknown fields rejected.
 5. Auth: Google OAuth + `ALLOWED_EMAIL` gate; pairing dialog + token lifecycle.
 6. Feed UI + search + edit/archive.
 7. Deploy: Vercel + domain, load extension unpacked, run initial backfill, verify end-to-end.
+8. Highlights: `highlights` schema + migrations; `/api/highlights` + §5 highlight semantics + nested feed highlights; extension context-menu capture + outbox kind-routing + poison rule; feed UI (expandable list, delete, `#:~:text=` link-out).
 
 ## 12. Out of scope (v1)
 
