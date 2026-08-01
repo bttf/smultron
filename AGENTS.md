@@ -60,6 +60,11 @@ APP_URL=                         # http://localhost:3000 in dev; https://smultro
 5. **supabase-js is for auth only.** All reads/writes go through Drizzle.
 6. **No realtime.** The feed polls via SWR. Do not add Supabase Realtime.
 
+## Coordination
+
+-   **Linear is the cross-session task board.** Create a project if one doesn't exist. One issue per milestone, titled `m<N>: <name>`, assigned to the project. Keep statuses current as you work; when completing a milestone, leave a checkpoint comment: what shipped, test status, anything blocked on the human. A fresh session must be able to orient from Linear + `git log` + SPEC alone.
+-   **Delegate well-scoped tasks to subagents**, matching model/effort to complexity — high effort for sync semantics, normalization, auth/pairing, and outbox logic; low effort for boilerplate, config, and lint/test loops. The orchestrating agent reviews all subagent output against SPEC before committing.
+
 ## Conventions
 
 -   Zod-validate every API route input; reject unknown fields.
