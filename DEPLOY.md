@@ -43,6 +43,13 @@ Fill `web/.env.local` (local dev) — same names go into Vercel later:
 | `ALLOWED_EMAIL` | the one Google account allowed to sign in |
 | `APP_URL` | `http://localhost:3000` locally / `https://smultron.redpine.software` in prod |
 
+`APP_URL` is the OAuth redirect origin ("Sign in with Google" comes back to
+`$APP_URL/auth/callback`). If it is missing the app falls back to the origin the
+browser actually used (`x-forwarded-host`), then `VERCEL_URL` — so a forgotten
+variable no longer sends production sign-ins to `localhost` — but set it
+anyway so the canonical domain is used regardless of which host served the
+request.
+
 ## 4. Vercel
 
 1. Import the repo into Vercel. Framework: Next.js.

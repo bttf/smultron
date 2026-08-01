@@ -3,6 +3,7 @@
 // renders) may set cookies, which signInWithOAuth needs for the PKCE code
 // verifier and signOut needs to clear the session.
 import { redirect } from "next/navigation";
+import { getAppUrl } from "./appUrl";
 import { createSupabaseServerClient } from "./supabase/server";
 
 /**
@@ -11,7 +12,9 @@ import { createSupabaseServerClient } from "./supabase/server";
  */
 export async function signInWithGoogleAction(): Promise<void> {
 	const supabase = await createSupabaseServerClient();
-	const appUrl = process.env.APP_URL ?? "http://localhost:3000";
+	// APP_URL (falling back to the request's own origin) — never a hardcoded
+	// localhost, which would bounce production sign-ins to the dev server.
+	const appUrl = await getAppUrl();
 
 	const { data, error } = await supabase.auth.signInWithOAuth({
 		provider: "google",

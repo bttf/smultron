@@ -3,12 +3,16 @@
 // then gate on ALLOWED_EMAIL: wrong account -> sign out + /not-allowed.
 import { NextResponse } from "next/server";
 import { isEmailAllowed } from "../../../lib/allowedEmail";
+import { getAppUrl } from "../../../lib/appUrl";
 import { createSupabaseServerClient } from "../../../lib/supabase/server";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-	const { origin, searchParams } = new URL(request.url);
+	const { searchParams } = new URL(request.url);
+	// Post-callback redirects go to APP_URL, not `request.url`'s origin, so the
+	// session lands on the canonical domain rather than a deployment host.
+	const origin = await getAppUrl(request.headers);
 	const code = searchParams.get("code");
 
 	if (!code) {
