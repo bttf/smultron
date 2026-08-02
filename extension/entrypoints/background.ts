@@ -89,7 +89,7 @@ async function registerHighlightMenu(): Promise<void> {
 	await browser.contextMenus.removeAll();
 	browser.contextMenus.create({
 		id: HIGHLIGHT_MENU_ID,
-		title: "Add highlight in Smultronstället",
+		title: "🍓 Add highlight in Smultronstället",
 		contexts: ["selection"],
 	});
 }

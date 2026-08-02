@@ -14,7 +14,7 @@ function Header() {
 	return (
 		<header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2.5">
 			<span className="text-sm font-semibold tracking-tight">
-				Smultronstället
+				<span aria-hidden>🍓</span> Smultronstället
 			</span>
 			<nav className="flex items-center gap-3.5 text-[13px]">
 				<Link
