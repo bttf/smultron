@@ -11,12 +11,7 @@ import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
-import {
-	type Bookmark,
-	InvalidCursorError,
-	listBookmarks,
-	patchBookmark,
-} from "./bookmarks";
+import { InvalidCursorError, listBookmarks, patchBookmark } from "./bookmarks";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -117,6 +112,8 @@ describe("listBookmarks — feed", () => {
 		expect(page1.bookmarks).toHaveLength(50);
 		expect(page1.bookmarks[0]?.title).toBe("Page 0");
 		expect(page1.bookmarks[49]?.title).toBe("Page 49");
+		// Every bookmark carries the nested highlights field, [] when none.
+		expect(page1.bookmarks.every((b) => b.highlights.length === 0)).toBe(true);
 		expect(page1.nextCursor).not.toBeNull();
 
 		const page2 = await listBookmarks(db, USER_A, {
@@ -357,7 +354,7 @@ describe("listBookmarks — search", () => {
 });
 
 describe("patchBookmark", () => {
-	async function seedOne(userId: string): Promise<Bookmark> {
+	async function seedOne(userId: string) {
 		await seed([
 			{
 				userId,

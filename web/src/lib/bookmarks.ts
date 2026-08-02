@@ -16,14 +16,30 @@
 //     search branch always returns `nextCursor: null` and caps at one page
 //     (PAGE_SIZE rows), ranked by ts_rank then recency. Good enough for a
 //     single-user tool's search box; deeper search paging is out of scope.
-import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import {
+	and,
+	asc,
+	desc,
+	eq,
+	inArray,
+	isNotNull,
+	isNull,
+	sql,
+} from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { bookmarks } from "../db/schema";
+import { bookmarks, highlights } from "../db/schema";
 
 // Accept any Drizzle Postgres database or transaction (postgres-js in prod,
 // PGlite in tests) — same pattern as SyncDb (sync.ts) / PairingDb (pairing.ts).
 // biome-ignore lint/suspicious/noExplicitAny: variance of Drizzle's driver-specific generics requires it; the schema/relations generics are irrelevant here.
 export type BookmarksDb = PgDatabase<PgQueryResultHKT, any, any>;
+
+/** A bookmark's nested highlight, as returned by GET /api/bookmarks (SPEC §8). */
+export type BookmarkHighlight = {
+	id: number;
+	text: string;
+	createdAt: Date;
+};
 
 export type Bookmark = {
 	id: number;
@@ -34,6 +50,8 @@ export type Bookmark = {
 	createdAt: Date;
 	updatedAt: Date;
 	archivedAt: Date | null;
+	/** Ordered `created_at asc` (SPEC §8); `[]` when none. */
+	highlights: BookmarkHighlight[];
 };
 
 const BOOKMARK_COLUMNS = {
@@ -48,6 +66,56 @@ const BOOKMARK_COLUMNS = {
 };
 
 export const PAGE_SIZE = 50;
+
+/** A page row before its highlights are attached. */
+type BookmarkRow = Omit<Bookmark, "highlights">;
+
+/**
+ * Attaches each row's highlights (SPEC §8: nested, `created_at asc`) with a
+ * single `IN (bookmarkIds)` query for the whole page — no per-row N+1.
+ * Ownership needs no extra filter: the rows are already scoped to the
+ * requesting user, and a highlight's owner always matches its bookmark's.
+ */
+async function withHighlights(
+	db: BookmarksDb,
+	rows: BookmarkRow[],
+): Promise<Bookmark[]> {
+	if (rows.length === 0) {
+		return [];
+	}
+
+	const highlightRows = await db
+		.select({
+			id: highlights.id,
+			bookmarkId: highlights.bookmarkId,
+			text: highlights.text,
+			createdAt: highlights.createdAt,
+		})
+		.from(highlights)
+		.where(
+			inArray(
+				highlights.bookmarkId,
+				rows.map((r) => r.id),
+			),
+		)
+		// id asc as a deterministic tiebreak when created_at collides.
+		.orderBy(asc(highlights.createdAt), asc(highlights.id));
+
+	const byBookmark = new Map<number, BookmarkHighlight[]>();
+	for (const h of highlightRows) {
+		let list = byBookmark.get(h.bookmarkId);
+		if (!list) {
+			list = [];
+			byBookmark.set(h.bookmarkId, list);
+		}
+		list.push({ id: h.id, text: h.text, createdAt: h.createdAt });
+	}
+
+	return rows.map((row) => ({
+		...row,
+		highlights: byBookmark.get(row.id) ?? [],
+	}));
+}
 
 /** Thrown by `listBookmarks` when `cursor` isn't a value it produced. */
 export class InvalidCursorError extends Error {
@@ -153,7 +221,7 @@ export async function listBookmarks(
 		const nextCursor =
 			hasMore && last ? encodeCursor(last.updatedAt, last.id) : null;
 
-		return { bookmarks: page, nextCursor };
+		return { bookmarks: await withHighlights(db, page), nextCursor };
 	}
 
 	// Search: FTS OR trgm similarity OR ILIKE substring, on title +
@@ -182,7 +250,7 @@ export async function listBookmarks(
 		)
 		.limit(PAGE_SIZE);
 
-	return { bookmarks: rows, nextCursor: null };
+	return { bookmarks: await withHighlights(db, rows), nextCursor: null };
 }
 
 export type PatchBookmarkInput = {
@@ -196,15 +264,17 @@ export type PatchBookmarkInput = {
  * `archived: true` sets `archived_at = now()`; `false` clears it to null.
  *
  * CRITICAL (AGENTS.md Hard rule #1): never touches `updated_at` — only live
- * sync (`applySync`, sync.ts) bumps it. Returns null when no row matches
- * (wrong id or wrong owner) — the route turns that into a 404.
+ * captures (`applySync` live mode, `applyHighlight`) bump it. Returns null
+ * when no row matches (wrong id or wrong owner) — the route turns that into
+ * a 404. Returns the bare row WITHOUT nested highlights: SPEC §8 nests them
+ * only in GET /api/bookmarks responses.
  */
 export async function patchBookmark(
 	db: BookmarksDb,
 	userId: string,
 	id: number,
 	input: PatchBookmarkInput,
-): Promise<Bookmark | null> {
+): Promise<BookmarkRow | null> {
 	const set: { title?: string; tags?: string[]; archivedAt?: Date | null } = {};
 	if (input.title !== undefined) {
 		set.title = input.title;

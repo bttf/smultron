@@ -146,7 +146,7 @@ Server normalizes the URL and looks up `smultron.bookmarks` by `(user_id, url_no
 
 ### API auth
 
--   `/api/sync` and `/api/hello`: `Authorization: Bearer <token>` → sha256 → lookup in `api_tokens` → resolve `user_id`. 401 otherwise.
+-   `/api/sync`, `/api/hello`, and `POST /api/highlights`: `Authorization: Bearer <token>` → sha256 → lookup in `api_tokens` → resolve `user_id`. 401 otherwise. Only `/api/sync` + `/api/hello` are excluded from the proxy matcher; `/api/highlights` stays matched because the same path carries the session-authed DELETE (harmless for the POST — the proxy never redirects `/api/*`).
 -   `/api/bookmarks*`: Supabase session cookie (site user).
 
 ## 8. API
