@@ -115,6 +115,16 @@ function formatTimestamp(date: Date, now: Date = new Date()): string {
 	return `${base} ${hh}:${mm}`;
 }
 
+// Date only, no time: "Aug 1" in-year, "Aug 1 2025" outside it. Used on the
+// compact mobile row, which drops the time from `formatTimestamp` to save
+// horizontal space.
+function formatDate(date: Date, now: Date = new Date()): string {
+	const base = `${MONTHS[date.getMonth()]} ${date.getDate()}`;
+	return date.getFullYear() !== now.getFullYear()
+		? `${base} ${date.getFullYear()}`
+		: base;
+}
+
 export function Feed() {
 	const [rawQuery, setRawQuery] = useState("");
 	const [query, setQuery] = useState("");
@@ -754,7 +764,12 @@ function LogRow({
 				>
 					{expanded ? "▾" : "▸"}
 				</span>
-				<span className="w-[88px] shrink-0 whitespace-nowrap font-mono text-[11px] text-muted-foreground">
+				{/* Compact mobile row shows the date only; desktop keeps the full
+				    timestamp with time. */}
+				<span className="w-[52px] shrink-0 whitespace-nowrap font-mono text-[11px] text-muted-foreground md:hidden">
+					{formatDate(new Date(bookmark.updatedAt))}
+				</span>
+				<span className="hidden w-[88px] shrink-0 whitespace-nowrap font-mono text-[11px] text-muted-foreground md:inline">
 					{formatTimestamp(new Date(bookmark.updatedAt))}
 				</span>
 				{host ? <Favicon host={host} /> : null}
@@ -807,20 +822,11 @@ function LogRow({
 						})}
 					</span>
 				) : null}
-				<button
-					type="button"
-					onClick={(e) => {
-						e.stopPropagation();
-						onPatch(bookmark.id, { archived: !archivedView });
-					}}
-					className="shrink-0 px-1 py-0.5 text-[11px] text-[var(--log-ghost)] hover:text-foreground"
-				>
-					{archivedView ? "Restore" : "Archive"}
-				</button>
 			</div>
 			{expanded ? (
 				<ExpandedPanel
 					bookmark={bookmark}
+					archivedView={archivedView}
 					autoFocusTags={autoFocusTags}
 					onPatch={onPatch}
 					onDeleteHighlight={onDeleteHighlight}
@@ -832,11 +838,13 @@ function LogRow({
 
 function ExpandedPanel({
 	bookmark,
+	archivedView,
 	autoFocusTags,
 	onPatch,
 	onDeleteHighlight,
 }: {
 	bookmark: ApiBookmark;
+	archivedView: boolean;
 	autoFocusTags: boolean;
 	onPatch: PatchFn;
 	onDeleteHighlight: (bookmarkId: number, highlightId: number) => Promise<void>;
@@ -899,6 +907,15 @@ function ExpandedPanel({
 					</div>
 				</Fragment>
 			) : null}
+			{/* Archive/restore lives only in the expanded panel — the row omits it
+			    to stay compact across all viewports. */}
+			<button
+				type="button"
+				onClick={() => onPatch(bookmark.id, { archived: !archivedView })}
+				className="self-start rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)]"
+			>
+				{archivedView ? "Restore" : "Archive"}
+			</button>
 		</div>
 	);
 }
