@@ -12,6 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
 import {
+	addBookmark,
 	getBookmarkByUrl,
 	InvalidCursorError,
 	listBookmarks,
@@ -1013,5 +1014,80 @@ describe("by-url lookup + patch (m10)", () => {
 
 		const after = await rawRow(before.id);
 		expect(after?.title).toBe("Article");
+	});
+});
+
+// SPEC §5 web add (m11): insert with hostname-autofilled title, or
+// bump+unarchive ONLY on normalized-URL conflict — the third and last
+// updated_at-bumping path (with applySync live mode and applyHighlight).
+describe("addBookmark", () => {
+	it("inserts a new bookmark: title from hostname (www. stripped), no tags", async () => {
+		const { bookmark, created } = await addBookmark(
+			db,
+			USER_A,
+			"https://www.example.com/article/",
+		);
+
+		expect(created).toBe(true);
+		expect(bookmark.title).toBe("example.com");
+		expect(bookmark.url).toBe("https://www.example.com/article/");
+		expect(bookmark.urlNormalized).toBe("https://www.example.com/article");
+		expect(bookmark.tags).toEqual([]);
+		expect(bookmark.note).toBeNull();
+		expect(bookmark.archivedAt).toBeNull();
+		expect(bookmark.updatedAt).toEqual(bookmark.createdAt);
+
+		const raw = await rawRow(bookmark.id);
+		expect(raw?.chromeId).toBeNull();
+	});
+
+	it("bumps + unarchives on normalized-URL conflict, touching nothing else", async () => {
+		const old = new Date("2026-01-01T00:00:00.000Z");
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/a",
+				title: "Kept title",
+				tags: ["kept-tag"],
+				note: "kept note",
+				createdAt: old,
+				updatedAt: old,
+				archivedAt: old,
+			},
+		]);
+
+		// Messy re-add: fragment + utm + trailing slash + uppercase host all
+		// normalize down to the seeded url_normalized.
+		const { bookmark, created } = await addBookmark(
+			db,
+			USER_A,
+			"https://EXAMPLE.com/a/?utm_source=x#frag",
+		);
+
+		expect(created).toBe(false);
+		expect(bookmark.updatedAt.getTime()).toBeGreaterThan(old.getTime());
+		expect(bookmark.archivedAt).toBeNull();
+		expect(bookmark.title).toBe("Kept title");
+		expect(bookmark.tags).toEqual(["kept-tag"]);
+		expect(bookmark.note).toBe("kept note");
+		expect(bookmark.url).toBe("https://example.com/a");
+		expect(bookmark.createdAt).toEqual(old);
+	});
+
+	it("dedupes per user: the same URL for another user is a fresh insert", async () => {
+		const a = await addBookmark(db, USER_A, "https://example.com/shared");
+		const b = await addBookmark(db, USER_B, "https://example.com/shared");
+
+		expect(a.created).toBe(true);
+		expect(b.created).toBe(true);
+		expect(b.bookmark.id).not.toBe(a.bookmark.id);
+	});
+
+	it("stores unparseable input with an empty title (route rejects these first)", async () => {
+		const { bookmark, created } = await addBookmark(db, USER_A, "not a url");
+
+		expect(created).toBe(true);
+		expect(bookmark.title).toBe("");
+		expect(bookmark.urlNormalized).toBe("not a url");
 	});
 });

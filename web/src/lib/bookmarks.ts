@@ -362,6 +362,55 @@ export async function listBookmarks(
 	};
 }
 
+/**
+ * Web-UI add (POST /api/bookmarks, m11): upsert on `(user_id, url_normalized)`
+ * from a RAW URL (SPEC §5 web add). Insert: `created_at = updated_at = now()`,
+ * title autofilled from the hostname (`www.` stripped), no tags, no chrome_id.
+ * Conflict (already saved): bump `updated_at` + unarchive ONLY —
+ * title/tags/url/chrome_id/created_at stay untouched; unlike a Chrome live
+ * re-save there is no fresher title/spelling to trust. A deliberate user save
+ * is a live capture, so this path is allowed to bump `updated_at` (Hard rule
+ * #1 lists it alongside `applySync` live mode and `applyHighlight`).
+ */
+export async function addBookmark(
+	db: BookmarksDb,
+	userId: string,
+	rawUrl: string,
+): Promise<{ bookmark: BookmarkRow; created: boolean }> {
+	const now = new Date();
+	let host = "";
+	try {
+		host = new URL(rawUrl).hostname;
+	} catch {
+		// Unparseable input still stores (normalizeUrl falls back to the
+		// trimmed original) — it just gets no autofilled title. The route
+		// rejects these before we get here; this is belt-and-braces.
+	}
+
+	const rows = await db
+		.insert(bookmarks)
+		.values({
+			userId,
+			url: rawUrl,
+			urlNormalized: normalizeUrl(rawUrl),
+			title: host.replace(/^www\./, ""),
+			tags: [],
+			createdAt: now,
+			updatedAt: now,
+		})
+		.onConflictDoUpdate({
+			target: [bookmarks.userId, bookmarks.urlNormalized],
+			set: { updatedAt: sql`now()`, archivedAt: null },
+		})
+		// xmax = 0 distinguishes a fresh insert from a conflict-update (same
+		// trick as applySync): an updated row carries the old version's
+		// locking txid in xmax, a brand-new row has xmax = 0.
+		.returning({ ...BOOKMARK_COLUMNS, wasInserted: sql<boolean>`(xmax = 0)` });
+
+	const { wasInserted, ...bookmark } = rows[0];
+	return { bookmark, created: wasInserted };
+}
+
 export type PatchBookmarkInput = {
 	title?: string;
 	tags?: string[];

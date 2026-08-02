@@ -5,10 +5,18 @@
 // semantics — see bookmarks.ts) and each value must be non-empty; unknown
 // params are ignored since `URLSearchParams` access is by name, not by
 // iterating the whole query string.
+//
+// POST /api/bookmarks — SPEC §8 (m11 web add). Session-authed; body
+// `{ url }`, unknown fields rejected. Applies the §5 web-add upsert
+// (insert with hostname-autofilled title, or bump+unarchive on conflict).
 import { z } from "zod";
 import { db } from "../../../db";
 import { getAuthedUser } from "../../../lib/auth";
-import { InvalidCursorError, listBookmarks } from "../../../lib/bookmarks";
+import {
+	addBookmark,
+	InvalidCursorError,
+	listBookmarks,
+} from "../../../lib/bookmarks";
 
 // Node runtime: the postgres driver needs it.
 export const runtime = "nodejs";
@@ -56,4 +64,53 @@ export async function GET(request: Request) {
 		}
 		throw err;
 	}
+}
+
+// Mirrors the title cap on PATCH (url column has no DB limit; this is a
+// sanity bound, not a spec constant).
+const postBodySchema = z.strictObject({
+	url: z.string().min(1).max(2048),
+});
+
+export async function POST(request: Request) {
+	const user = await getAuthedUser();
+	if (!user) {
+		return Response.json({ error: "unauthorized" }, { status: 401 });
+	}
+
+	let body: unknown;
+	try {
+		body = await request.json();
+	} catch {
+		return Response.json({ error: "invalid_json" }, { status: 400 });
+	}
+
+	const parsed = postBodySchema.safeParse(body);
+	if (!parsed.success) {
+		return Response.json(
+			{ error: "invalid_body", issues: parsed.error.issues },
+			{ status: 400 },
+		);
+	}
+
+	// The UI prepends https:// to scheme-less input before sending; the server
+	// still requires a parseable http(s) URL with a dotted hostname so junk
+	// never becomes a row (SPEC §8).
+	const raw = parsed.data.url.trim();
+	let parsedUrl: URL | null = null;
+	try {
+		parsedUrl = new URL(raw);
+	} catch {
+		parsedUrl = null;
+	}
+	if (
+		!parsedUrl ||
+		(parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") ||
+		!parsedUrl.hostname.includes(".")
+	) {
+		return Response.json({ error: "invalid_url" }, { status: 400 });
+	}
+
+	const { bookmark, created } = await addBookmark(db, user.id, raw);
+	return Response.json({ bookmark, created }, { status: created ? 201 : 200 });
 }

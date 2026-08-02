@@ -91,6 +91,7 @@
 		0.51 0.2 8
 	); /* strawberry crimson (≈#bb0a50) — text/border accent */
 	--log-accent-solid: oklch(0.51 0.2 8); /* solid fills w/ white text */
+	--log-accent-solid-hover: oklch(0.56 0.2 8); /* +Add / composer Save hover */
 	--log-rule: oklch(0.945 0 0); /* row separators */
 	--log-hover: oklch(0.972 0 0); /* row hover / expanded row bg */
 	--log-panel: oklch(0.985 0 0); /* expanded panel bg */
@@ -152,6 +153,7 @@
 		   illegible on the 0.145 bg; solid fills keep the deep crimson. */
 		--log-accent: oklch(0.68 0.158 8); /* ≈#e76986 */
 		--log-accent-solid: oklch(0.51 0.2 8);
+		--log-accent-solid-hover: oklch(0.56 0.2 8); /* mock's hover fill */
 		--log-rule: oklch(1 0 0 / 8%); /* mock --border2 */
 		--log-hover: oklch(0.25 0 0);
 		--log-panel: oklch(0.18 0 0);
@@ -168,6 +170,17 @@
 		--log-strong-border: oklch(1 0 0 / 25%);
 		--log-btn: oklch(0.42 0 0); /* mock --savebg */
 		--log-btn-hover: oklch(0.5 0 0);
+	}
+}
+
+/* Row flash after a web add (feed.tsx, animate-[rowflash_…]): starts from the
+   facet-active tint so both schemes flash in the accent's hue family. */
+@keyframes rowflash {
+	from {
+		background-color: var(--log-facet-active);
+	}
+	to {
+		background-color: transparent;
 	}
 }
 

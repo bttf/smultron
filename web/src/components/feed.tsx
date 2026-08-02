@@ -124,6 +124,17 @@ export function Feed() {
 	const [facetFilter, setFacetFilter] = useState("");
 	// Single expanded row at a time (mock semantics); null = all collapsed.
 	const [expanded, setExpanded] = useState<number | null>(null);
+	// m11 add composer (mock `Smultron Feed - Add Bookmark`): the toolbar's
+	// "+ Add" toggles an inline URL bar pinned above the log.
+	const [composerOpen, setComposerOpen] = useState(false);
+	const [urlDraft, setUrlDraft] = useState("");
+	const [addError, setAddError] = useState<string | null>(null);
+	// Row to flash after an add (new or resurfaced duplicate)…
+	const [flashId, setFlashId] = useState<number | null>(null);
+	// …and, for a NEWLY created bookmark only, the row whose expanded panel
+	// should focus its add-tag input (mock: `focusLater(tagRef)`).
+	const [justAddedId, setJustAddedId] = useState<number | null>(null);
+	const submittingRef = useRef(false);
 	const searchInputRef = useRef<HTMLInputElement>(null);
 	const logRef = useRef<HTMLDivElement>(null);
 	const sentinelRef = useRef<HTMLDivElement>(null);
@@ -359,6 +370,76 @@ export function Feed() {
 		setExpanded(null);
 	}
 
+	function toggleComposer() {
+		// Both opening and closing reset the draft + error (mock semantics).
+		setUrlDraft("");
+		setAddError(null);
+		setComposerOpen((open) => !open);
+	}
+
+	function closeComposer() {
+		setUrlDraft("");
+		setAddError(null);
+		setComposerOpen(false);
+	}
+
+	async function submitAdd() {
+		let raw = urlDraft.trim();
+		if (!raw || submittingRef.current) {
+			return;
+		}
+		// Mock behavior: scheme-less input gets https:// prepended, then must
+		// parse with a dotted hostname. The server re-validates identically.
+		if (!/^https?:\/\//i.test(raw)) {
+			raw = `https://${raw}`;
+		}
+		let parsedUrl: URL | null = null;
+		try {
+			parsedUrl = new URL(raw);
+		} catch {
+			parsedUrl = null;
+		}
+		if (!parsedUrl?.hostname.includes(".")) {
+			setAddError("not a valid URL");
+			return;
+		}
+
+		submittingRef.current = true;
+		try {
+			const res = await fetch("/api/bookmarks", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ url: raw }),
+			});
+			if (!res.ok) {
+				setAddError(`save failed (${res.status})`);
+				return;
+			}
+			const { bookmark, created } = (await res.json()) as {
+				bookmark: { id: number };
+				created: boolean;
+			};
+
+			// Mock semantics: close the composer, land in the live view (search
+			// and tag filters are kept), flash the row and open its panel. The
+			// revalidated page puts the row on top (its updated_at is now).
+			closeComposer();
+			setArchived(false);
+			setExpanded(bookmark.id);
+			setJustAddedId(created ? bookmark.id : null);
+			setFlashId(bookmark.id);
+			setTimeout(
+				() => setFlashId((prev) => (prev === bookmark.id ? null : prev)),
+				2000,
+			);
+			// If we were in the archived view, the key change refetches anyway
+			// and this bound mutate hits the old key — a harmless extra fetch.
+			mutate();
+		} finally {
+			submittingRef.current = false;
+		}
+	}
+
 	const facets = data?.facets ?? [];
 	const total = data?.total ?? 0;
 	const matching = data?.matching ?? 0;
@@ -392,6 +473,16 @@ export function Feed() {
 					)}
 				>
 					{archived ? "Viewing archived" : "Archived"}
+				</button>
+				<button
+					type="button"
+					onClick={toggleComposer}
+					className="flex shrink-0 items-center gap-[5px] rounded-md bg-[var(--log-accent-solid)] px-[11px] py-[5px] text-xs font-medium text-white hover:bg-[var(--log-accent-solid-hover)]"
+				>
+					<span aria-hidden className="font-mono text-xs leading-none">
+						+
+					</span>{" "}
+					Add
 				</button>
 			</div>
 
@@ -451,6 +542,58 @@ export function Feed() {
 				</aside>
 
 				<div ref={logRef} className="min-w-0 flex-1 overflow-y-auto">
+					{composerOpen ? (
+						<div className="flex items-center gap-2.5 border-b border-[var(--log-rule)] bg-[var(--log-panel)] px-4 py-[7px]">
+							<span
+								aria-hidden
+								className="w-2.5 shrink-0 font-mono text-xs text-[var(--log-accent)]"
+							>
+								+
+							</span>
+							<input
+								// biome-ignore lint/a11y/noAutofocus: user just opened the composer to type a URL — focus is expected.
+								autoFocus
+								type="text"
+								value={urlDraft}
+								onChange={(e) => {
+									setUrlDraft(e.target.value);
+									setAddError(null);
+								}}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") {
+										e.preventDefault();
+										submitAdd();
+									} else if (e.key === "Escape") {
+										e.preventDefault();
+										closeComposer();
+									}
+								}}
+								placeholder="Paste a URL and press ⏎"
+								spellCheck={false}
+								className="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-[5px] font-mono text-[12.5px] outline-none focus:border-[var(--log-accent)]"
+							/>
+							{addError ? (
+								<span className="shrink-0 font-mono text-[11px] text-destructive">
+									{addError}
+								</span>
+							) : null}
+							<button
+								type="button"
+								onClick={submitAdd}
+								className="shrink-0 rounded-md bg-[var(--log-accent-solid)] px-3 py-[5px] text-[11.5px] font-medium text-white hover:bg-[var(--log-accent-solid-hover)]"
+							>
+								Save
+							</button>
+							<button
+								type="button"
+								onClick={closeComposer}
+								className="shrink-0 px-1 py-0.5 text-[11px] text-[var(--log-faint)] hover:text-foreground"
+							>
+								esc
+							</button>
+						</div>
+					) : null}
+
 					{error ? (
 						<p className="px-4 py-3 font-mono text-xs text-destructive">
 							Couldn&apos;t load bookmarks: {error.message}
@@ -475,10 +618,16 @@ export function Feed() {
 									bookmark={b}
 									archivedView={archived}
 									expanded={expanded === b.id}
+									flash={flashId === b.id}
+									autoFocusTags={justAddedId === b.id}
 									activeTags={activeTags}
-									onToggleExpand={() =>
-										setExpanded((prev) => (prev === b.id ? null : b.id))
-									}
+									onToggleExpand={() => {
+										// A manual toggle ends the just-added
+										// affordance — re-expanding later must
+										// not steal focus into the tag input.
+										setJustAddedId(null);
+										setExpanded((prev) => (prev === b.id ? null : b.id));
+									}}
 									onToggleTag={toggleTag}
 									onPatch={patchRow}
 									onDeleteHighlight={deleteHighlight}
@@ -550,6 +699,8 @@ function LogRow({
 	bookmark,
 	archivedView,
 	expanded,
+	flash,
+	autoFocusTags,
 	activeTags,
 	onToggleExpand,
 	onToggleTag,
@@ -559,6 +710,10 @@ function LogRow({
 	bookmark: ApiBookmark;
 	archivedView: boolean;
 	expanded: boolean;
+	/** Play the rowflash animation (just added / resurfaced via the composer). */
+	flash: boolean;
+	/** Focus the expanded panel's add-tag input (newly created via the composer). */
+	autoFocusTags: boolean;
 	activeTags: string[];
 	onToggleExpand: () => void;
 	onToggleTag: (tag: string) => void;
@@ -587,6 +742,9 @@ function LogRow({
 				className={cn(
 					"flex cursor-pointer items-center gap-2.5 border-b border-[var(--log-rule)] px-4 py-[5px] hover:bg-[var(--log-hover)]",
 					expanded && "bg-[var(--log-hover)]",
+					// Keyframes in globals.css; the animation's background wins
+					// over the classes above for its 1.4s, then hands back.
+					flash && "animate-[rowflash_1.4s_ease-out]",
 				)}
 			>
 				<span
@@ -662,6 +820,7 @@ function LogRow({
 			{expanded ? (
 				<ExpandedPanel
 					bookmark={bookmark}
+					autoFocusTags={autoFocusTags}
 					onPatch={onPatch}
 					onDeleteHighlight={onDeleteHighlight}
 				/>
@@ -672,10 +831,12 @@ function LogRow({
 
 function ExpandedPanel({
 	bookmark,
+	autoFocusTags,
 	onPatch,
 	onDeleteHighlight,
 }: {
 	bookmark: ApiBookmark;
+	autoFocusTags: boolean;
 	onPatch: PatchFn;
 	onDeleteHighlight: (bookmarkId: number, highlightId: number) => Promise<void>;
 }) {
@@ -710,6 +871,7 @@ function ExpandedPanel({
 				</span>
 				<TagChips
 					tags={bookmark.tags}
+					autoFocusInput={autoFocusTags}
 					onSave={(tags) => onPatch(bookmark.id, { tags })}
 				/>
 			</div>
@@ -832,9 +994,12 @@ function EditableTitle({
 // there is no local tags state to drift; only the add-input draft is local.
 function TagChips({
 	tags,
+	autoFocusInput,
 	onSave,
 }: {
 	tags: string[];
+	/** m11: a bookmark just created via the composer opens ready to tag. */
+	autoFocusInput: boolean;
 	onSave: (next: string[]) => void;
 }) {
 	const [draft, setDraft] = useState("");
@@ -873,6 +1038,8 @@ function TagChips({
 				</span>
 			))}
 			<input
+				// biome-ignore lint/a11y/noAutofocus: only set right after the user added a bookmark via the composer — tagging is the expected next action.
+				autoFocus={autoFocusInput}
 				value={draft}
 				onChange={(e) => setDraft(e.target.value)}
 				onKeyDown={(e) => {
