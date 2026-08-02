@@ -10,6 +10,7 @@ import useSWR from "swr";
 import { relativeTime } from "../lib/relativeTime";
 import { textFragmentUrl } from "../lib/textFragment";
 import { cn } from "../lib/utils";
+import { ArticleSection } from "./article";
 
 type ApiHighlight = {
 	id: number;
@@ -879,6 +880,8 @@ function ExpandedPanel({
 				note={bookmark.note ?? null}
 				onSave={(note) => onPatch(bookmark.id, { note })}
 			/>
+			{/* Mounted only for the open row, so collapsed rows never fetch. */}
+			<ArticleSection bookmarkId={bookmark.id} />
 			{bookmark.highlights.length > 0 ? (
 				<Fragment>
 					<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">

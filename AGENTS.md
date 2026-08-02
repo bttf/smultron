@@ -56,15 +56,22 @@ DATABASE_URL=                    # pooled connection (port 6543) — runtime que
 DIRECT_URL=                      # direct connection (port 5432) — migrations only
 ALLOWED_EMAIL=                   # optional: the single Google account allowed to sign in; unset = any Google account (open multi-user)
 APP_URL=                         # http://localhost:3000 in dev; https://smultron.redpine.software in prod
+
+# Read-aloud pipeline (m12, SPEC §10) — all three required for scrape + listen
+FIRECRAWL_API_KEY=               # Firecrawl v2 /scrape
+ANTHROPIC_API_KEY=               # transcript clean-up + summary passes (claude-opus-5)
+OPENAI_API_KEY=                  # text-to-speech (gpt-4o-mini-tts)
+TTS_VOICE=                       # optional: OpenAI voice id, default `sage`
+ARTICLE_AUDIO_BUCKET=            # optional: Supabase Storage bucket, default `article-audio`
 ```
 
 ## Hard rules (do not violate)
 
-1. **Backfill/reconciliation never bumps `updated_at`.** Only live captures bump: `chrome.bookmarks.onCreated` events, web adds (`POST /api/bookmarks`), and highlight inserts (`/api/highlights`). Backfill upserts are `ON CONFLICT DO NOTHING`. See SPEC §Sync semantics.
+1. **Backfill/reconciliation never bumps `updated_at`.** Only live captures bump: `chrome.bookmarks.onCreated` events, web adds (`POST /api/bookmarks`), and highlight inserts (`/api/highlights`). Backfill upserts are `ON CONFLICT DO NOTHING`. The article pipeline (SPEC §10) is NOT a live capture and must never touch `bookmarks.updated_at` — `articles.updated_at` is a separate progress clock. See SPEC §Sync semantics.
 2. **All data access goes through API routes using the service-role connection.** The `smultron` schema is NOT exposed to PostgREST; RLS is enabled with no anon policies. Never query the DB from the client; never ship the service-role key client-side.
 3. **URL normalization happens server-side only** — one implementation in `web/`, unit-tested. The extension always sends raw URLs.
 4. **Soft deletes only (bookmarks).** Never `DELETE` a bookmark row; set/clear `archived_at`. Highlights are hard-delete by design (SPEC §3).
-5. **supabase-js is for auth only.** All reads/writes go through Drizzle.
+5. **supabase-js is for auth only.** All reads/writes go through Drizzle. Article audio blobs live in Supabase Storage, reached over the Storage REST API with the service-role key (`web/src/lib/storage.ts`) — deliberately not a second supabase-js client, so this rule needs no exception.
 6. **No realtime.** The feed polls via SWR. Do not add Supabase Realtime.
 
 ## Coordination
@@ -76,5 +83,5 @@ APP_URL=                         # http://localhost:3000 in dev; https://smultro
 
 -   Zod-validate every API route input; reject unknown fields.
 -   Keep migrations in `web/drizzle/` under version control; schema changes go through `db:generate`, never hand-edited SQL against prod.
--   Vitest coverage is required for: URL normalization, upsert/bump/unarchive semantics, folder-tag derivation (`folderTags`) incl. the 0004 data migration, outbox queue behavior (incl. kind-routing + poison rule), highlight insert/bump/unarchive/409 semantics, the `textFragment` helper, note patch semantics (trim→NULL, never bumps `updated_at`) + by-url lookup/patch user scoping, web-add semantics (`addBookmark`: hostname title autofill, bump+unarchive-only conflict, per-user dedupe).
+-   Vitest coverage is required for: URL normalization, upsert/bump/unarchive semantics, folder-tag derivation (`folderTags`) incl. the 0004 data migration, outbox queue behavior (incl. kind-routing + poison rule), highlight insert/bump/unarchive/409 semantics, the `textFragment` helper, note patch semantics (trim→NULL, never bumps `updated_at`) + by-url lookup/patch user scoping, web-add semantics (`addBookmark`: hostname title autofill, bump+unarchive-only conflict, per-user dedupe), the boundary-aware chunker (`chunkText`: limit never exceeded, separator fallback order, losslessness, the 4096-char TTS cap), article job semantics (`claimArticleRun`/`runArticleJob`: status machine, resume-skips-completed-steps, reset, stale-run re-claim, user scoping, and that NOTHING in the pipeline bumps `bookmarks.updated_at`), and TTS segmentation (per-request cap, ordered concatenation under out-of-order responses, all-or-nothing failure).
 -   Small PRs / commits scoped to one milestone step (see SPEC §Milestones).

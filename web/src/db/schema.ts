@@ -9,6 +9,7 @@ import { sql } from "drizzle-orm";
 import {
 	bigint,
 	index,
+	integer,
 	pgSchema,
 	text,
 	timestamp,
@@ -70,6 +71,103 @@ export const apiTokens = smultron
 			.notNull()
 			.default(sql`now()`),
 	})
+	.enableRLS();
+
+/**
+ * Article pipeline status (SPEC §10). Terminal states are `ready` and
+ * `failed`; everything else means a run is (or was) in flight.
+ */
+export const ARTICLE_STATUSES = [
+	"queued",
+	"scraping",
+	"cleaning",
+	"summarizing",
+	"ready",
+	"failed",
+] as const;
+
+export type ArticleStatus = (typeof ARTICLE_STATUSES)[number];
+
+// Stored as plain `text` rather than a pg enum: the status set is expected to
+// evolve, and a text column keeps that a code change instead of a migration
+// with an ALTER TYPE. The TS union above is the authority.
+export const articles = smultron
+	.table(
+		"articles",
+		{
+			id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+			userId: uuid("user_id").notNull(),
+			// One article per bookmark (unique below) — re-scraping overwrites.
+			bookmarkId: bigint("bookmark_id", { mode: "number" })
+				.notNull()
+				.references(() => bookmarks.id),
+			status: text().notNull().default("queued"),
+			// Human-readable failure reason; set only alongside status='failed'.
+			error: text(),
+			// Firecrawl's resolved sourceURL (may differ from the bookmark's
+			// after redirects) and the article title it extracted.
+			sourceUrl: text("source_url"),
+			title: text(),
+			// Raw Firecrawl markdown. Kept so a re-run can resume at the clean
+			// pass without paying for another scrape (SPEC §10 resume rules).
+			rawMarkdown: text("raw_markdown"),
+			// Cleaned spoken prose — the read-aloud text and the summary's input.
+			transcript: text(),
+			// LLM-generated spoken summary of the transcript.
+			summary: text(),
+			// Word count of `transcript`; null until the clean pass completes.
+			wordCount: integer("word_count"),
+			createdAt: timestamp("created_at", { withTimezone: true })
+				.notNull()
+				.default(sql`now()`),
+			// The ARTICLE's own progress clock — used for stale-run detection
+			// (SPEC §10). Entirely separate from bookmarks.updated_at, which the
+			// article pipeline must never touch (Hard rule #1).
+			updatedAt: timestamp("updated_at", { withTimezone: true })
+				.notNull()
+				.default(sql`now()`),
+		},
+		(table) => [
+			unique().on(table.bookmarkId),
+			// Resolving a bookmark's article, ownership-scoped.
+			index("articles_user_id_bookmark_id_idx").on(
+				table.userId,
+				table.bookmarkId,
+			),
+		],
+	)
+	.enableRLS();
+
+// Synthesized audio for one article, per (kind, voice). Rows are a CACHE over
+// Supabase Storage: `storage_path` points at the object, and the row exists
+// only once the upload succeeded.
+export const articleAudio = smultron
+	.table(
+		"article_audio",
+		{
+			id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+			userId: uuid("user_id").notNull(),
+			articleId: bigint("article_id", { mode: "number" })
+				.notNull()
+				.references(() => articles.id),
+			// 'summary' | 'transcript' — which text was spoken.
+			kind: text().notNull(),
+			// OpenAI voice id the audio was rendered with; part of the cache key
+			// so changing the voice re-synthesizes instead of serving the old one.
+			voice: text().notNull(),
+			// Object path WITHIN the audio bucket (bucket name is env config).
+			storagePath: text("storage_path").notNull(),
+			byteSize: integer("byte_size").notNull(),
+			// Characters spoken and how many TTS requests it took (the OpenAI
+			// speech endpoint caps input at 4096 chars — see lib/tts.ts).
+			charCount: integer("char_count").notNull(),
+			segmentCount: integer("segment_count").notNull(),
+			createdAt: timestamp("created_at", { withTimezone: true })
+				.notNull()
+				.default(sql`now()`),
+		},
+		(table) => [unique().on(table.articleId, table.kind, table.voice)],
+	)
 	.enableRLS();
 
 export const highlights = smultron

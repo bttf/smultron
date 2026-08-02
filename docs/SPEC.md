@@ -57,12 +57,50 @@ create table smultron.highlights (
   text         text not null,            -- immutable snippet; no edit support
   created_at   timestamptz not null default now()
 );
+
+-- m12: scraped article + read-aloud pipeline (§10). One row per bookmark.
+create table smultron.articles (
+  id            bigint generated always as identity primary key,
+  user_id       uuid not null references auth.users(id),
+  bookmark_id   bigint not null references smultron.bookmarks(id) unique,
+  status        text not null default 'queued',  -- queued|scraping|cleaning|summarizing|ready|failed
+  error         text,                    -- failure reason, shown verbatim in the UI
+  source_url    text,                    -- Firecrawl's resolved URL (post-redirect)
+  title         text,                    -- title Firecrawl extracted
+  raw_markdown  text,                    -- Firecrawl output; kept so a re-run can skip the scrape
+  transcript    text,                    -- cleaned spoken prose
+  summary       text,                    -- LLM spoken summary of the transcript
+  word_count    integer,                 -- words in `transcript`
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()  -- the ARTICLE's progress clock (§10)
+);
+
+-- Synthesized audio, cached per (article, kind, voice).
+create table smultron.article_audio (
+  id            bigint generated always as identity primary key,
+  user_id       uuid not null references auth.users(id),
+  article_id    bigint not null references smultron.articles(id),
+  kind          text not null,           -- 'summary' | 'transcript'
+  voice         text not null,           -- OpenAI voice id; part of the cache key
+  storage_path  text not null,           -- object path within the audio bucket
+  byte_size     integer not null,
+  char_count    integer not null,
+  segment_count integer not null,        -- TTS requests it took (4096-char cap, §10)
+  created_at    timestamptz not null default now(),
+  unique (article_id, kind, voice)
+);
 ```
+
+`articles.updated_at` is **not** a feed sort key and has nothing to do with `bookmarks.updated_at` — it is the article run's own progress clock, used only for stale-run detection (§10). The article pipeline never writes `bookmarks.updated_at` (Hard rule #1): scraping is a site-initiated enrichment, not a live capture, and must not resurface a bookmark.
+
+`status` is plain `text`, not a pg enum — the status set is expected to evolve and that keeps it a code change rather than an `ALTER TYPE` migration. The TS union `ARTICLE_STATUSES` in `db/schema.ts` is the authority; an unrecognized value read back is treated as `failed`.
 
 Highlights are **hard-deleted** (the soft-delete rule is scoped to bookmarks): a highlight is a low-stakes, easily-recreated capture, not deliberate curation. Duplicate texts per bookmark are allowed (no unique constraint).
 
 Indexes:
 
+-   `unique (bookmark_id)` on `articles` (one article per bookmark) and `btree (user_id, bookmark_id)` for the ownership-scoped lookup
+-   `unique (article_id, kind, voice)` on `article_audio`
 -   `unique (user_id, url_normalized)` (above)
 -   GIN on `to_tsvector('simple', title || ' ' || url_normalized || ' ' || coalesce(note, ''))` for FTS (note included since m10 — the query expression in `bookmarks.ts` must stay byte-identical or the index goes unused)
 -   `gin (title gin_trgm_ops)` and `gin (url_normalized gin_trgm_ops)` via `pg_trgm` for fuzzy/substring
@@ -179,6 +217,9 @@ All inputs Zod-validated; unknown fields rejected.
 -   `POST /api/highlights` — token auth (same as `/api/sync`); body `{ url: string; text: string }` (`text`: `min(1).max(10000)`), unknown fields rejected. Applies §5 highlight semantics (insert + bump + unarchive); `409` when no bookmark matches the normalized URL. Returns the created highlight `{id, bookmarkId, text, createdAt}`.
 -   `DELETE /api/highlights/:id` — session auth; ownership-checked hard delete; `404` when not found/not owned.
 -   `GET /api/bookmarks` responses include each bookmark's `highlights: Array<{id, text, createdAt}>` ordered `created_at asc` (nested — no separate fetch; approved 2026-08-01).
+-   `POST /api/bookmarks/:id/article` (m12) — session auth; body `{ refresh?: boolean }` (empty body allowed, unknown fields rejected). Claims a pipeline run and returns `202 { article, started }`; `started: false` means a run was already in flight and nothing new was scheduled. `refresh: true` discards cached scrape/transcript output and forces a full re-scrape. `404` when the bookmark isn't the caller's. `maxDuration = 300`; the work runs in `after()` (§10).
+-   `GET /api/bookmarks/:id/article` (m12) — session auth; returns `200 { article: {...} | null }` (null = never scraped, a normal state). The article payload carries `status`, `error`, `sourceUrl`, `title`, `transcript`, `summary`, `wordCount`, `audioKinds` (kinds already synthesized for the current voice), and timestamps. `raw_markdown` is deliberately never serialized. `404` when the bookmark isn't the caller's — the endpoint can't be used to probe which ids exist.
+-   `POST /api/bookmarks/:id/article/audio` (m12) — session auth; body `{ kind: 'summary' | 'transcript' }`, unknown fields rejected. Returns `{ kind, voice, url, expiresAt, byteSize, segmentCount, cached }` with a signed URL (§10). `409 not_ready` unless the article's status is `ready`; `409 no_text` when the requested form is empty; `404 no_article` when nothing has been scraped. Synthesis failures are `503` when retryable, `502` otherwise.
 
 ## 9. UI (site)
 
@@ -187,10 +228,67 @@ All inputs Zod-validated; unknown fields rejected.
 -   **Theming**: dark mode follows the SYSTEM preference (`prefers-color-scheme`, no toggle) on both the web client and the extension popup; palettes from the approved Claude Design dark variants. The whole log view + popup draw color from CSS variables (`--log-*` in `globals.css`; `:root` vars in the popup HTML) — never hardcode colors in components. Accent is strawberry raspberry-pink `oklch(0.51 0.2 8)` (≈`#bb0a50`), OKLCH depth-matched to the mock's indigo (its 0.23 chroma is out of sRGB gamut for reds — 0.2 is the max); dark-mode text/border accent brightens to `oklch(0.68 0.158 8)` while solid fills keep the deep value. `#4F46E5` in the design mocks maps to this accent at implementation time.
 -   **Add composer (m11 — from the approved Claude Design mock `Smultron Feed - Add Bookmark.dc.html`)**: an accent-solid `+ Add` button at the toolbar's right edge toggles an inline composer bar pinned above the log (`+` glyph, autofocused URL input in mono, Save button, `esc` closer). Enter/Save: the client prepends `https://` to scheme-less input, validates (parseable, dotted hostname — inline mono "not a valid URL" error otherwise), then `POST /api/bookmarks`. On success the composer closes, the view switches to the live feed (search/tag filters are kept), the row flashes (`rowflash` keyframe fading from `--log-facet-active`) and auto-expands; a NEWLY created bookmark also focuses the panel's add-tag input (tagging is the expected next action). A duplicate URL resurfaces the existing row instead (bump + unarchive, §5) with the same flash+expand. Esc or `esc` closes and clears; errors keep the composer open.
 -   **Highlights (expanded panel)**: each highlight card has a hard-delete button (no confirmation — low stakes) and links out to the bookmark URL with a generated `#:~:text=` fragment (built at render time from the stored text by `web/src/lib/textFragment.ts`: exact match for short selections ≲150 chars, `textStart,textEnd` word-boundary split for longer ones, percent-encoding `-`/`&`/`,` per the text-fragment spec; unit-tested). Highlight text is NOT in feed search (v1).
+-   **Read-aloud section (expanded panel, m12)**: a `READ ALOUD` block below the note section, mounted only for the open row so collapsed rows never fetch. States: never scraped → `scrape & prepare audio`; running → a pulsing dot and the step in the user's terms ("fetching the page", "cleaning up the text", "writing the summary"), polled every 2s until terminal; failed → the error verbatim plus `try again` (resumes) and `start over` (re-scrapes); ready → the summary as a card, `▸ listen to summary` / `▸ listen to full article` buttons, a native `<audio controls>` (seeking for free), a collapsible transcript, the word count, and a `re-scrape` link. The active kind's button takes the accent fill. A fresh signed URL is fetched per kind on demand and dropped whenever `updatedAt` changes (a re-scrape invalidates the audio behind it). Colors come from the `--log-*` CSS variables like the rest of the log view.
 -   **Empty state**: "Install the extension" with pairing instructions if paired but 0 bookmarks; pairing dialog if unpaired (§7).
 -   Dark-mode friendly, keyboard-first search (`/` focuses the box). Keep it minimal — this is a personal tool.
 
-## 10. Google OAuth setup (one-time, manual)
+## 10. Read-aloud pipeline (m12)
+
+Ad-hoc, per-bookmark: scrape the page into readable Markdown, clean it into spoken prose, summarize it, and synthesize audio for either form. Triggered from the feed row's expanded panel; nothing runs automatically on capture.
+
+```
+POST /api/bookmarks/:id/article        → 202, work runs in after()
+   Firecrawl v2 /scrape  → raw_markdown
+   Claude clean pass     → transcript      (per-chunk, rejoined)
+   Claude summary pass   → summary
+GET  /api/bookmarks/:id/article        → poll status until terminal
+POST /api/bookmarks/:id/article/audio  → OpenAI TTS → Supabase Storage → signed URL
+```
+
+### Why three steps and not two
+
+Firecrawl's `onlyMainContent` markdown is *readable*, not *speakable*. It still carries link syntax, image alt text, figure captions, "Share this", newsletter interstitials, footnote markers, code fences, and tables — all of which a TTS engine reads aloud verbatim as noise. The **clean pass** rewrites the article into continuous spoken prose: link text without URLs, headings as spoken transitions, lists as flowing sentences, tables stated in a sentence, numbers and abbreviations spelled as spoken. It is explicitly **not** a summary — every substantive claim, example, and quote survives, and the output is close in length to the article's prose. The summary is then generated **from the transcript**, never from the raw markdown, so it can't quote scrape cruft.
+
+### Status machine
+
+`queued → scraping → cleaning → summarizing → ready` (or `failed` from any step). `ready` and `failed` are terminal. `articles.updated_at` is refreshed on every transition.
+
+### Execution and resume
+
+The `POST` claims the row and returns `202` immediately; the pipeline runs in Next's `after()` within the same invocation (`maxDuration = 300`). The client polls `GET` every 2s while non-terminal.
+
+Each step is **skipped when its output is already persisted** — so a run killed mid-flight (function timeout, deploy, crash) costs only the steps that hadn't finished:
+
+-   `raw_markdown` present → skip the scrape
+-   `transcript` present → skip the scrape and the clean pass
+-   `POST {refresh: true}` clears all three and forces a genuine re-scrape
+
+A failed run therefore keeps its completed work: a rate-limited summary step leaves the transcript intact, and "try again" resumes at the summary. **Stale-run detection**: a row in a non-terminal status whose `updated_at` is older than 10 minutes is assumed dead (its invocation will never write again) and can be re-claimed. Within that window a second `POST` is a no-op that reports current state (`started: false`) rather than starting a duplicate pipeline.
+
+### Chunking
+
+Two hard limits, one boundary-aware splitter (`lib/chunk.ts`, unit-tested):
+
+-   **Clean pass** — an article can exceed one request's output budget, so markdown is split at heading/blank-line boundaries into ~24 000-char chunks, each cleaned separately and rejoined. Each chunk is told its position (so it writes no mid-article opening or sign-off) and receives the tail of the previous *cleaned* chunk for a continuous seam. Beyond 12 chunks the article is truncated and the transcript says so — a silently partial article would be worse.
+-   **TTS** — OpenAI's `/v1/audio/speech` caps `input` at **4096 characters**, so the transcript is segmented at sentence/paragraph boundaries and the resulting mp3s concatenated (mp3 is a stream of self-contained frames, so byte concatenation needs no re-encode). Segments are synthesized with bounded concurrency and written **by index**: order is load-bearing. Any segment failing fails the whole synthesis — partial audio that looks complete is worse than a visible error.
+
+### Models and providers
+
+-   **Scrape**: Firecrawl `POST /v2/scrape`, `formats: ["markdown"]`, `onlyMainContent`, `maxAge` 24h (a same-day re-scrape reuses their cache). A page whose `statusCode` is non-2xx, or that yields under 200 chars, fails rather than being transcribed.
+-   **Clean + summary**: Claude `claude-opus-5` via the Anthropic SDK, adaptive thinking, `effort: medium`, **streamed** (`.stream()` + `.finalMessage()`) — the clean pass emits article-length output and a non-streaming request at that size risks an SDK HTTP timeout. `stop_reason: "refusal"` is checked before reading content.
+-   **TTS**: OpenAI `gpt-4o-mini-tts`, mp3, voice from `TTS_VOICE` (default `sage`, unrecognized values fall back rather than failing). The model's free-text `instructions` set a measured narration style — the reason for choosing it over `tts-1`.
+
+### Audio storage
+
+Private Supabase Storage bucket (`ARTICLE_AUDIO_BUCKET`, default `article-audio`), reached over the **Storage REST API with the service-role key** — not supabase-js, so Hard rule #5 needs no exception. The bucket is created idempotently on first upload. Playback is via signed URLs (6h TTL); the key never reaches a browser. Objects are keyed `{user_id}/{article_id}/{kind}-{voice}.mp3`, so changing the voice writes a new object rather than shadowing the old one.
+
+Audio synthesis is **synchronous** (unlike the article pipeline): a summary is one TTS call, and a transcript's segments are synthesized concurrently. First press shows "preparing…"; every later press hits the `article_audio` cache and re-signs the stored object.
+
+### Failure reporting
+
+Every external step throws `PipelineError` (`lib/pipelineError.ts`) carrying a step, a machine code, and a `retryable` flag. `runArticleJob` never rejects — it writes `failed` + `"{step}: {message}"` to the row, because it runs fire-and-forget in `after()` where a rejection would be swallowed and leave the row stuck. The audio route maps retryable causes to `503` and the rest to `502`.
+
+## 11. Google OAuth setup (one-time, manual)
 
 1. Google Cloud Console → create OAuth 2.0 Client ID (Web application).
     - Authorized redirect URI: `https://<project-ref>.supabase.co/auth/v1/callback`.
@@ -198,7 +296,7 @@ All inputs Zod-validated; unknown fields rejected.
 3. Supabase Auth URL config: Site URL `https://smultron.redpine.software`; add `http://localhost:3000` to additional redirect URLs.
 4. Vercel: add the domain `smultron.redpine.software`; add a CNAME for `smultron` at the DNS host for `redpine.software`.
 
-## 11. Milestones
+## 12. Milestones
 
 1. Scaffold monorepo (pnpm workspaces, web + extension via WXT, Biome, Vitest).
 2. Drizzle schema + migrations for `smultron` (tables, indexes, `pg_trgm`), RLS enabled.
@@ -208,7 +306,13 @@ All inputs Zod-validated; unknown fields rejected.
 6. Feed UI + search + edit/archive.
 7. Deploy: Vercel + domain, load extension unpacked, run initial backfill, verify end-to-end.
 8. Highlights: `highlights` schema + migrations; `/api/highlights` + §5 highlight semantics + nested feed highlights; extension context-menu capture + outbox kind-routing + poison rule; feed UI (expandable list, delete, `#:~:text=` link-out).
+9. Feed v2 "log view": dense reverse-chron rows, tag filter + view aggregates on `GET /api/bookmarks`, facet sidebar with counts (§8, §9).
+10. Notes: `note` column + patch semantics (never bumps `updated_at`), note-aware search, `/api/bookmarks/by-url` GET+PATCH, feed note UI + chip tag editing, extension popup (§3, §5, §6, §8, §9).
+11. Web add composer: `POST /api/bookmarks` + §5 web-add semantics, inline composer bar with flash+expand (§5, §8, §9).
+12. Read-aloud: `articles` + `article_audio` schema + migrations; Firecrawl scrape → Claude clean pass → Claude summary, resumable and polled; OpenAI TTS into a private Supabase Storage bucket with signed URLs; expanded-panel listen UI (§3, §8, §9, §10).
 
-## 12. Out of scope (v1)
+## 13. Out of scope (v1)
 
-Page-content fetching/enrichment, summaries, embeddings/semantic search, realtime, multi-user onboarding, mobile capture. The schema and API shapes should not preclude these.isCloseMatch
+Embeddings/semantic search, realtime, multi-user onboarding, mobile capture. The schema and API shapes should not preclude these.
+
+Page-content fetching, transcript clean-up, and summaries **were** out of scope for v1 and shipped in m12 (§10) — deliberately ad-hoc and per-bookmark, never automatic on capture.
