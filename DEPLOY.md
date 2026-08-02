@@ -5,10 +5,16 @@ is done; nothing below changes code. Do them in order.
 
 > **Status (2026-08-02):** this runbook has been executed — the app is live at
 > `https://smultron.redpine.software` with Vercel auto-deploying every push to
-> `main` (GitHub `bttf/smultron`). DB migrations are NOT automatic: after
-> pulling a commit that adds files under `web/drizzle/`, run `pnpm db:migrate`
-> (reads `DIRECT_URL` from `web/.env.local`) before or right after the deploy.
-> The rest of this doc stays as the from-scratch runbook.
+> `main` (GitHub `bttf/smultron`). DB migrations run automatically: pushes to
+> `main` that touch `web/drizzle/` trigger `.github/workflows/migrate.yml`,
+> which runs `pnpm db:migrate` using the `MIGRATION_DATABASE_URL` repo secret
+> (the Supavisor **session pooler** string, port 5432 — the direct
+> `db.<ref>.supabase.co` host is IPv6-only and unreachable from GitHub
+> runners). Note the migration job and the Vercel deploy run in parallel, so
+> keep migrations backward-compatible with the previous deploy (additive
+> changes; no drops/renames in the same push as the code that needs them).
+> Manual fallback: `pnpm db:migrate` (reads `DIRECT_URL` from
+> `web/.env.local`). The rest of this doc stays as the from-scratch runbook.
 
 ## 1. Supabase project
 

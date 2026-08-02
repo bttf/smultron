@@ -1,0 +1,38 @@
+name: db-migrate
+
+# Applies Drizzle migrations to the production DB on pushes to main that touch
+# web/drizzle/. Applied migrations are tracked in drizzle.__drizzle_migrations,
+# so re-runs are no-ops.
+#
+# MIGRATION_DATABASE_URL must be the Supavisor **session pooler** connection
+# string (Dashboard → Connect → Session pooler: aws-*.pooler.supabase.com,
+# port 5432). Do NOT use the local DIRECT_URL value here — the direct host
+# (db.<ref>.supabase.co) is IPv6-only and unreachable from GitHub runners.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/drizzle/**"
+  workflow_dispatch:
+
+concurrency:
+  group: db-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web db:migrate
+        env:
+          DIRECT_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
