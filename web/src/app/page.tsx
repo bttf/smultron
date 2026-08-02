@@ -10,6 +10,32 @@ import { getAuthState } from "../lib/auth";
 import { signOutAction } from "../lib/authActions";
 import { getPairingStatus } from "../lib/pairing";
 
+function Header() {
+	return (
+		<header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2.5">
+			<span className="text-sm font-semibold tracking-tight">
+				Smultronstället
+			</span>
+			<nav className="flex items-center gap-3.5 text-[13px]">
+				<Link
+					href="/settings"
+					className="text-muted-foreground hover:text-foreground"
+				>
+					Settings
+				</Link>
+				<form action={signOutAction}>
+					<button
+						type="submit"
+						className="text-muted-foreground hover:text-foreground"
+					>
+						Sign out
+					</button>
+				</form>
+			</nav>
+		</header>
+	);
+}
+
 export default async function Home() {
 	const auth = await getAuthState();
 	if (auth.status === "unauthenticated") {
@@ -21,29 +47,22 @@ export default async function Home() {
 
 	const pairing = await getPairingStatus(db, auth.user.id);
 
+	if (pairing.paired) {
+		// Full-viewport log shell (m9): the page itself never scrolls — the
+		// feed's log pane and facets aside scroll internally.
+		return (
+			<div className="flex h-dvh flex-col overflow-hidden">
+				<Header />
+				<Feed />
+			</div>
+		);
+	}
+
+	// Unpaired path keeps normal document flow (PairingGate renders as a page).
 	return (
 		<div className="flex flex-1 flex-col">
-			<header className="flex items-center justify-between border-b border-border px-6 py-3">
-				<span className="font-semibold tracking-tight">Smultronstället</span>
-				<nav className="flex items-center gap-4 text-sm">
-					<Link
-						href="/settings"
-						className="text-muted-foreground hover:text-foreground"
-					>
-						Settings
-					</Link>
-					<form action={signOutAction}>
-						<button
-							type="submit"
-							className="text-muted-foreground hover:text-foreground"
-						>
-							Sign out
-						</button>
-					</form>
-				</nav>
-			</header>
-
-			{pairing.paired ? <Feed /> : <PairingGate hasToken={pairing.hasToken} />}
+			<Header />
+			<PairingGate hasToken={pairing.hasToken} />
 		</div>
 	);
 }
