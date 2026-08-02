@@ -37,6 +37,7 @@ import {
 } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { bookmarks, highlights } from "../db/schema";
+import { normalizeUrl } from "./normalizeUrl";
 
 // Accept any Drizzle Postgres database or transaction (postgres-js in prod,
 // PGlite in tests) — same pattern as SyncDb (sync.ts) / PairingDb (pairing.ts).
@@ -56,6 +57,8 @@ export type Bookmark = {
 	urlNormalized: string;
 	title: string;
 	tags: string[];
+	/** User note (m10); null = none. */
+	note: string | null;
 	createdAt: Date;
 	updatedAt: Date;
 	archivedAt: Date | null;
@@ -69,6 +72,7 @@ const BOOKMARK_COLUMNS = {
 	urlNormalized: bookmarks.urlNormalized,
 	title: bookmarks.title,
 	tags: bookmarks.tags,
+	note: bookmarks.note,
 	createdAt: bookmarks.createdAt,
 	updatedAt: bookmarks.updatedAt,
 	archivedAt: bookmarks.archivedAt,
@@ -273,11 +277,14 @@ export async function listBookmarks(
 	// The "current view": this user's rows in the live or archived state.
 	const viewCond = and(eq(bookmarks.userId, userId), archivedCond);
 
-	// Search predicate: FTS OR trgm similarity OR ILIKE substring, on title +
-	// url_normalized. `sql` template params are parameterized, so `q` is
-	// safe to interpolate directly (no manual escaping). Built up front so
-	// the aggregates and the search branch share the exact same condition.
-	const tsVector = sql`to_tsvector('simple', ${bookmarks.title} || ' ' || ${bookmarks.urlNormalized})`;
+	// Search predicate: FTS OR trgm similarity OR ILIKE substring. `sql`
+	// template params are parameterized, so `q` is safe to interpolate
+	// directly (no manual escaping). Built up front so the aggregates and the
+	// search branch share the exact same condition. The tsvector expression
+	// MUST stay identical to the bookmarks_fts_idx definition (db/schema.ts)
+	// or the GIN index goes unused. `note` joins FTS + ILIKE only — NOT the
+	// trgm `%` terms (no trgm index on note; similarity over prose is noise).
+	const tsVector = sql`to_tsvector('simple', ${bookmarks.title} || ' ' || ${bookmarks.urlNormalized} || ' ' || coalesce(${bookmarks.note}, ''))`;
 	const tsQuery = sql`websearch_to_tsquery('simple', ${q})`;
 	const like = `%${q}%`;
 	const matchCond = q
@@ -287,6 +294,7 @@ export async function listBookmarks(
 			OR ${bookmarks.urlNormalized} % ${q}
 			OR ${bookmarks.title} ILIKE ${like}
 			OR ${bookmarks.urlNormalized} ILIKE ${like}
+			OR ${bookmarks.note} ILIKE ${like}
 		)`
 		: undefined;
 
@@ -357,35 +365,51 @@ export async function listBookmarks(
 export type PatchBookmarkInput = {
 	title?: string;
 	tags?: string[];
+	/** Trimmed server-side; empty-after-trim stores NULL (note removed). */
+	note?: string;
 	archived?: boolean;
 };
 
-/**
- * Updates ONLY the provided fields, scoped to `user_id` for ownership.
- * `archived: true` sets `archived_at = now()`; `false` clears it to null.
- *
- * CRITICAL (AGENTS.md Hard rule #1): never touches `updated_at` — only live
- * captures (`applySync` live mode, `applyHighlight`) bump it. Returns null
- * when no row matches (wrong id or wrong owner) — the route turns that into
- * a 404. Returns the bare row WITHOUT nested highlights: SPEC §8 nests them
- * only in GET /api/bookmarks responses.
- */
-export async function patchBookmark(
-	db: BookmarksDb,
-	userId: string,
-	id: number,
-	input: PatchBookmarkInput,
-): Promise<BookmarkRow | null> {
-	const set: { title?: string; tags?: string[]; archivedAt?: Date | null } = {};
+type PatchSet = {
+	title?: string;
+	tags?: string[];
+	note?: string | null;
+	archivedAt?: Date | null;
+};
+
+/** Maps the wire-level patch input to column assignments (note trim→null). */
+function buildPatchSet(input: PatchBookmarkInput): PatchSet {
+	const set: PatchSet = {};
 	if (input.title !== undefined) {
 		set.title = input.title;
 	}
 	if (input.tags !== undefined) {
 		set.tags = input.tags;
 	}
+	if (input.note !== undefined) {
+		const trimmed = input.note.trim();
+		set.note = trimmed === "" ? null : trimmed;
+	}
 	if (input.archived !== undefined) {
 		set.archivedAt = input.archived ? new Date() : null;
 	}
+	return set;
+}
+
+/**
+ * Applies `input` to the single row matching `cond` (which must already
+ * include the ownership check). CRITICAL (AGENTS.md Hard rule #1): never
+ * touches `updated_at` — only live captures (`applySync` live mode,
+ * `applyHighlight`) bump it. Returns null when no row matches — callers turn
+ * that into a 404. Returns the bare row WITHOUT nested highlights: SPEC §8
+ * nests them only in GET /api/bookmarks responses.
+ */
+async function patchWhere(
+	db: BookmarksDb,
+	cond: SQL | undefined,
+	input: PatchBookmarkInput,
+): Promise<BookmarkRow | null> {
+	const set = buildPatchSet(input);
 
 	if (Object.keys(set).length === 0) {
 		// Nothing to change (callers should reject this earlier via Zod) —
@@ -393,7 +417,7 @@ export async function patchBookmark(
 		const rows = await db
 			.select(BOOKMARK_COLUMNS)
 			.from(bookmarks)
-			.where(and(eq(bookmarks.id, id), eq(bookmarks.userId, userId)))
+			.where(cond)
 			.limit(1);
 		return rows[0] ?? null;
 	}
@@ -401,8 +425,73 @@ export async function patchBookmark(
 	const rows = await db
 		.update(bookmarks)
 		.set(set)
-		.where(and(eq(bookmarks.id, id), eq(bookmarks.userId, userId)))
+		.where(cond)
 		.returning(BOOKMARK_COLUMNS);
 
 	return rows[0] ?? null;
+}
+
+/**
+ * Updates ONLY the provided fields, scoped to `user_id` for ownership.
+ * `archived: true` sets `archived_at = now()`; `false` clears it to null.
+ * Never bumps `updated_at` (see `patchWhere`).
+ */
+export async function patchBookmark(
+	db: BookmarksDb,
+	userId: string,
+	id: number,
+	input: PatchBookmarkInput,
+): Promise<BookmarkRow | null> {
+	return patchWhere(
+		db,
+		and(eq(bookmarks.id, id), eq(bookmarks.userId, userId)),
+		input,
+	);
+}
+
+/**
+ * Looks up a bookmark by `(user_id, url_normalized)` from a RAW URL — the
+ * extension always sends raw URLs; normalization happens here, server-side,
+ * via the single `normalizeUrl` implementation (Hard rule #3). Returns the
+ * bare row (no nested highlights) or null when the user has no bookmark for
+ * that URL. Used by GET /api/bookmarks/by-url (extension popup).
+ */
+export async function getBookmarkByUrl(
+	db: BookmarksDb,
+	userId: string,
+	rawUrl: string,
+): Promise<BookmarkRow | null> {
+	const rows = await db
+		.select(BOOKMARK_COLUMNS)
+		.from(bookmarks)
+		.where(
+			and(
+				eq(bookmarks.userId, userId),
+				eq(bookmarks.urlNormalized, normalizeUrl(rawUrl)),
+			),
+		)
+		.limit(1);
+	return rows[0] ?? null;
+}
+
+/**
+ * `patchBookmark`, but resolved by RAW URL (normalized server-side) instead
+ * of id — the extension popup's edit path (PATCH /api/bookmarks/by-url).
+ * Identical patch semantics: never bumps `updated_at`; null when the user
+ * has no bookmark for that URL (route 404s).
+ */
+export async function patchBookmarkByUrl(
+	db: BookmarksDb,
+	userId: string,
+	rawUrl: string,
+	input: PatchBookmarkInput,
+): Promise<BookmarkRow | null> {
+	return patchWhere(
+		db,
+		and(
+			eq(bookmarks.userId, userId),
+			eq(bookmarks.urlNormalized, normalizeUrl(rawUrl)),
+		),
+		input,
+	);
 }

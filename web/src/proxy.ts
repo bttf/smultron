@@ -10,10 +10,13 @@
 // getAuthedUser() — the proxy is an optimistic layer, not the authority
 // (see node_modules/next/dist/docs/01-app/01-getting-started/16-proxy.md).
 //
-// /api/sync and /api/hello are token-authed by the extension and are
-// excluded in the matcher below — they must NEVER hit session/redirect
-// logic. Other /api/* routes are matched (so their sessions refresh) but are
-// never redirected — they 401 on their own.
+// /api/sync, /api/hello and /api/bookmarks/by-url are token-authed by the
+// extension and are excluded in the matcher below — they must NEVER hit
+// session/redirect logic. (/api/highlights is Bearer-authed too but shares
+// its path prefix with the session-authed DELETE /api/highlights/:id, so it
+// stays matched — harmless, since matched /api/* is never redirected.)
+// Other /api/* routes are matched (so their sessions refresh) but are never
+// redirected — they 401 on their own.
 import { createServerClient } from "@supabase/ssr";
 import { type NextRequest, NextResponse } from "next/server";
 import { isEmailAllowed } from "./lib/allowedEmail";
@@ -99,8 +102,9 @@ export async function proxy(request: NextRequest) {
 export const config = {
 	// Everything EXCEPT: Next internals/static assets, files with common
 	// static extensions, and the extension's Bearer-token endpoints
-	// (/api/sync, /api/hello), which must stay out of session logic entirely.
+	// (/api/sync, /api/hello, /api/bookmarks/by-url), which must stay out of
+	// session logic entirely.
 	matcher: [
-		"/((?!_next/static|_next/image|favicon.ico|api/sync|api/hello|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|txt|xml|json)$).*)",
+		"/((?!_next/static|_next/image|favicon.ico|api/sync|api/hello|api/bookmarks/by-url|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|txt|xml|json)$).*)",
 	],
 };

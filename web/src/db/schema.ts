@@ -33,6 +33,9 @@ export const bookmarks = smultron
 			chromeId: text("chrome_id"),
 			// First element = Chrome folder path at insert.
 			tags: text().array().notNull().default([]),
+			// User note (m10): one per bookmark; null = none. Site-owned
+			// annotation — editing it NEVER bumps updated_at (Hard rule #1).
+			note: text(),
 			// First save (Chrome dateAdded when available).
 			createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 			// Recency; feed sort key.
@@ -42,10 +45,11 @@ export const bookmarks = smultron
 		},
 		(table) => [
 			unique().on(table.userId, table.urlNormalized),
-			// FTS over title + url_normalized.
+			// FTS over title + url_normalized + note. MUST stay identical to
+			// the tsvector expression in lib/bookmarks.ts so the index is used.
 			index("bookmarks_fts_idx").using(
 				"gin",
-				sql`to_tsvector('simple', ${table.title} || ' ' || ${table.urlNormalized})`,
+				sql`to_tsvector('simple', ${table.title} || ' ' || ${table.urlNormalized} || ' ' || coalesce(${table.note}, ''))`,
 			),
 			// Feed: live bookmarks ordered by recency, per user.
 			index("bookmarks_feed_idx")

@@ -11,7 +11,13 @@ import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
-import { InvalidCursorError, listBookmarks, patchBookmark } from "./bookmarks";
+import {
+	getBookmarkByUrl,
+	InvalidCursorError,
+	listBookmarks,
+	patchBookmark,
+	patchBookmarkByUrl,
+} from "./bookmarks";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -66,6 +72,7 @@ type SeedRow = {
 	url: string;
 	title: string;
 	tags?: string[];
+	note?: string | null;
 	createdAt: Date;
 	updatedAt: Date;
 	archivedAt?: Date | null;
@@ -79,6 +86,7 @@ async function seed(rows: SeedRow[]) {
 			urlNormalized: r.url,
 			title: r.title,
 			tags: r.tags ?? [],
+			note: r.note ?? null,
 			createdAt: r.createdAt,
 			updatedAt: r.updatedAt,
 			archivedAt: r.archivedAt ?? null,
@@ -114,6 +122,8 @@ describe("listBookmarks — feed", () => {
 		expect(page1.bookmarks[49]?.title).toBe("Page 49");
 		// Every bookmark carries the nested highlights field, [] when none.
 		expect(page1.bookmarks.every((b) => b.highlights.length === 0)).toBe(true);
+		// ...and the m10 note field, null when unset.
+		expect(page1.bookmarks.every((b) => b.note === null)).toBe(true);
 		expect(page1.nextCursor).not.toBeNull();
 
 		const page2 = await listBookmarks(db, USER_A, {
@@ -713,5 +723,295 @@ describe("patchBookmark", () => {
 		await seedOne(USER_A);
 		const { bookmarks: rows } = await listBookmarks(db, USER_B, {});
 		expect(rows).toHaveLength(0);
+	});
+});
+
+describe("patchBookmark — note (m10)", () => {
+	async function seedOne(note: string | null = null) {
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/noted",
+				title: "Noted Page",
+				note,
+				createdAt: new Date("2026-01-01T00:00:00.000Z"),
+				updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+			},
+		]);
+		const [row] = await db
+			.select()
+			.from(bookmarks)
+			.where(eq(bookmarks.userId, USER_A));
+		if (!row) {
+			throw new Error("seed failed");
+		}
+		return row;
+	}
+
+	it("sets a note, leaving updated_at byte-identical and other fields untouched", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			note: "read this before the meeting",
+		});
+		expect(updated?.note).toBe("read this before the meeting");
+		expect(updated?.title).toBe(before.title);
+		expect(updated?.tags).toEqual(before.tags);
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+
+		const after = await rawRow(before.id);
+		expect(after?.note).toBe("read this before the meeting");
+		expect(after?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("edits an existing note in place", async () => {
+		const before = await seedOne("first draft");
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			note: "second draft",
+		});
+		expect(updated?.note).toBe("second draft");
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("trims surrounding whitespace", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			note: "  keep the middle  spacing  ",
+		});
+		expect(updated?.note).toBe("keep the middle  spacing");
+	});
+
+	it("empty and whitespace-only notes store NULL (note removed)", async () => {
+		const before = await seedOne("something");
+
+		const cleared = await patchBookmark(db, USER_A, before.id, { note: "" });
+		expect(cleared?.note).toBeNull();
+
+		await patchBookmark(db, USER_A, before.id, { note: "back" });
+		const clearedAgain = await patchBookmark(db, USER_A, before.id, {
+			note: "   \n\t ",
+		});
+		expect(clearedAgain?.note).toBeNull();
+		expect(clearedAgain?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("note patch composes with other fields; none of them bump updated_at", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			title: "Renamed",
+			tags: ["t1"],
+			note: "combined patch",
+			archived: true,
+		});
+		expect(updated?.title).toBe("Renamed");
+		expect(updated?.tags).toEqual(["t1"]);
+		expect(updated?.note).toBe("combined patch");
+		expect(updated?.archivedAt).not.toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+	});
+});
+
+describe("listBookmarks — note search (m10)", () => {
+	// Mixed corpus: a row matched ONLY via its note, a decoy whose
+	// title/url never match, and a NULL-note row (coalesce guard).
+	function notedRows(): SeedRow[] {
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		const rows: Array<{ title: string; note?: string; tags?: string[] }> = [
+			{
+				title: "Plain Article",
+				note: "revisit for the quarterly planning deck",
+				tags: ["work"],
+			},
+			{ title: "Sourdough Bread Recipe", tags: ["cooking"] },
+			{ title: "Untouched Page" },
+		];
+		return rows.map((r, i) => ({
+			userId: USER_A,
+			url: `https://example.com/noted-${i}`,
+			title: r.title,
+			tags: r.tags ?? [],
+			note: r.note ?? null,
+			createdAt: new Date(base - i * 1000),
+			updatedAt: new Date(base - i * 1000),
+		}));
+	}
+
+	it("matches note text via FTS (multi-word), with NULL notes coalesced", async () => {
+		await seed(notedRows());
+		const result = await listBookmarks(db, USER_A, {
+			q: "quarterly planning",
+		});
+		expect(result.bookmarks.map((b) => b.title)).toEqual(["Plain Article"]);
+		expect(result.bookmarks[0]?.note).toBe(
+			"revisit for the quarterly planning deck",
+		);
+	});
+
+	it("matches note text via ILIKE substring (partial word)", async () => {
+		await seed(notedRows());
+		// "quarterl" is not an FTS lexeme match and no trgm runs on note —
+		// the ILIKE disjunct must catch it.
+		const result = await listBookmarks(db, USER_A, { q: "quarterl" });
+		expect(result.bookmarks.map((b) => b.title)).toEqual(["Plain Article"]);
+	});
+
+	it("matching and facets reflect note-only matches (shared matchCond)", async () => {
+		await seed(notedRows());
+		const result = await listBookmarks(db, USER_A, { q: "quarterly" });
+		expect(result.matching).toBe(1);
+		expect(result.total).toBe(3);
+		expect(result.facets).toEqual([{ tag: "work", count: 1 }]);
+	});
+
+	it("a corpus of all-NULL notes still searches fine (coalesce)", async () => {
+		await seed(makeFeedRows(USER_A, 3));
+		const result = await listBookmarks(db, USER_A, { q: "page" });
+		expect(result.bookmarks).toHaveLength(3);
+	});
+
+	it("note search respects the archived view filter", async () => {
+		const now = new Date("2026-01-01T00:00:00.000Z");
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/live",
+				title: "Live",
+				note: "kumquat notes",
+				createdAt: now,
+				updatedAt: now,
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/archived",
+				title: "Archived",
+				note: "kumquat notes",
+				createdAt: now,
+				updatedAt: now,
+				archivedAt: now,
+			},
+		]);
+
+		const live = await listBookmarks(db, USER_A, { q: "kumquat" });
+		expect(live.bookmarks.map((b) => b.title)).toEqual(["Live"]);
+	});
+});
+
+describe("by-url lookup + patch (m10)", () => {
+	// Seed stores `url` as url_normalized verbatim, so seed with the
+	// already-normalized form and query with messy raw spellings.
+	const NORMALIZED = "https://example.com/article?x=1";
+	const MESSY_RAW =
+		"HTTPS://Example.com/article/?x=1&utm_source=tw&fbclid=abc#frag";
+
+	async function seedOne(userId = USER_A) {
+		await seed([
+			{
+				userId,
+				url: NORMALIZED,
+				title: "Article",
+				tags: ["read later"],
+				note: "existing note",
+				createdAt: new Date("2026-01-01T00:00:00.000Z"),
+				updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+			},
+		]);
+		const [row] = await db
+			.select()
+			.from(bookmarks)
+			.where(eq(bookmarks.userId, userId));
+		if (!row) {
+			throw new Error("seed failed");
+		}
+		return row;
+	}
+
+	it("finds a bookmark from a messy raw URL (server-side normalization)", async () => {
+		const before = await seedOne();
+		const found = await getBookmarkByUrl(db, USER_A, MESSY_RAW);
+		expect(found?.id).toBe(before.id);
+		expect(found?.urlNormalized).toBe(NORMALIZED);
+		expect(found?.title).toBe("Article");
+		expect(found?.note).toBe("existing note");
+		// Bare row: no nested highlights on the by-url shape.
+		expect(found && "highlights" in found).toBe(false);
+	});
+
+	it("returns null when the user has no bookmark for the URL", async () => {
+		await seedOne();
+		const found = await getBookmarkByUrl(
+			db,
+			USER_A,
+			"https://example.com/other-page",
+		);
+		expect(found).toBeNull();
+	});
+
+	it("scopes lookup per user: user B cannot see user A's bookmark", async () => {
+		await seedOne(USER_A);
+		const found = await getBookmarkByUrl(db, USER_B, MESSY_RAW);
+		expect(found).toBeNull();
+	});
+
+	it("patches by raw URL, never bumping updated_at", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmarkByUrl(db, USER_A, MESSY_RAW, {
+			title: "Renamed via popup",
+			note: "  popup note  ",
+			tags: ["popup"],
+		});
+		expect(updated?.id).toBe(before.id);
+		expect(updated?.title).toBe("Renamed via popup");
+		expect(updated?.note).toBe("popup note");
+		expect(updated?.tags).toEqual(["popup"]);
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+
+		const after = await rawRow(before.id);
+		expect(after?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("clears the note by-url when empty after trim", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmarkByUrl(db, USER_A, NORMALIZED, {
+			note: "   ",
+		});
+		expect(updated?.note).toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("archives and restores by-url, never bumping updated_at", async () => {
+		const before = await seedOne();
+
+		const archived = await patchBookmarkByUrl(db, USER_A, MESSY_RAW, {
+			archived: true,
+		});
+		expect(archived?.archivedAt).not.toBeNull();
+		expect(archived?.updatedAt).toEqual(before.updatedAt);
+
+		const restored = await patchBookmarkByUrl(db, USER_A, NORMALIZED, {
+			archived: false,
+		});
+		expect(restored?.archivedAt).toBeNull();
+		expect(restored?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("returns null (route 404s) when patching an unknown URL", async () => {
+		await seedOne();
+		const result = await patchBookmarkByUrl(
+			db,
+			USER_A,
+			"https://example.com/nope",
+			{ note: "won't land" },
+		);
+		expect(result).toBeNull();
+	});
+
+	it("scopes patch per user: user B cannot patch user A's bookmark", async () => {
+		const before = await seedOne(USER_A);
+		const result = await patchBookmarkByUrl(db, USER_B, NORMALIZED, {
+			title: "hijacked",
+		});
+		expect(result).toBeNull();
+
+		const after = await rawRow(before.id);
+		expect(after?.title).toBe("Article");
 	});
 });

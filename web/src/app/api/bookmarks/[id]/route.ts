@@ -1,5 +1,7 @@
 // PATCH /api/bookmarks/:id — SPEC §8. Session-authed; body is a subset of
-// { title, tags, archived } with at least one key, unknown fields rejected.
+// { title, tags, note, archived } with at least one key, unknown fields
+// rejected. `note` is trimmed server-side; empty-after-trim clears it to
+// NULL. Site edits NEVER bump updated_at (Hard rule #1).
 // `id` is a dynamic route param — a Promise in Next 16 (see
 // node_modules/next/dist/docs/.../dynamic-routes.md).
 import { z } from "zod";
@@ -19,14 +21,17 @@ const bodySchema = z
 	.strictObject({
 		title: z.string().max(2048).optional(),
 		tags: z.array(z.string().min(1)).max(64).optional(),
+		// Mirrors the highlights text cap (SPEC §8).
+		note: z.string().max(10_000).optional(),
 		archived: z.boolean().optional(),
 	})
 	.refine(
 		(data) =>
 			data.title !== undefined ||
 			data.tags !== undefined ||
+			data.note !== undefined ||
 			data.archived !== undefined,
-		{ message: "at least one of title/tags/archived is required" },
+		{ message: "at least one of title/tags/note/archived is required" },
 	);
 
 export async function PATCH(
