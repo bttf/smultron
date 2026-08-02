@@ -261,12 +261,21 @@ async function createAndWaitForSync(
 	{ ok: true; bookmark: BookmarkDto } | { ok: false; message: string }
 > {
 	try {
-		// Default folder (no parentId): the background onCreated listener
-		// live-syncs this creation, which correctly bumps updated_at.
-		await browser.bookmarks.create({
-			title: tabTitle,
-			url: tabUrl.href,
-		});
+		// A Chrome bookmark may already exist even though the server row
+		// hasn't landed (sync lagging, or a retry after a poll timeout) —
+		// skip the create and just poll, so reopening the popup never mints
+		// duplicate Chrome rows. A URL-variant miss here is acceptable: the
+		// server dedupes by normalized URL (same rule as highlight capture,
+		// SPEC §6).
+		const existing = await browser.bookmarks.search({ url: tabUrl.href });
+		if (existing.length === 0) {
+			// Default folder (no parentId): the background onCreated listener
+			// live-syncs this creation, which correctly bumps updated_at.
+			await browser.bookmarks.create({
+				title: tabTitle,
+				url: tabUrl.href,
+			});
+		}
 	} catch (error) {
 		return {
 			ok: false,
