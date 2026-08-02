@@ -369,7 +369,7 @@ export function Feed() {
 		: facets;
 
 	return (
-		<div className="flex min-h-0 flex-1 flex-col [--log-accent:#4F46E5]">
+		<div className="flex min-h-0 flex-1 flex-col ">
 			<div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2">
 				<input
 					ref={searchInputRef}
@@ -387,7 +387,8 @@ export function Feed() {
 					onClick={toggleArchived}
 					className={cn(
 						"shrink-0 rounded-md border border-border bg-background px-2.5 py-[5px] text-xs",
-						archived && "border-[oklch(0.85_0_0)] bg-[oklch(0.97_0_0)]",
+						archived &&
+							"border-[var(--log-strong-border)] bg-[var(--log-soft)]",
 					)}
 				>
 					{archived ? "Viewing archived" : "Archived"}
@@ -433,14 +434,14 @@ export function Feed() {
 									type="button"
 									onClick={() => toggleTag(f.tag)}
 									className={cn(
-										"flex w-full items-center justify-between gap-2 rounded-[5px] px-2 py-1 text-left text-xs hover:bg-[oklch(0.965_0_0)]",
+										"flex w-full items-center justify-between gap-2 rounded-[5px] px-2 py-1 text-left text-xs hover:bg-[var(--log-soft)]",
 										active
-											? "bg-[oklch(0.955_0.015_280)] font-semibold text-[var(--log-accent)]"
-											: "text-[oklch(0.3_0_0)]",
+											? "bg-[var(--log-facet-active)] font-semibold text-[var(--log-accent)]"
+											: "text-[var(--log-fg)]",
 									)}
 								>
 									<span className="truncate">{f.tag}</span>
-									<span className="shrink-0 font-mono text-[10.5px] text-[oklch(0.6_0_0)]">
+									<span className="shrink-0 font-mono text-[10.5px] text-[var(--log-faint)]">
 										{f.count}
 									</span>
 								</button>
@@ -584,13 +585,13 @@ function LogRow({
 				}}
 				aria-expanded={expanded}
 				className={cn(
-					"flex cursor-pointer items-center gap-2.5 border-b border-[oklch(0.945_0_0)] px-4 py-[5px] hover:bg-[oklch(0.972_0_0)]",
-					expanded && "bg-[oklch(0.972_0_0)]",
+					"flex cursor-pointer items-center gap-2.5 border-b border-[var(--log-rule)] px-4 py-[5px] hover:bg-[var(--log-hover)]",
+					expanded && "bg-[var(--log-hover)]",
 				)}
 			>
 				<span
 					aria-hidden
-					className="w-2.5 shrink-0 font-mono text-[9px] text-[oklch(0.6_0_0)]"
+					className="w-2.5 shrink-0 font-mono text-[9px] text-[var(--log-faint)]"
 				>
 					{expanded ? "▾" : "▸"}
 				</span>
@@ -618,7 +619,7 @@ function LogRow({
 					) : null}
 				</span>
 				{bookmark.highlights.length > 0 ? (
-					<span className="shrink-0 rounded-full bg-[oklch(0.97_0_0)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-accent)]">
+					<span className="shrink-0 rounded-full bg-[var(--log-soft)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-accent)]">
 						✱ {bookmark.highlights.length}
 					</span>
 				) : null}
@@ -637,8 +638,8 @@ function LogRow({
 									className={cn(
 										"whitespace-nowrap rounded px-[7px] py-px font-mono text-[10.5px]",
 										active
-											? "bg-[var(--log-accent)] text-white"
-											: "bg-[oklch(0.962_0_0)] text-[oklch(0.45_0_0)]",
+											? "bg-[var(--log-accent-solid)] text-white"
+											: "bg-[var(--log-chip-bg)] text-[var(--log-chip-fg)]",
 									)}
 								>
 									{tag}
@@ -653,7 +654,7 @@ function LogRow({
 						e.stopPropagation();
 						onPatch(bookmark.id, { archived: !archivedView });
 					}}
-					className="shrink-0 px-1 py-0.5 text-[11px] text-[oklch(0.7_0_0)] hover:text-foreground"
+					className="shrink-0 px-1 py-0.5 text-[11px] text-[var(--log-ghost)] hover:text-foreground"
 				>
 					{archivedView ? "Restore" : "Archive"}
 				</button>
@@ -681,7 +682,7 @@ function ExpandedPanel({
 	return (
 		// The row above already draws the 1px rule (its border-b), so the panel
 		// only draws its own bottom rule — a border-t here would double up.
-		<div className="flex flex-col gap-2 border-b border-[oklch(0.945_0_0)] bg-[oklch(0.985_0_0)] pt-2.5 pr-4 pb-3.5 pl-11">
+		<div className="flex flex-col gap-2 border-b border-[var(--log-rule)] bg-[var(--log-panel)] pt-2.5 pr-4 pb-3.5 pl-11">
 			<a
 				href={bookmark.url}
 				target="_blank"
@@ -747,7 +748,7 @@ function HighlightCard({
 	onDelete: () => void;
 }) {
 	return (
-		<div className="flex max-w-[720px] items-start gap-2 rounded-md border border-[oklch(0.93_0_0)] bg-card px-2.5 py-[7px]">
+		<div className="flex max-w-[720px] items-start gap-2 rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-[7px]">
 			<span
 				aria-hidden
 				className="text-[11px] leading-[1.55] text-[var(--log-accent)]"
@@ -759,7 +760,7 @@ function HighlightCard({
 				target="_blank"
 				rel="noreferrer"
 				title={highlight.text}
-				className="min-w-0 flex-1 text-[12.5px] leading-[1.55] text-[oklch(0.3_0_0)] hover:underline"
+				className="min-w-0 flex-1 text-[12.5px] leading-[1.55] text-[var(--log-fg)] hover:underline"
 			>
 				{highlight.text}
 			</a>
@@ -858,14 +859,14 @@ function TagChips({
 			{tags.map((tag) => (
 				<span
 					key={tag}
-					className="flex items-center gap-1 rounded bg-[oklch(0.962_0_0)] px-[7px] py-[2px] font-mono text-[10.5px] text-[oklch(0.45_0_0)]"
+					className="flex items-center gap-1 rounded bg-[var(--log-chip-bg)] px-[7px] py-[2px] font-mono text-[10.5px] text-[var(--log-chip-fg)]"
 				>
 					{tag}
 					<button
 						type="button"
 						aria-label={`Remove tag ${tag}`}
 						onClick={() => onSave(tags.filter((t) => t !== tag))}
-						className="text-[10px] text-[oklch(0.65_0_0)] hover:text-[oklch(0.2_0_0)]"
+						className="text-[10px] text-[var(--log-faint)] hover:text-[var(--log-note-fg)]"
 					>
 						✕
 					</button>
@@ -885,7 +886,7 @@ function TagChips({
 					}
 				}}
 				placeholder="add tag ⏎"
-				className="w-[84px] rounded border border-dashed border-[oklch(0.88_0_0)] px-[7px] py-px font-mono text-[10.5px] text-[oklch(0.3_0_0)] outline-none focus:border-solid focus:border-[var(--log-accent)]"
+				className="w-[84px] rounded border border-dashed border-[var(--log-dash)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-fg)] outline-none focus:border-solid focus:border-[var(--log-accent)]"
 			/>
 		</div>
 	);
@@ -935,20 +936,20 @@ function NoteSection({
 						}
 					}}
 					placeholder="Write a note… (Enter to save, Esc to cancel)"
-					className="resize-y rounded-md border border-[oklch(0.922_0_0)] bg-white px-2.5 py-[7px] text-[12.5px] leading-[1.55] text-[oklch(0.2_0_0)] outline-none [font-family:inherit] focus:border-[var(--log-accent)]"
+					className="resize-y rounded-md border border-border bg-card px-2.5 py-[7px] text-[12.5px] leading-[1.55] text-[var(--log-note-fg)] outline-none [font-family:inherit] focus:border-[var(--log-accent)]"
 				/>
 				<div className="flex gap-1.5">
 					<button
 						type="button"
 						onClick={save}
-						className="rounded-md bg-[oklch(0.556_0_0)] px-3 py-1 text-[11.5px] font-medium text-white hover:bg-[oklch(0.45_0_0)]"
+						className="rounded-md bg-[var(--log-btn)] px-3 py-1 text-[11.5px] font-medium text-white hover:bg-[var(--log-btn-hover)]"
 					>
 						Save
 					</button>
 					<button
 						type="button"
 						onClick={() => setEditing(false)}
-						className="rounded-md border border-[oklch(0.92_0_0)] bg-white px-3 py-1 text-[11.5px] text-[oklch(0.4_0_0)] hover:bg-[oklch(0.97_0_0)]"
+						className="rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)]"
 					>
 						Cancel
 					</button>
@@ -978,7 +979,7 @@ function NoteSection({
 				type="button"
 				onClick={open}
 				title="Click to edit note"
-				className="max-w-[720px] cursor-text whitespace-pre-wrap rounded-md border border-[oklch(0.93_0_0)] bg-white px-2.5 py-[7px] text-left text-[12.5px] leading-[1.55] text-[oklch(0.3_0_0)] hover:border-[oklch(0.85_0_0)]"
+				className="max-w-[720px] cursor-text whitespace-pre-wrap rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-[7px] text-left text-[12.5px] leading-[1.55] text-[var(--log-fg)] hover:border-[var(--log-strong-border)]"
 			>
 				{note}
 			</button>

@@ -2,7 +2,10 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
+/* Dark mode follows the SYSTEM preference (no toggle — personal tool):
+   the shadcn token set flips under prefers-color-scheme below, and
+   Tailwind's default media-based `dark:` variant applies (no .dark class
+   custom-variant). */
 
 @theme inline {
 	--color-background: var(--background);
@@ -81,40 +84,91 @@
 	--sidebar-ring: oklch(0.708 0 0);
 	--background: oklch(1 0 0);
 	--foreground: oklch(0.145 0 0);
+
+	/* Log-view palette (feed.tsx) — light values are the design mock's
+	   literals, centralized here so dark mode is one override block. */
+	--log-accent: oklch(
+		0.51 0.2 8
+	); /* strawberry crimson (≈#bb0a50) — text/border accent */
+	--log-accent-solid: oklch(0.51 0.2 8); /* solid fills w/ white text */
+	--log-rule: oklch(0.945 0 0); /* row separators */
+	--log-hover: oklch(0.972 0 0); /* row hover / expanded row bg */
+	--log-panel: oklch(0.985 0 0); /* expanded panel bg */
+	--log-soft: oklch(0.968 0 0); /* pill bg, facet hover, subtle active bg */
+	--log-facet-active: oklch(0.955 0.015 8);
+	--log-card-border: oklch(0.93 0 0); /* note/highlight cards */
+	--log-chip-bg: oklch(0.962 0 0);
+	--log-chip-fg: oklch(0.45 0 0);
+	--log-fg: oklch(0.3 0 0); /* primary muted body text */
+	--log-note-fg: oklch(0.2 0 0); /* textarea text */
+	--log-faint: oklch(0.6 0 0); /* caret, counts, chip ✕ */
+	--log-ghost: oklch(0.7 0 0); /* archive button resting */
+	--log-dash: oklch(0.88 0 0); /* add-tag dashed border */
+	--log-strong-border: oklch(0.85 0 0);
+	--log-btn: oklch(0.556 0 0); /* note Save button */
+	--log-btn-hover: oklch(0.45 0 0);
 }
 
-.dark {
-	--background: oklch(0.145 0 0);
-	--foreground: oklch(0.985 0 0);
-	--card: oklch(0.205 0 0);
-	--card-foreground: oklch(0.985 0 0);
-	--popover: oklch(0.205 0 0);
-	--popover-foreground: oklch(0.985 0 0);
-	--primary: oklch(0.922 0 0);
-	--primary-foreground: oklch(0.205 0 0);
-	--secondary: oklch(0.269 0 0);
-	--secondary-foreground: oklch(0.985 0 0);
-	--muted: oklch(0.269 0 0);
-	--muted-foreground: oklch(0.708 0 0);
-	--accent: oklch(0.269 0 0);
-	--accent-foreground: oklch(0.985 0 0);
-	--destructive: oklch(0.704 0.191 22.216);
-	--border: oklch(1 0 0 / 10%);
-	--input: oklch(1 0 0 / 15%);
-	--ring: oklch(0.556 0 0);
-	--chart-1: oklch(0.87 0 0);
-	--chart-2: oklch(0.556 0 0);
-	--chart-3: oklch(0.439 0 0);
-	--chart-4: oklch(0.371 0 0);
-	--chart-5: oklch(0.269 0 0);
-	--sidebar: oklch(0.205 0 0);
-	--sidebar-foreground: oklch(0.985 0 0);
-	--sidebar-primary: oklch(0.488 0.243 264.376);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.269 0 0);
-	--sidebar-accent-foreground: oklch(0.985 0 0);
-	--sidebar-border: oklch(1 0 0 / 10%);
-	--sidebar-ring: oklch(0.556 0 0);
+@media (prefers-color-scheme: dark) {
+	:root {
+		--background: oklch(0.145 0 0);
+		--foreground: oklch(0.985 0 0);
+		--card: oklch(0.205 0 0);
+		--card-foreground: oklch(0.985 0 0);
+		--popover: oklch(0.205 0 0);
+		--popover-foreground: oklch(0.985 0 0);
+		--primary: oklch(0.922 0 0);
+		--primary-foreground: oklch(0.205 0 0);
+		--secondary: oklch(0.269 0 0);
+		--secondary-foreground: oklch(0.985 0 0);
+		--muted: oklch(0.269 0 0);
+		--muted-foreground: oklch(0.708 0 0);
+		--accent: oklch(0.269 0 0);
+		--accent-foreground: oklch(0.985 0 0);
+		--destructive: oklch(0.704 0.191 22.216);
+		--border: oklch(1 0 0 / 10%);
+		--input: oklch(1 0 0 / 15%);
+		--ring: oklch(0.556 0 0);
+		--chart-1: oklch(0.87 0 0);
+		--chart-2: oklch(0.556 0 0);
+		--chart-3: oklch(0.439 0 0);
+		--chart-4: oklch(0.371 0 0);
+		--chart-5: oklch(0.269 0 0);
+		--sidebar: oklch(0.205 0 0);
+		--sidebar-foreground: oklch(0.985 0 0);
+		--sidebar-primary: oklch(0.488 0.243 264.376);
+		--sidebar-primary-foreground: oklch(0.985 0 0);
+		--sidebar-accent: oklch(0.269 0 0);
+		--sidebar-accent-foreground: oklch(0.985 0 0);
+		--sidebar-border: oklch(1 0 0 / 10%);
+		--sidebar-ring: oklch(0.556 0 0);
+
+		/* Log-view palette, dark — values from the approved Claude Design dark
+		   variants (Feed v2 / Extension Popup [data-theme=dark] token block).
+		   Two deliberate deviations: (1) the accent is strawberry crimson, not
+		   the mock's indigo — depth-matched in OKLCH (indigo-600 L, max
+		   in-gamut red chroma, hue 8); (2) dark text-accent brightens
+		   (L/C of indigo-400 rotated to hue 8) because a 0.51-L accent is
+		   illegible on the 0.145 bg; solid fills keep the deep crimson. */
+		--log-accent: oklch(0.68 0.158 8); /* ≈#e76986 */
+		--log-accent-solid: oklch(0.51 0.2 8);
+		--log-rule: oklch(1 0 0 / 8%); /* mock --border2 */
+		--log-hover: oklch(0.25 0 0);
+		--log-panel: oklch(0.18 0 0);
+		--log-soft: oklch(0.269 0 0); /* mock --sec */
+		--log-facet-active: oklch(0.32 0.06 8);
+		--log-card-border: oklch(1 0 0 / 12%); /* mock --border */
+		--log-chip-bg: oklch(0.269 0 0);
+		--log-chip-fg: oklch(0.76 0 0);
+		--log-fg: oklch(0.86 0 0); /* mock --text2 */
+		--log-note-fg: oklch(0.92 0 0); /* mock --text1 */
+		--log-faint: oklch(0.62 0 0);
+		--log-ghost: oklch(0.62 0 0); /* mock folds archive-resting into --faint */
+		--log-dash: oklch(1 0 0 / 25%); /* mock --border-strong */
+		--log-strong-border: oklch(1 0 0 / 25%);
+		--log-btn: oklch(0.42 0 0); /* mock --savebg */
+		--log-btn-hover: oklch(0.5 0 0);
+	}
 }
 
 @layer base {
@@ -126,5 +180,8 @@
 	}
 	html {
 		@apply font-sans;
+		/* Native controls (scrollbars, search-cancel, textareas) follow the
+		   active scheme. */
+		color-scheme: light dark;
 	}
 }

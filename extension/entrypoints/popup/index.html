@@ -5,23 +5,41 @@
     <title>Smultronstället</title>
     <style>
       :root {
-        color-scheme: light;
+        color-scheme: light dark;
         --border: oklch(0.9 0 0);
         --border-soft: oklch(0.945 0 0);
         --muted: oklch(0.55 0 0);
-        --accent: #4f46e5;
+        --accent: oklch(0.51 0.2 8); /* strawberry crimson, ≈#bb0a50 */
         --err: #b02a2a;
+        --accent-solid: oklch(0.51 0.2 8);
+        --fg: oklch(0.2 0 0);
+        --card: #fff;
+        --focus-bg: oklch(0.98 0 0);
+        --chip-bg: oklch(0.962 0 0);
+        --chip-fg: oklch(0.45 0 0);
+        --faint: oklch(0.65 0 0);
+        --faint-hover: oklch(0.3 0 0);
+        --placeholder: oklch(0.7 0 0);
+        --input-border: oklch(0.92 0 0);
+        --btn-fg: oklch(0.4 0 0);
+        --soft: oklch(0.97 0 0);
+        --message: oklch(0.45 0 0);
+        --dot: oklch(0.75 0 0);
+        --ok: oklch(0.55 0.12 150);
+        --ok-dot: oklch(0.65 0.15 150);
+        --arch: oklch(0.5 0 0);
+        --arch-dot: oklch(0.7 0 0);
         --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
       }
       body {
         margin: 0;
         width: 360px;
         background: transparent;
-        color: oklch(0.2 0 0);
+        color: var(--fg);
         font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
       }
       .card {
-        background: #fff;
+        background: var(--card);
         border: 1px solid var(--border);
         border-radius: 10px;
         overflow: hidden;
@@ -50,19 +68,19 @@
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background: oklch(0.75 0 0);
+        background: var(--dot);
       }
       .status.bookmarked {
-        color: oklch(0.55 0.12 150);
+        color: var(--ok);
       }
       .status.bookmarked .dot {
-        background: oklch(0.65 0.15 150);
+        background: var(--ok-dot);
       }
       .status.archived {
-        color: oklch(0.5 0 0);
+        color: var(--arch);
       }
       .status.archived .dot {
-        background: oklch(0.7 0 0);
+        background: var(--arch-dot);
       }
       .body {
         display: flex;
@@ -104,7 +122,7 @@
         outline: none;
       }
       .title-input:focus {
-        background: oklch(0.98 0 0);
+        background: var(--focus-bg);
       }
       .page-title {
         font-size: 13px;
@@ -144,10 +162,10 @@
         gap: 4px;
         padding: 2px 7px;
         border-radius: 4px;
-        background: oklch(0.962 0 0);
+        background: var(--chip-bg);
         font-family: var(--mono);
         font-size: 10.5px;
-        color: oklch(0.45 0 0);
+        color: var(--chip-fg);
       }
       .chip-remove {
         padding: 0;
@@ -155,11 +173,11 @@
         background: none;
         font-size: 10px;
         line-height: 1;
-        color: oklch(0.65 0 0);
+        color: var(--faint);
         cursor: pointer;
       }
       .chip-remove:hover {
-        color: oklch(0.3 0 0);
+        color: var(--faint-hover);
       }
       .tag-input {
         width: 80px;
@@ -171,15 +189,15 @@
         outline: none;
       }
       .tag-input::placeholder {
-        color: oklch(0.7 0 0);
+        color: var(--placeholder);
       }
       .note-input {
         width: 100%;
         box-sizing: border-box;
         padding: 7px 10px;
-        border: 1px solid oklch(0.92 0 0);
+        border: 1px solid var(--input-border);
         border-radius: 6px;
-        background: #fff;
+        background: var(--card);
         color: inherit;
         font: inherit;
         font-size: 12px;
@@ -191,7 +209,7 @@
         border-color: var(--accent);
       }
       .note-input::placeholder {
-        color: oklch(0.7 0 0);
+        color: var(--placeholder);
       }
       .footer {
         display: flex;
@@ -214,22 +232,22 @@
       }
       .btn-secondary {
         padding: 5px 10px;
-        border: 1px solid oklch(0.92 0 0);
+        border: 1px solid var(--input-border);
         border-radius: 6px;
-        background: #fff;
+        background: var(--card);
         font: inherit;
         font-size: 11.5px;
-        color: oklch(0.4 0 0);
+        color: var(--btn-fg);
         cursor: pointer;
       }
       .btn-secondary:hover {
-        background: oklch(0.97 0 0);
+        background: var(--soft);
       }
       .btn-accent {
         padding: 5px 12px;
         border: none;
         border-radius: 6px;
-        background: var(--accent);
+        background: var(--accent-solid);
         font: inherit;
         font-size: 11.5px;
         font-weight: 500;
@@ -245,7 +263,7 @@
       }
       .message {
         font-size: 12px;
-        color: oklch(0.45 0 0);
+        color: var(--message);
       }
       .error-line {
         font-family: var(--mono);
@@ -254,6 +272,37 @@
       }
       .hidden {
         display: none;
+      }
+      /* Dark values from the approved Claude Design [data-theme=dark] token
+         block (Extension Popup mock). Deviations as on the web client
+         (globals.css): strawberry-crimson accent instead of the mock's
+         indigo, and the dark text/border accent brightens for legibility
+         while the solid Save button keeps the deep crimson. */
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --border: oklch(1 0 0 / 12%);
+          --border-soft: oklch(1 0 0 / 8%);
+          --muted: oklch(0.708 0 0);
+          --accent: oklch(0.68 0.158 8); /* ≈#e76986 */
+          --err: #f87171;
+          --fg: oklch(0.92 0 0);
+          --card: oklch(0.205 0 0);
+          --focus-bg: oklch(0.25 0 0);
+          --chip-bg: oklch(0.269 0 0);
+          --chip-fg: oklch(0.76 0 0);
+          --faint: oklch(0.62 0 0);
+          --faint-hover: oklch(0.92 0 0);
+          --placeholder: oklch(0.55 0 0);
+          --input-border: oklch(1 0 0 / 12%);
+          --btn-fg: oklch(0.8 0 0);
+          --soft: oklch(0.269 0 0);
+          --message: oklch(0.708 0 0);
+          --dot: oklch(0.45 0 0);
+          --ok: oklch(0.75 0.12 150);
+          --ok-dot: oklch(0.7 0.14 150);
+          --arch: oklch(0.65 0 0);
+          --arch-dot: oklch(0.5 0 0);
+        }
       }
     </style>
   </head>
