@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Smultronstället</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --border: oklch(0.9 0 0);
+        --border-soft: oklch(0.945 0 0);
+        --muted: oklch(0.55 0 0);
+        --accent: #4f46e5;
+        --err: #b02a2a;
+        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      body {
+        margin: 0;
+        width: 360px;
+        background: transparent;
+        color: oklch(0.2 0 0);
+        font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+      }
+      .card {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border-soft);
+      }
+      .brand {
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.025em;
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+      }
+      .status .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: oklch(0.75 0 0);
+      }
+      .status.bookmarked {
+        color: oklch(0.55 0.12 150);
+      }
+      .status.bookmarked .dot {
+        background: oklch(0.65 0.15 150);
+      }
+      .status.archived {
+        color: oklch(0.5 0 0);
+      }
+      .status.archived .dot {
+        background: oklch(0.7 0 0);
+      }
+      .body {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 14px;
+      }
+      .page-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+      }
+      .favicon {
+        flex: none;
+        width: 16px;
+        height: 16px;
+        margin-top: 3px;
+        border-radius: 3px;
+      }
+      .page-col {
+        display: flex;
+        flex: 1;
+        min-width: 0;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .title-input {
+        width: 100%;
+        box-sizing: border-box;
+        margin: -2px -4px;
+        padding: 2px 4px;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        outline: none;
+      }
+      .title-input:focus {
+        background: oklch(0.98 0 0);
+      }
+      .page-title {
+        font-size: 13px;
+        font-weight: 500;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .page-url {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .block {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .block-label {
+        font-family: var(--mono);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 5px;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 7px;
+        border-radius: 4px;
+        background: oklch(0.962 0 0);
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: oklch(0.45 0 0);
+      }
+      .chip-remove {
+        padding: 0;
+        border: none;
+        background: none;
+        font-size: 10px;
+        line-height: 1;
+        color: oklch(0.65 0 0);
+        cursor: pointer;
+      }
+      .chip-remove:hover {
+        color: oklch(0.3 0 0);
+      }
+      .tag-input {
+        width: 80px;
+        border: none;
+        background: transparent;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: inherit;
+        outline: none;
+      }
+      .tag-input::placeholder {
+        color: oklch(0.7 0 0);
+      }
+      .note-input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 7px 10px;
+        border: 1px solid oklch(0.92 0 0);
+        border-radius: 6px;
+        background: #fff;
+        color: inherit;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1.5;
+        resize: none;
+        outline: none;
+      }
+      .note-input:focus {
+        border-color: var(--accent);
+      }
+      .note-input::placeholder {
+        color: oklch(0.7 0 0);
+      }
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .footer-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .saved-line {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .btn-secondary {
+        padding: 5px 10px;
+        border: 1px solid oklch(0.92 0 0);
+        border-radius: 6px;
+        background: #fff;
+        font: inherit;
+        font-size: 11.5px;
+        color: oklch(0.4 0 0);
+        cursor: pointer;
+      }
+      .btn-secondary:hover {
+        background: oklch(0.97 0 0);
+      }
+      .btn-accent {
+        padding: 5px 12px;
+        border: none;
+        border-radius: 6px;
+        background: var(--accent);
+        font: inherit;
+        font-size: 11.5px;
+        font-weight: 500;
+        color: #fff;
+        cursor: pointer;
+      }
+      .btn-accent:hover {
+        filter: brightness(1.1);
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .message {
+        font-size: 12px;
+        color: oklch(0.45 0 0);
+      }
+      .error-line {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--err);
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <header class="header">
+        <span class="brand">Smultronstället</span>
+        <span class="status" id="status">
+          <span class="dot"></span>
+          <span id="status-label">…</span>
+        </span>
+      </header>
+      <div class="body" id="view"></div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
