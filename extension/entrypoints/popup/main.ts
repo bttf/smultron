@@ -1,8 +1,10 @@
 // Browser-action popup: look up the active tab's bookmark via
 // GET /api/bookmarks/by-url, edit title/tags/note locally, save with one
-// PATCH, archive/restore, or create the bookmark (default folder — the
-// background's onCreated listener live-syncs it). All popup traffic is
-// DIRECT fetch with truthful user-visible outcomes — never the outbox.
+// PATCH, archive/restore. Pages that aren't bookmarked yet are bookmarked
+// AUTOMATICALLY on open (default folder — the background's onCreated
+// listener live-syncs it); a manual retry CTA only appears if that fails.
+// All popup traffic is DIRECT fetch with truthful user-visible outcomes —
+// never the outbox.
 
 import { relativeTime } from "@/src/relativeTime";
 import {
@@ -246,16 +248,72 @@ function renderError(text: string): void {
 	render(el("div", "error-line", text));
 }
 
+/**
+ * Create the Chrome bookmark and wait for live sync to land server-side.
+ * Returns the synced bookmark, or a user-facing failure message. The caller
+ * decides what to render around it.
+ */
+async function createAndWaitForSync(
+	config: PopupConfig,
+	tabUrl: URL,
+	tabTitle: string,
+): Promise<
+	{ ok: true; bookmark: BookmarkDto } | { ok: false; message: string }
+> {
+	try {
+		// A Chrome bookmark may already exist even though the server row
+		// hasn't landed (sync lagging, or a retry after a poll timeout) —
+		// skip the create and just poll, so reopening the popup never mints
+		// duplicate Chrome rows. A URL-variant miss here is acceptable: the
+		// server dedupes by normalized URL (same rule as highlight capture,
+		// SPEC §6).
+		const existing = await browser.bookmarks.search({ url: tabUrl.href });
+		if (existing.length === 0) {
+			// Default folder (no parentId): the background onCreated listener
+			// live-syncs this creation, which correctly bumps updated_at.
+			await browser.bookmarks.create({
+				title: tabTitle,
+				url: tabUrl.href,
+			});
+		}
+	} catch (error) {
+		return {
+			ok: false,
+			message: `couldn't create bookmark: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
+	// Poll until live sync lands, then swap to the editing card.
+	const deadline = Date.now() + SYNC_POLL_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
+		const result = await getBookmarkByUrl(config, tabUrl.href);
+		if (result.ok && result.value !== null) {
+			return { ok: true, bookmark: result.value };
+		}
+	}
+	return {
+		ok: false,
+		message: "sync hasn't caught up — reopen the popup in a moment.",
+	};
+}
+
+/**
+ * Fallback view when the automatic bookmark failed: page row + retry CTA
+ * with the failure message visible.
+ */
 function renderNotBookmarked(
 	config: PopupConfig,
 	tabUrl: URL,
 	tabTitle: string,
+	initialError: string,
 ): void {
 	setHeaderStatus("not-bookmarked");
 	const { row } = pageRow(tabUrl, tabTitle, { editable: false });
 	const button = el("button", "btn-accent", "Bookmark this page");
 	button.type = "button";
-	const errorLine = el("div", "error-line hidden");
+	const errorLine = el("div", "error-line", initialError);
 	const actions = el("div", "footer-actions");
 	actions.append(button);
 
@@ -264,43 +322,40 @@ function renderNotBookmarked(
 			button.disabled = true;
 			errorLine.classList.add("hidden");
 			setHeaderStatus("syncing");
-			try {
-				// Default folder (no parentId): the background onCreated listener
-				// live-syncs this creation, which correctly bumps updated_at.
-				await browser.bookmarks.create({
-					title: tabTitle,
-					url: tabUrl.href,
-				});
-			} catch (error) {
-				setHeaderStatus("not-bookmarked");
-				button.disabled = false;
-				errorLine.textContent = `couldn't create bookmark: ${
-					error instanceof Error ? error.message : String(error)
-				}`;
-				errorLine.classList.remove("hidden");
+			const result = await createAndWaitForSync(config, tabUrl, tabTitle);
+			if (result.ok) {
+				renderEditor(config, tabUrl, result.bookmark);
 				return;
-			}
-			// Poll until live sync lands, then swap to the editing card.
-			const deadline = Date.now() + SYNC_POLL_TIMEOUT_MS;
-			while (Date.now() < deadline) {
-				await new Promise((resolve) =>
-					setTimeout(resolve, SYNC_POLL_INTERVAL_MS),
-				);
-				const result = await getBookmarkByUrl(config, tabUrl.href);
-				if (result.ok && result.value !== null) {
-					renderEditor(config, tabUrl, result.value);
-					return;
-				}
 			}
 			setHeaderStatus("not-bookmarked");
 			button.disabled = false;
-			errorLine.textContent =
-				"sync hasn't caught up — reopen the popup in a moment.";
+			errorLine.textContent = result.message;
 			errorLine.classList.remove("hidden");
 		})();
 	});
 
 	render(row, actions, errorLine);
+}
+
+/**
+ * Auto-bookmark on open: show the page row in a syncing state, create the
+ * bookmark immediately, then swap to the editor. On failure, fall back to
+ * the manual CTA so the user can retry.
+ */
+async function autoBookmark(
+	config: PopupConfig,
+	tabUrl: URL,
+	tabTitle: string,
+): Promise<void> {
+	setHeaderStatus("syncing");
+	const { row } = pageRow(tabUrl, tabTitle, { editable: false });
+	render(row);
+	const result = await createAndWaitForSync(config, tabUrl, tabTitle);
+	if (result.ok) {
+		renderEditor(config, tabUrl, result.bookmark);
+	} else {
+		renderNotBookmarked(config, tabUrl, tabTitle, result.message);
+	}
 }
 
 function renderEditor(
@@ -481,7 +536,7 @@ async function init(): Promise<void> {
 	}
 
 	if (result.value === null) {
-		renderNotBookmarked(config, tabUrl, tab?.title ?? rawUrl);
+		await autoBookmark(config, tabUrl, tab?.title ?? rawUrl);
 	} else {
 		renderEditor(config, tabUrl, result.value);
 	}
