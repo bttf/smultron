@@ -154,10 +154,18 @@ export function Feed() {
 	// server-side.
 	const sortedTags = useMemo(() => [...activeTags].sort(), [activeTags]);
 	const key = buildUrl(query, archived, sortedTags);
+	// keepPreviousData: a key change (tag toggle, search, view switch) keeps
+	// the previous response rendered while the new page loads, instead of
+	// blanking to `data === undefined`. Facets ignore the tag filter
+	// server-side, so across tag toggles the sidebar content is IDENTICAL —
+	// this is what keeps the tag list persistent while the log refetches.
+	// `isLoading` stays true during such a fetch (SWR semantics: no data for
+	// the CURRENT key yet) — used below to dim stale rows and park the
+	// infinite-scroll sentinel; background polls don't set it.
 	const { data, error, isLoading, mutate } = useSWR<ListResponse, Error>(
 		key,
 		fetcher,
-		{ refreshInterval: 10_000 },
+		{ refreshInterval: 10_000, keepPreviousData: true },
 	);
 
 	// Deeper pages, loaded via the infinite-scroll sentinel. Only page 1 (the
@@ -249,7 +257,12 @@ export function Feed() {
 	// initial callback with the current intersection state). Search results
 	// (q present) are a single page with no cursor — no sentinel.
 	useEffect(() => {
-		if (!noQuery || cursor === null) {
+		// `isLoading` gate: while stale previous-key data is showing
+		// (keepPreviousData), `cursor` still belongs to the OLD key — don't
+		// let the sentinel page with it under the new filters. The sentinel
+		// row isn't rendered then either; the dep re-arms the observer once
+		// the new page lands and the sentinel mounts.
+		if (!noQuery || cursor === null || isLoading) {
 			return;
 		}
 		const el = sentinelRef.current;
@@ -266,7 +279,7 @@ export function Feed() {
 		);
 		observer.observe(el);
 		return () => observer.disconnect();
-	}, [noQuery, cursor]);
+	}, [noQuery, cursor, isLoading]);
 
 	async function patchRow(
 		id: number,
@@ -434,31 +447,37 @@ export function Feed() {
 						</p>
 					) : null}
 
-					{isLoading ? (
+					{!data && isLoading ? (
 						<p className="px-4 py-6 font-mono text-xs text-muted-foreground">
 							Loading…
 						</p>
 					) : items.length === 0 ? (
 						<EmptyState archived={archived} noQuery={noQuery} />
 					) : (
-						items.map((b) => (
-							<LogRow
-								key={b.id}
-								bookmark={b}
-								archivedView={archived}
-								expanded={expanded === b.id}
-								activeTags={activeTags}
-								onToggleExpand={() =>
-									setExpanded((prev) => (prev === b.id ? null : b.id))
-								}
-								onToggleTag={toggleTag}
-								onPatch={patchRow}
-								onDeleteHighlight={deleteHighlight}
-							/>
-						))
+						// Stale rows (previous key, kept by keepPreviousData) dim
+						// while the new page is in flight.
+						<div
+							className={cn("transition-opacity", isLoading && "opacity-60")}
+						>
+							{items.map((b) => (
+								<LogRow
+									key={b.id}
+									bookmark={b}
+									archivedView={archived}
+									expanded={expanded === b.id}
+									activeTags={activeTags}
+									onToggleExpand={() =>
+										setExpanded((prev) => (prev === b.id ? null : b.id))
+									}
+									onToggleTag={toggleTag}
+									onPatch={patchRow}
+									onDeleteHighlight={deleteHighlight}
+								/>
+							))}
+						</div>
 					)}
 
-					{noQuery && cursor !== null ? (
+					{noQuery && cursor !== null && !isLoading ? (
 						<div
 							ref={sentinelRef}
 							className="px-4 py-2 font-mono text-[11px] text-muted-foreground"
