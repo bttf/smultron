@@ -166,7 +166,10 @@ function decodeCursor(raw: string): CursorPayload {
 		parsed === null ||
 		typeof (parsed as CursorPayload).u !== "string" ||
 		typeof (parsed as CursorPayload).id !== "number" ||
-		!Number.isInteger((parsed as CursorPayload).id) ||
+		// Safe-integer (not just integer): a forged id like 1e19 would either
+		// overflow int8 or serialize as "1e+19" — both Postgres errors that
+		// would escape the InvalidCursorError → 400 mapping.
+		!Number.isSafeInteger((parsed as CursorPayload).id) ||
 		Number.isNaN(new Date((parsed as CursorPayload).u).getTime())
 	) {
 		throw new InvalidCursorError();
@@ -319,8 +322,15 @@ export async function listBookmarks(
 			// Keyset pagination: strictly "after" the cursor row in the
 			// (updated_at desc, id desc) ordering. Row-comparison is
 			// lexicographic, which matches that ordering exactly.
+			// The params MUST be cast explicitly: raw sql`` params are sent
+			// untyped, and postgres-js stringifies a Date param into a form
+			// Postgres can't parse inside a row constructor (500 in prod,
+			// invisible on PGlite) — so pass an ISO string + ::timestamptz.
+			// Round-tripping through new Date(...).toISOString() normalizes
+			// forged-but-JS-parseable `u` values (e.g. "1") into a form
+			// Postgres is guaranteed to accept.
 			conditions.push(
-				sql`(${bookmarks.updatedAt}, ${bookmarks.id}) < (${new Date(cursor.u)}, ${cursor.id})`,
+				sql`(${bookmarks.updatedAt}, ${bookmarks.id}) < (${new Date(cursor.u).toISOString()}::timestamptz, ${cursor.id}::bigint)`,
 			);
 		}
 

@@ -212,6 +212,16 @@ describe("listBookmarks — feed", () => {
 				cursor: Buffer.from("not json", "utf8").toString("base64url"),
 			}),
 		).rejects.toBeInstanceOf(InvalidCursorError);
+		// Unsafe-integer id: would overflow int8 / serialize as "1e+19" in
+		// Postgres — must be rejected up front, not surface as a query error.
+		await expect(
+			listBookmarks(db, USER_A, {
+				cursor: Buffer.from(
+					JSON.stringify({ u: "2026-01-01T00:00:00.000Z", id: 1e19 }),
+					"utf8",
+				).toString("base64url"),
+			}),
+		).rejects.toBeInstanceOf(InvalidCursorError);
 	});
 });
 
