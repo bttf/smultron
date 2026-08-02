@@ -1,9 +1,10 @@
 "use client";
-// Feed v2 "log view" + search UI — SPEC §9, m9. Talks ONLY to /api/bookmarks*
-// (Hard rule #2 — never the DB directly). SWR polls page 1 every 10s; deeper
-// keyset pages append via an infinite-scroll sentinel. Row edits (title/tags/
-// archive, highlight delete) PATCH/DELETE then reconcile local state — see the
-// comments inside `Feed` for the reconciliation model.
+// Feed v2 "log view" + search UI — SPEC §9, m9 (+ m10 notes & chip tag
+// editing). Talks ONLY to /api/bookmarks* (Hard rule #2 — never the DB
+// directly). SWR polls page 1 every 10s; deeper keyset pages append via an
+// infinite-scroll sentinel. Row edits (title/tags/note/archive, highlight
+// delete) PATCH/DELETE then reconcile local state — see the comments inside
+// `Feed` for the reconciliation model.
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { relativeTime } from "../lib/relativeTime";
@@ -22,6 +23,9 @@ type ApiBookmark = {
 	urlNormalized: string;
 	title: string;
 	tags: string[];
+	// m10: PATCHing `note: ""` clears it — the server stores null and the
+	// returned row (landing in `overrides`) reflects that.
+	note: string | null;
 	createdAt: string;
 	updatedAt: string;
 	archivedAt: string | null;
@@ -41,7 +45,7 @@ type ListResponse = {
 
 type PatchFn = (
 	id: number,
-	patch: { title?: string; tags?: string[]; archived?: boolean },
+	patch: { title?: string; tags?: string[]; note?: string; archived?: boolean },
 ) => Promise<void>;
 
 class FetchError extends Error {}
@@ -283,7 +287,12 @@ export function Feed() {
 
 	async function patchRow(
 		id: number,
-		patch: { title?: string; tags?: string[]; archived?: boolean },
+		patch: {
+			title?: string;
+			tags?: string[];
+			note?: string;
+			archived?: boolean;
+		},
 	) {
 		const res = await fetch(`/api/bookmarks/${id}`, {
 			method: "PATCH",
@@ -602,6 +611,16 @@ function LogRow({
 						✱ {bookmark.highlights.length}
 					</span>
 				) : null}
+				{/* `?? null` guards the window where page 1 predates the m10 backend
+				    and rows arrive without a `note` key. */}
+				{(bookmark.note ?? null) !== null ? (
+					<span
+						title="Has note"
+						className="shrink-0 rounded-full bg-[oklch(0.97_0_0)] px-[7px] py-px font-mono text-[10.5px] text-[oklch(0.55_0_0)]"
+					>
+						▤
+					</span>
+				) : null}
 				{bookmark.tags.length > 0 ? (
 					<span className="flex shrink-0 items-center gap-1">
 						{bookmark.tags.map((tag) => {
@@ -683,15 +702,19 @@ function ExpandedPanel({
 					onSave={(title) => onPatch(bookmark.id, { title })}
 				/>
 			</div>
-			<div className="flex max-w-[720px] items-baseline gap-2">
+			<div className="flex max-w-[720px] items-center gap-2">
 				<span className="shrink-0 font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
 					TAGS
 				</span>
-				<EditableTags
+				<TagChips
 					tags={bookmark.tags}
 					onSave={(tags) => onPatch(bookmark.id, { tags })}
 				/>
 			</div>
+			<NoteSection
+				note={bookmark.note ?? null}
+				onSave={(note) => onPatch(bookmark.id, { note })}
+			/>
 			{bookmark.highlights.length > 0 ? (
 				<Fragment>
 					<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
@@ -802,65 +825,162 @@ function EditableTitle({
 	);
 }
 
-function EditableTags({
+// m10 chip editor: every mutation (✕ remove, ⏎ add) is ONE PATCH of the full
+// tags array — the returned row lands in `overrides` like any other edit, so
+// there is no local tags state to drift; only the add-input draft is local.
+function TagChips({
 	tags,
 	onSave,
 }: {
 	tags: string[];
 	onSave: (next: string[]) => void;
 }) {
-	const [editing, setEditing] = useState(false);
-	const [value, setValue] = useState(tags.join(", "));
+	const [draft, setDraft] = useState("");
 
-	useEffect(() => {
-		setValue(tags.join(", "));
-	}, [tags]);
-
-	function commit() {
-		setEditing(false);
-		const next = value
-			.split(",")
-			.map((t) => t.trim())
-			.filter(Boolean);
-		const changed =
-			next.length !== tags.length || next.some((t, i) => t !== tags[i]);
-		if (changed) {
-			onSave(next);
+	function addTag() {
+		const next = draft.trim();
+		if (!next) {
+			return;
 		}
+		if (tags.includes(next)) {
+			// Duplicate — nothing to add, but clear the input so the rejected
+			// text doesn't linger looking un-submitted.
+			setDraft("");
+			return;
+		}
+		onSave([...tags, next]);
+		setDraft("");
+	}
+
+	return (
+		<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+			{tags.map((tag) => (
+				<span
+					key={tag}
+					className="flex items-center gap-1 rounded bg-[oklch(0.962_0_0)] px-[7px] py-[2px] font-mono text-[10.5px] text-[oklch(0.45_0_0)]"
+				>
+					{tag}
+					<button
+						type="button"
+						aria-label={`Remove tag ${tag}`}
+						onClick={() => onSave(tags.filter((t) => t !== tag))}
+						className="text-[10px] text-[oklch(0.65_0_0)] hover:text-[oklch(0.2_0_0)]"
+					>
+						✕
+					</button>
+				</span>
+			))}
+			<input
+				value={draft}
+				onChange={(e) => setDraft(e.target.value)}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") {
+						e.preventDefault();
+						addTag();
+					} else if (e.key === "Escape") {
+						e.preventDefault();
+						setDraft("");
+						e.currentTarget.blur();
+					}
+				}}
+				placeholder="add tag ⏎"
+				className="w-[84px] rounded border border-dashed border-[oklch(0.88_0_0)] px-[7px] py-px font-mono text-[10.5px] text-[oklch(0.3_0_0)] outline-none focus:border-solid focus:border-[var(--log-accent)]"
+			/>
+		</div>
+	);
+}
+
+// m10 NOTE section. The editor state lives here in the panel — only one row
+// expands at a time, so collapsing/switching rows unmounts (and discards) any
+// in-progress draft by construction. Save always PATCHes the trimmed draft;
+// trimmed-empty means delete (server nulls the note, and the returned row in
+// `overrides` flips this back to the SET NOTES state).
+function NoteSection({
+	note,
+	onSave,
+}: {
+	note: string | null;
+	onSave: (next: string) => void;
+}) {
+	const [editing, setEditing] = useState(false);
+	const [draft, setDraft] = useState("");
+
+	function open() {
+		setDraft(note ?? "");
+		setEditing(true);
+	}
+
+	function save() {
+		setEditing(false);
+		onSave(draft.trim());
 	}
 
 	if (editing) {
 		return (
-			<input
-				// biome-ignore lint/a11y/noAutofocus: user just clicked the tags to edit — focus is expected.
-				autoFocus
-				value={value}
-				onChange={(e) => setValue(e.target.value)}
-				onBlur={commit}
-				onKeyDown={(e) => {
-					if (e.key === "Enter") {
-						e.preventDefault();
-						commit();
-					} else if (e.key === "Escape") {
-						e.preventDefault();
-						setValue(tags.join(", "));
-						setEditing(false);
-					}
-				}}
-				placeholder="comma, separated, tags"
-				className="w-full min-w-0 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] outline-none focus:border-[var(--log-accent)]"
-			/>
+			<div className="flex max-w-[720px] flex-col gap-1.5">
+				<textarea
+					// biome-ignore lint/a11y/noAutofocus: user just clicked to edit the note — focus is expected.
+					autoFocus
+					rows={3}
+					value={draft}
+					onChange={(e) => setDraft(e.target.value)}
+					onKeyDown={(e) => {
+						if (e.key === "Enter" && !e.shiftKey) {
+							e.preventDefault();
+							save();
+						} else if (e.key === "Escape") {
+							e.preventDefault();
+							setEditing(false);
+						}
+					}}
+					placeholder="Write a note… (Enter to save, Esc to cancel)"
+					className="resize-y rounded-md border border-[oklch(0.922_0_0)] bg-white px-2.5 py-[7px] text-[12.5px] leading-[1.55] text-[oklch(0.2_0_0)] outline-none [font-family:inherit] focus:border-[var(--log-accent)]"
+				/>
+				<div className="flex gap-1.5">
+					<button
+						type="button"
+						onClick={save}
+						className="rounded-md bg-[oklch(0.556_0_0)] px-3 py-1 text-[11.5px] font-medium text-white hover:bg-[oklch(0.45_0_0)]"
+					>
+						Save
+					</button>
+					<button
+						type="button"
+						onClick={() => setEditing(false)}
+						className="rounded-md border border-[oklch(0.92_0_0)] bg-white px-3 py-1 text-[11.5px] text-[oklch(0.4_0_0)] hover:bg-[oklch(0.97_0_0)]"
+					>
+						Cancel
+					</button>
+				</div>
+			</div>
+		);
+	}
+
+	if (note === null) {
+		return (
+			<button
+				type="button"
+				onClick={open}
+				className="self-start font-mono text-[10px] tracking-[0.08em] text-muted-foreground hover:text-foreground"
+			>
+				SET NOTES
+			</button>
 		);
 	}
 
 	return (
-		<button
-			type="button"
-			onClick={() => setEditing(true)}
-			className="min-w-0 truncate text-left font-mono text-[11px] text-[oklch(0.45_0_0)] hover:underline"
-			title="Click to edit tags"
-		>
-			{tags.length === 0 ? "add tags…" : tags.join(", ")}
-		</button>
+		<Fragment>
+			<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+				NOTE
+			</span>
+			<button
+				type="button"
+				onClick={open}
+				title="Click to edit note"
+				className="max-w-[720px] cursor-text whitespace-pre-wrap rounded-md border border-[oklch(0.93_0_0)] bg-white px-2.5 py-[7px] text-left text-[12.5px] leading-[1.55] text-[oklch(0.3_0_0)] hover:border-[oklch(0.85_0_0)]"
+			>
+				{note}
+			</button>
+		</Fragment>
 	);
 }
