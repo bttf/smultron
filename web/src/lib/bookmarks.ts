@@ -16,14 +16,23 @@
 //     search branch always returns `nextCursor: null` and caps at one page
 //     (PAGE_SIZE rows), ranked by ts_rank then recency. Good enough for a
 //     single-user tool's search box; deeper search paging is out of scope.
+//   - m9 log view: `tags` filters with AND semantics (`tags @> ARRAY[...]`,
+//     exact strings). Every response carries view aggregates — `total`
+//     (view only), `matching` (view + q + tags, uncapped), `facets`
+//     (view + q, IGNORING the active tag filter so a selected tag keeps
+//     its count; ordered count desc, tag asc; uncapped) — computed with
+//     three aggregate queries per request (personal-scale data, no new
+//     indexes needed).
 import {
 	and,
+	arrayContains,
 	asc,
 	desc,
 	eq,
 	inArray,
 	isNotNull,
 	isNull,
+	type SQL,
 	sql,
 } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
@@ -169,20 +178,79 @@ export type ListBookmarksOptions = {
 	cursor?: string;
 	/** true = ONLY archived rows (the archive view); false/omitted = live feed. */
 	archived?: boolean;
+	/**
+	 * Tag filter, AND semantics: a row matches only if its `tags` array
+	 * contains EVERY requested tag (`tags @> ARRAY[...]`, exact string
+	 * match). Empty/absent = no filter. Applies to feed and search alike.
+	 */
+	tags?: string[];
 };
+
+/** One entry of `ListBookmarksResult.facets`. */
+export type TagFacet = { tag: string; count: number };
 
 export type ListBookmarksResult = {
 	bookmarks: Bookmark[];
 	nextCursor: string | null;
+	/** Rows in the current view (user + archived state), ignoring q and tags. */
+	total: number;
+	/**
+	 * Rows in the current view matching q AND the tag filter — the FULL
+	 * count, not capped at PAGE_SIZE. Equals `total` when no q and no tags.
+	 */
+	matching: number;
+	/**
+	 * Per-tag counts over the current view matching q (when present) but
+	 * IGNORING the tags filter, so an active tag keeps its count. Ordered
+	 * count desc, then tag asc. Every tag that appears is included (no cap
+	 * — personal-scale data); rows with empty tags contribute nothing.
+	 */
+	facets: TagFacet[];
 };
 
+/** `count(*)` over `bookmarks` under `cond`. */
+async function countBookmarks(
+	db: BookmarksDb,
+	cond: SQL | undefined,
+): Promise<number> {
+	const rows = await db
+		.select({ count: sql<number>`count(*)::int` })
+		.from(bookmarks)
+		.where(cond);
+	return rows[0]?.count ?? 0;
+}
+
 /**
- * Feed (no `q`): `user_id` + archived-state filter, ordered
+ * Per-tag counts under `cond` via `unnest(tags)` in FROM (implicit LATERAL).
+ * Ordering: count desc, tag asc — deterministic for the UI's facet list.
+ */
+async function tagFacets(
+	db: BookmarksDb,
+	cond: SQL | undefined,
+): Promise<TagFacet[]> {
+	return db
+		.select({
+			tag: sql<string>`t.tag`,
+			count: sql<number>`count(*)::int`,
+		})
+		.from(sql`${bookmarks}, unnest(${bookmarks.tags}) as t(tag)`)
+		.where(cond)
+		.groupBy(sql`t.tag`)
+		.orderBy(sql`count(*) desc`, sql`t.tag asc`);
+}
+
+/**
+ * Feed (no `q`): `user_id` + archived-state filter (+ tag filter), ordered
  * `updated_at desc, id desc`, keyset-paginated 50/page.
  *
  * Search (`q`): same filters, matched via FTS (`websearch_to_tsquery`) OR
  * trigram similarity / ILIKE substring on `title` + `url_normalized`,
  * ordered by `ts_rank` desc then recency. Single page, `nextCursor: null`.
+ *
+ * Every page (including cursor pages — uniform shape) also carries the view
+ * aggregates: `total` (ignores q + tags), `matching` (q + tags, full count),
+ * and `facets` (q-scoped, IGNORES the active tag filter). See the
+ * `ListBookmarksResult` field docs for exact scoping.
  */
 export async function listBookmarks(
 	db: BookmarksDb,
@@ -194,12 +262,52 @@ export async function listBookmarks(
 		: isNull(bookmarks.archivedAt);
 
 	const q = options.q?.trim();
+	const tags = options.tags?.length ? options.tags : undefined;
+	// AND semantics: the row's tags array must contain every requested tag.
+	const tagsCond = tags ? arrayContains(bookmarks.tags, tags) : undefined;
+
+	// Decode the cursor up front (feed only) so a malformed one throws
+	// InvalidCursorError before any query runs.
+	const cursor = !q && options.cursor ? decodeCursor(options.cursor) : null;
+
+	// The "current view": this user's rows in the live or archived state.
+	const viewCond = and(eq(bookmarks.userId, userId), archivedCond);
+
+	// Search predicate: FTS OR trgm similarity OR ILIKE substring, on title +
+	// url_normalized. `sql` template params are parameterized, so `q` is
+	// safe to interpolate directly (no manual escaping). Built up front so
+	// the aggregates and the search branch share the exact same condition.
+	const tsVector = sql`to_tsvector('simple', ${bookmarks.title} || ' ' || ${bookmarks.urlNormalized})`;
+	const tsQuery = sql`websearch_to_tsquery('simple', ${q})`;
+	const like = `%${q}%`;
+	const matchCond = q
+		? sql`(
+			(${tsVector}) @@ (${tsQuery})
+			OR ${bookmarks.title} % ${q}
+			OR ${bookmarks.urlNormalized} % ${q}
+			OR ${bookmarks.title} ILIKE ${like}
+			OR ${bookmarks.urlNormalized} ILIKE ${like}
+		)`
+		: undefined;
+
+	// Aggregates (returned on every page — uniform shape):
+	//   total    — view only; matching — view + q + tags (full count, no cap);
+	//   facets   — view + q, IGNORING tags (an active tag keeps its count).
+	// `matching === total` by definition when there's no q and no tags, so
+	// skip the redundant count in that case.
+	const [total, matching, facets] = await Promise.all([
+		countBookmarks(db, viewCond),
+		matchCond || tagsCond
+			? countBookmarks(db, and(viewCond, matchCond, tagsCond))
+			: undefined,
+		tagFacets(db, and(viewCond, matchCond)),
+	]);
+	const aggregates = { total, matching: matching ?? total, facets };
 
 	if (!q) {
-		const conditions = [eq(bookmarks.userId, userId), archivedCond];
+		const conditions = [viewCond, tagsCond];
 
-		if (options.cursor) {
-			const cursor = decodeCursor(options.cursor);
+		if (cursor) {
 			// Keyset pagination: strictly "after" the cursor row in the
 			// (updated_at desc, id desc) ordering. Row-comparison is
 			// lexicographic, which matches that ordering exactly.
@@ -221,28 +329,17 @@ export async function listBookmarks(
 		const nextCursor =
 			hasMore && last ? encodeCursor(last.updatedAt, last.id) : null;
 
-		return { bookmarks: await withHighlights(db, page), nextCursor };
+		return {
+			bookmarks: await withHighlights(db, page),
+			nextCursor,
+			...aggregates,
+		};
 	}
-
-	// Search: FTS OR trgm similarity OR ILIKE substring, on title +
-	// url_normalized. `sql` template params are parameterized, so `q` is
-	// safe to interpolate directly (no manual escaping).
-	const tsVector = sql`to_tsvector('simple', ${bookmarks.title} || ' ' || ${bookmarks.urlNormalized})`;
-	const tsQuery = sql`websearch_to_tsquery('simple', ${q})`;
-	const like = `%${q}%`;
-
-	const matchCond = sql`(
-		(${tsVector}) @@ (${tsQuery})
-		OR ${bookmarks.title} % ${q}
-		OR ${bookmarks.urlNormalized} % ${q}
-		OR ${bookmarks.title} ILIKE ${like}
-		OR ${bookmarks.urlNormalized} ILIKE ${like}
-	)`;
 
 	const rows = await db
 		.select(BOOKMARK_COLUMNS)
 		.from(bookmarks)
-		.where(and(eq(bookmarks.userId, userId), archivedCond, matchCond))
+		.where(and(viewCond, matchCond, tagsCond))
 		.orderBy(
 			sql`ts_rank((${tsVector}), (${tsQuery})) desc`,
 			desc(bookmarks.updatedAt),
@@ -250,7 +347,11 @@ export async function listBookmarks(
 		)
 		.limit(PAGE_SIZE);
 
-	return { bookmarks: await withHighlights(db, rows), nextCursor: null };
+	return {
+		bookmarks: await withHighlights(db, rows),
+		nextCursor: null,
+		...aggregates,
+	};
 }
 
 export type PatchBookmarkInput = {

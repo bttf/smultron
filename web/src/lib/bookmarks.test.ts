@@ -353,6 +353,271 @@ describe("listBookmarks — search", () => {
 	});
 });
 
+describe("listBookmarks — tags + aggregates (m9)", () => {
+	// A small mixed corpus: distinct updated_at values so feed order is
+	// deterministic (index 0 = most recent), varied tags including a row
+	// with none.
+	function taggedRows(): SeedRow[] {
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		const rows: Array<{ title: string; tags: string[] }> = [
+			{ title: "Postgres Guide", tags: ["dev"] },
+			{ title: "Rust Book", tags: ["dev", "read later"] },
+			{ title: "Postgres Recipes", tags: ["cooking"] },
+			{ title: "Sourdough Notes", tags: ["cooking", "read later"] },
+			{ title: "Untagged Page", tags: [] },
+		];
+		return rows.map((r, i) => ({
+			userId: USER_A,
+			url: `https://example.com/tagged-${i}`,
+			title: r.title,
+			tags: r.tags,
+			createdAt: new Date(base - i * 1000),
+			updatedAt: new Date(base - i * 1000),
+		}));
+	}
+
+	it("filters the feed by a single tag (exact string match)", async () => {
+		await seed(taggedRows());
+
+		const result = await listBookmarks(db, USER_A, { tags: ["dev"] });
+		expect(result.bookmarks.map((b) => b.title)).toEqual([
+			"Postgres Guide",
+			"Rust Book",
+		]);
+		expect(result.nextCursor).toBeNull();
+	});
+
+	it("multi-tag filter is AND: a row must contain EVERY requested tag", async () => {
+		await seed(taggedRows());
+
+		const result = await listBookmarks(db, USER_A, {
+			tags: ["dev", "read later"],
+		});
+		expect(result.bookmarks.map((b) => b.title)).toEqual(["Rust Book"]);
+		expect(result.matching).toBe(1);
+	});
+
+	it("tag with no matches: empty page, but total and facets stay correct", async () => {
+		await seed(taggedRows());
+
+		const result = await listBookmarks(db, USER_A, { tags: ["nope"] });
+		expect(result.bookmarks).toHaveLength(0);
+		expect(result.nextCursor).toBeNull();
+		expect(result.matching).toBe(0);
+		// total ignores the tag filter entirely.
+		expect(result.total).toBe(5);
+		// facets ignore the tag filter too — full per-tag counts of the view,
+		// ordered count desc then tag asc; the untagged row contributes nothing.
+		expect(result.facets).toEqual([
+			{ tag: "cooking", count: 2 },
+			{ tag: "dev", count: 2 },
+			{ tag: "read later", count: 2 },
+		]);
+	});
+
+	it("tags compose with q (search branch); facets scope to q but ignore tags", async () => {
+		await seed(taggedRows());
+
+		const result = await listBookmarks(db, USER_A, {
+			q: "postgres",
+			tags: ["dev"],
+		});
+		expect(result.bookmarks.map((b) => b.title)).toEqual(["Postgres Guide"]);
+		expect(result.matching).toBe(1);
+		expect(result.total).toBe(5);
+		// Facets over q matches ("Postgres Guide" + "Postgres Recipes")
+		// IGNORING the active dev filter, so "cooking" keeps its count.
+		expect(result.facets).toEqual([
+			{ tag: "cooking", count: 1 },
+			{ tag: "dev", count: 1 },
+		]);
+	});
+
+	it("tags compose with cursor keyset pagination in the feed branch", async () => {
+		// 120 rows; every other row carries the tag → 60 tagged, > PAGE_SIZE.
+		await seed(
+			makeFeedRows(USER_A, 120).map((r, i) => ({
+				...r,
+				tags: i % 2 === 0 ? ["even"] : ["odd"],
+			})),
+		);
+
+		const page1 = await listBookmarks(db, USER_A, { tags: ["even"] });
+		expect(page1.bookmarks).toHaveLength(50);
+		expect(page1.bookmarks.every((b) => b.tags.includes("even"))).toBe(true);
+		expect(page1.bookmarks[0]?.title).toBe("Page 0");
+		expect(page1.bookmarks[49]?.title).toBe("Page 98");
+		expect(page1.nextCursor).not.toBeNull();
+		// matching is the FULL filtered count, not the page size.
+		expect(page1.matching).toBe(60);
+		expect(page1.total).toBe(120);
+
+		const page2 = await listBookmarks(db, USER_A, {
+			tags: ["even"],
+			cursor: page1.nextCursor ?? undefined,
+		});
+		expect(page2.bookmarks).toHaveLength(10);
+		expect(page2.bookmarks[0]?.title).toBe("Page 100");
+		expect(page2.bookmarks[9]?.title).toBe("Page 118");
+		expect(page2.nextCursor).toBeNull();
+		// Aggregates are uniform across cursor pages.
+		expect(page2.matching).toBe(60);
+		expect(page2.total).toBe(120);
+
+		const allIds = [...page1.bookmarks, ...page2.bookmarks].map((b) => b.id);
+		expect(new Set(allIds).size).toBe(60);
+	});
+
+	it("orders facets count desc, then tag asc as tiebreak", async () => {
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		const tagSets = [["alpha"], ["alpha", "zeta"], ["alpha", "beta", "zeta"]];
+		await seed(
+			tagSets.map((tags, i) => ({
+				userId: USER_A,
+				url: `https://example.com/facet-${i}`,
+				title: `Facet ${i}`,
+				tags,
+				createdAt: new Date(base - i * 1000),
+				updatedAt: new Date(base - i * 1000),
+			})),
+		);
+
+		const result = await listBookmarks(db, USER_A, {});
+		// Count desc: alpha (3), zeta (2), beta (1) — NOT alphabetical.
+		expect(result.facets).toEqual([
+			{ tag: "alpha", count: 3 },
+			{ tag: "zeta", count: 2 },
+			{ tag: "beta", count: 1 },
+		]);
+	});
+
+	it("breaks facet count ties by tag asc", async () => {
+		const now = new Date("2026-01-01T00:00:00.000Z");
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/tie",
+				title: "Tie Breaker",
+				tags: ["zzz", "aaa", "mmm"],
+				createdAt: now,
+				updatedAt: now,
+			},
+		]);
+
+		const result = await listBookmarks(db, USER_A, {});
+		expect(result.facets).toEqual([
+			{ tag: "aaa", count: 1 },
+			{ tag: "mmm", count: 1 },
+			{ tag: "zzz", count: 1 },
+		]);
+	});
+
+	it("total === matching when no q and no tags", async () => {
+		await seed(taggedRows());
+		const result = await listBookmarks(db, USER_A, {});
+		expect(result.total).toBe(5);
+		expect(result.matching).toBe(5);
+	});
+
+	it("matching in the search branch is the full count beyond the page cap", async () => {
+		// 60 rows all matching q — the search page caps at 50, matching must
+		// still report 60.
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		await seed(
+			Array.from({ length: 60 }, (_, i) => ({
+				userId: USER_A,
+				url: `https://example.com/postgres-${i}`,
+				title: `Postgres Article ${i}`,
+				createdAt: new Date(base - i * 1000),
+				updatedAt: new Date(base - i * 1000),
+			})),
+		);
+
+		const result = await listBookmarks(db, USER_A, { q: "postgres" });
+		expect(result.bookmarks).toHaveLength(50);
+		expect(result.nextCursor).toBeNull();
+		expect(result.matching).toBe(60);
+		expect(result.total).toBe(60);
+	});
+
+	it("all three aggregates scope to the archived view", async () => {
+		const now = new Date("2026-01-01T00:00:00.000Z");
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/live-1",
+				title: "Postgres Live",
+				tags: ["dev"],
+				createdAt: now,
+				updatedAt: now,
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/live-2",
+				title: "Cooking Live",
+				tags: ["cooking"],
+				createdAt: now,
+				updatedAt: now,
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/arch-1",
+				title: "Postgres Archived",
+				tags: ["dev", "old"],
+				createdAt: now,
+				updatedAt: now,
+				archivedAt: now,
+			},
+		]);
+
+		const archived = await listBookmarks(db, USER_A, {
+			archived: true,
+			tags: ["dev"],
+		});
+		expect(archived.bookmarks.map((b) => b.title)).toEqual([
+			"Postgres Archived",
+		]);
+		expect(archived.total).toBe(1);
+		expect(archived.matching).toBe(1);
+		expect(archived.facets).toEqual([
+			{ tag: "dev", count: 1 },
+			{ tag: "old", count: 1 },
+		]);
+
+		const live = await listBookmarks(db, USER_A, { q: "postgres" });
+		expect(live.total).toBe(2);
+		expect(live.matching).toBe(1);
+		expect(live.facets).toEqual([{ tag: "dev", count: 1 }]);
+	});
+
+	it("scopes aggregates to the requesting user", async () => {
+		const now = new Date("2026-01-01T00:00:00.000Z");
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/a",
+				title: "A's Page",
+				tags: ["dev"],
+				createdAt: now,
+				updatedAt: now,
+			},
+			{
+				userId: USER_B,
+				url: "https://example.com/b",
+				title: "B's Page",
+				tags: ["dev", "b-only"],
+				createdAt: now,
+				updatedAt: now,
+			},
+		]);
+
+		const result = await listBookmarks(db, USER_A, {});
+		expect(result.total).toBe(1);
+		expect(result.matching).toBe(1);
+		expect(result.facets).toEqual([{ tag: "dev", count: 1 }]);
+	});
+});
+
 describe("patchBookmark", () => {
 	async function seedOne(userId: string) {
 		await seed([
