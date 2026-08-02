@@ -115,6 +115,9 @@ export function Feed() {
 	const [query, setQuery] = useState("");
 	const [archived, setArchived] = useState(false);
 	const [activeTags, setActiveTags] = useState<string[]>([]);
+	// Sidebar tag filter (Datadog-style): client-side substring narrowing of
+	// the facet LIST only — it never touches the SWR key or the log itself.
+	const [facetFilter, setFacetFilter] = useState("");
 	// Single expanded row at a time (mock semantics); null = all collapsed.
 	const [expanded, setExpanded] = useState<number | null>(null);
 	const searchInputRef = useRef<HTMLInputElement>(null);
@@ -338,6 +341,11 @@ export function Feed() {
 	const total = data?.total ?? 0;
 	const matching = data?.matching ?? 0;
 
+	const facetFilterTrimmed = facetFilter.trim().toLowerCase();
+	const visibleFacets = facetFilterTrimmed
+		? facets.filter((f) => f.tag.toLowerCase().includes(facetFilterTrimmed))
+		: facets;
+
 	return (
 		<div className="flex min-h-0 flex-1 flex-col [--log-accent:#4F46E5]">
 			<div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2">
@@ -380,8 +388,22 @@ export function Feed() {
 							</button>
 						) : null}
 					</div>
+					<div className="px-1 pb-1.5">
+						<input
+							type="search"
+							value={facetFilter}
+							onChange={(e) => setFacetFilter(e.target.value)}
+							placeholder="filter…"
+							className="w-full min-w-0 rounded-[5px] border border-border bg-background px-2 py-1 font-mono text-[11px] outline-none placeholder:text-muted-foreground focus:border-[var(--log-accent)]"
+						/>
+					</div>
+					{facets.length > 0 && visibleFacets.length === 0 ? (
+						<p className="px-2 py-1 font-mono text-[10.5px] text-muted-foreground">
+							no matching tags
+						</p>
+					) : null}
 					<div className="flex flex-col gap-px">
-						{facets.map((f) => {
+						{visibleFacets.map((f) => {
 							const active = activeTags.includes(f.tag);
 							return (
 								<button
