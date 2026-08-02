@@ -106,7 +106,7 @@ describe("applySync", () => {
 			expect(row.urlNormalized).toBe("https://example.com/Page?x=1");
 			expect(row.title).toBe("A page");
 			expect(row.chromeId).toBe("c1");
-			expect(row.tags).toEqual(["Bookmarks Bar/Dev"]);
+			expect(row.tags).toEqual(["Dev"]);
 			expect(row.createdAt).toEqual(PAST);
 			expect(row.updatedAt).toEqual(PAST);
 			expect(row.archivedAt).toBeNull();
@@ -171,7 +171,7 @@ describe("applySync", () => {
 			expect(after.url).toBe("https://A.com/x?utm_source=z");
 			expect(after.urlNormalized).toBe("https://a.com/x");
 			// Site-owned after insert: tags and created_at untouched.
-			expect(after.tags).toEqual(["Bar/Old"]);
+			expect(after.tags).toEqual(["Old"]);
 			expect(after.createdAt).toEqual(PAST);
 			// updated_at bumped to now, NOT to the event's dateAdded.
 			expectRecent(after.updatedAt);
@@ -232,7 +232,7 @@ describe("applySync", () => {
 			const [row] = await allRows();
 			expect(row.createdAt).toEqual(PAST);
 			expect(row.updatedAt).toEqual(PAST);
-			expect(row.tags).toEqual(["Bar/Dev"]);
+			expect(row.tags).toEqual(["Dev"]);
 			expect(row.archivedAt).toBeNull();
 		});
 
@@ -396,7 +396,7 @@ describe("applySync", () => {
 			const dup = rows.find((r) => r.urlNormalized === "https://a.com/x");
 			expect(dup?.title).toBe("first");
 			expect(dup?.chromeId).toBe("c1");
-			expect(dup?.tags).toEqual(["Bar/One"]);
+			expect(dup?.tags).toEqual(["One"]);
 			expect(dup?.createdAt).toEqual(PAST);
 		});
 	});

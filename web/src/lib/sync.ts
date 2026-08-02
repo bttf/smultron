@@ -31,6 +31,35 @@ export type SyncResult = {
 // biome-ignore lint/suspicious/noExplicitAny: variance of Drizzle's driver-specific generics requires it; the schema/relations generics are irrelevant here.
 export type SyncDb = PgDatabase<PgQueryResultHKT, any, any>;
 
+// Chrome's DEFAULT root containers (English names — a localized Chrome would
+// send translated names and get tagged; acceptable for this deployment).
+// Matched by NAME, not structure: a user's own top-level folder must still
+// become a tag, so a bare single-segment path is only untagged when it is
+// exactly one of these.
+const DEFAULT_ROOT_CONTAINERS = new Set([
+	"Bookmarks Bar",
+	"Other Bookmarks",
+	"Mobile Bookmarks",
+]);
+
+/**
+ * Derives insert-time tags from the extension's full `/`-joined folder path
+ * (SPEC §5): the LEAFMOST folder name only — except a bookmark sitting
+ * directly in a default root container (single-segment path matching
+ * DEFAULT_ROOT_CONTAINERS) gets no tag at all.
+ */
+export function folderTags(folderPath: string | undefined): string[] {
+	if (folderPath == null || folderPath === "") {
+		return [];
+	}
+	const segments = folderPath.split("/");
+	if (segments.length === 1 && DEFAULT_ROOT_CONTAINERS.has(folderPath)) {
+		return [];
+	}
+	const leaf = segments.at(-1);
+	return leaf ? [leaf] : [];
+}
+
 export async function applySync(
 	db: SyncDb,
 	userId: string,
@@ -70,8 +99,9 @@ export async function applySync(
 			urlNormalized,
 			title: b.title,
 			chromeId: b.chromeId,
-			// First element = Chrome folder path at insert; site-owned afterwards.
-			tags: b.folderPath != null ? [b.folderPath] : [],
+			// First element = leafmost folder name at insert (none for default
+			// root containers); site-owned afterwards.
+			tags: folderTags(b.folderPath),
 			createdAt,
 			updatedAt: createdAt,
 		};

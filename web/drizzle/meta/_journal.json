@@ -29,6 +29,13 @@
       "when": 1785628484829,
       "tag": "0003_highlights-auth-fk",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785630489135,
+      "tag": "0004_leaf-folder-tags",
+      "breakpoints": true
     }
   ]
 }
