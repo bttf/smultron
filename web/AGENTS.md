@@ -5,7 +5,8 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 ## Invariants (root AGENTS.md Hard rules, localized)
 
--   **All bookmark writes go through `applySync` (`src/lib/sync.ts`)** — the only code path that may bump `updated_at` (live mode only). Site edits (`patchBookmark`) never bump it.
+-   **All bookmark writes go through `applySync` (`src/lib/sync.ts`)** — with `applyHighlight` (`src/lib/highlights.ts`), the only code paths that may bump `updated_at`. Site edits (`patchBookmark`) never bump it.
+-   Folder tags are derived SERVER-side by `folderTags` (`src/lib/sync.ts`): leafmost folder name only; single-segment paths matching Chrome's default root containers by name get no tag. The extension always sends the full raw path — never move this derivation client-side.
 -   Auth helpers: session → `getAuthedUser()`/`getAuthState()` (`src/lib/auth.ts`); extension Bearer → `authenticateApiToken` (`src/lib/apiTokenAuth.ts`); token hashing → `hashToken` in `src/lib/pairing.ts` (hex sha256, single implementation).
 -   `ALLOWED_EMAIL` is optional: unset/empty = gate disabled, any Google account may sign in (per-user data isolation still applies); set = only that account.
 -   DB client (`src/db/index.ts`) is a lazy `server-only` singleton; API routes that use it declare `runtime = "nodejs"`.

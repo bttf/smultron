@@ -3,6 +3,13 @@
 Manual steps that require credentials / dashboard access. Everything code-side
 is done; nothing below changes code. Do them in order.
 
+> **Status (2026-08-02):** this runbook has been executed — the app is live at
+> `https://smultron.redpine.software` with Vercel auto-deploying every push to
+> `main` (GitHub `bttf/smultron`). DB migrations are NOT automatic: after
+> pulling a commit that adds files under `web/drizzle/`, run `pnpm db:migrate`
+> (reads `DIRECT_URL` from `web/.env.local`) before or right after the deploy.
+> The rest of this doc stays as the from-scratch runbook.
+
 ## 1. Supabase project
 
 1. Create a Supabase project (or reuse one). Note the **project ref** (the
@@ -40,7 +47,7 @@ Fill `web/.env.local` (local dev) — same names go into Vercel later:
 | `SUPABASE_SERVICE_ROLE_KEY` | Dashboard → Settings → API (service_role) — server-only |
 | `DATABASE_URL` | pooled connection, port **6543** (pgbouncer) |
 | `DIRECT_URL` | direct connection, port **5432** (migrations only) |
-| `ALLOWED_EMAIL` | the one Google account allowed to sign in |
+| `ALLOWED_EMAIL` | optional — set: only this Google account may sign in; unset: any Google account (per-user data isolation) |
 | `APP_URL` | `http://localhost:3000` locally / `https://smultron.redpine.software` in prod |
 
 ## 4. Vercel
@@ -78,9 +85,10 @@ Fill `web/.env.local` (local dev) — same names go into Vercel later:
    immediately: `chrome://extensions` → Smultronstället → "service worker" →
    restart it (toggle the extension off/on), which re-runs the sweep now that
    the token is saved.
-2. Verify: the feed shows your Chrome bookmarks with folder-path tags;
-   `inserted` count ≈ your bookmark count (duplicates by normalized URL
-   collapse).
+2. Verify: the feed shows your Chrome bookmarks — foldered ones tagged with
+   their leafmost folder name, top-level ones (default root containers)
+   untagged; `inserted` count ≈ your bookmark count (duplicates by
+   normalized URL collapse).
 3. Live path: save a new bookmark in Chrome → appears in the feed within ~10s
    (SWR poll). Re-save an existing one → it jumps to the top (updated_at
    bump).
@@ -93,4 +101,8 @@ Fill `web/.env.local` (local dev) — same names go into Vercel later:
 - Regenerating the token (site → Settings) invalidates the old one AND
   un-pairs: paste the new token in the extension options and Save again.
 - No realtime anywhere — the feed polls every ~10s by design.
-- Soft deletes only: "archive" on the site; rows are never deleted.
+- Soft deletes only for bookmarks: "archive" on the site; rows are never
+  deleted. (Highlights are hard-delete by design.)
+- Highlights: select text on any page → right-click → "Add highlight in
+  Smultronstället". Verifiable the same way as §6: the page is
+  auto-bookmarked if needed and the highlight appears on its feed card.
