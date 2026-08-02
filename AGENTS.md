@@ -76,5 +76,5 @@ APP_URL=                         # http://localhost:3000 in dev; https://smultro
 
 -   Zod-validate every API route input; reject unknown fields.
 -   Keep migrations in `web/drizzle/` under version control; schema changes go through `db:generate`, never hand-edited SQL against prod.
--   Vitest coverage is required for: URL normalization, upsert/bump/unarchive semantics, folder-tag derivation (`folderTags`) incl. the 0004 data migration, outbox queue behavior (incl. kind-routing + poison rule), highlight insert/bump/unarchive/409 semantics, the `textFragment` helper.
+-   Vitest coverage is required for: URL normalization, upsert/bump/unarchive semantics, folder-tag derivation (`folderTags`) incl. the 0004 data migration, outbox queue behavior (incl. kind-routing + poison rule), highlight insert/bump/unarchive/409 semantics, the `textFragment` helper, note patch semantics (trim→NULL, never bumps `updated_at`) + by-url lookup/patch user scoping.
 -   Small PRs / commits scoped to one milestone step (see SPEC §Milestones).
