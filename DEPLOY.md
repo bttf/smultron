@@ -24,7 +24,7 @@ is done; nothing below changes code. Do them in order.
    "Exposed schemas" (it isn't by default — leave it that way; PostgREST must
    not see it).
 
-## 2. Google OAuth (SPEC §10)
+## 2. Google OAuth (SPEC §11)
 
 1. Google Cloud Console → APIs & Services → Credentials → **Create OAuth 2.0
    Client ID** (type: Web application).
@@ -49,6 +49,30 @@ Fill `web/.env.local` (local dev) — same names go into Vercel later:
 | `DIRECT_URL` | direct connection, port **5432** (migrations only) |
 | `ALLOWED_EMAIL` | optional — set: only this Google account may sign in; unset: any Google account (per-user data isolation) |
 | `APP_URL` | `http://localhost:3000` locally / `https://smultron.redpine.software` in prod |
+
+### Read-aloud pipeline (m12, SPEC §10) — optional
+
+Leave these unset and the rest of the app works normally; the expanded row's
+`scrape & prepare audio` button then fails with a "not configured" message.
+All three are needed for the full scrape → transcript → audio flow.
+
+| Variable | Value |
+|---|---|
+| `FIRECRAWL_API_KEY` | firecrawl.dev → Dashboard → API Keys |
+| `ANTHROPIC_API_KEY` | platform.claude.com → API Keys (clean-up + summary passes) |
+| `OPENAI_API_KEY` | platform.openai.com → API Keys (text-to-speech only) |
+| `TTS_VOICE` | optional — OpenAI voice id, default `sage` |
+| `ARTICLE_AUDIO_BUCKET` | optional — Storage bucket name, default `article-audio` |
+
+The Storage bucket is created automatically (private) on the first successful
+synthesis, using the service-role key — no manual Dashboard step. If you'd
+rather pre-create it: Dashboard → Storage → New bucket, name `article-audio`,
+**not** public.
+
+**Vercel plan note:** both article routes declare `maxDuration = 300`, which
+requires a paid plan. On Hobby (60s cap) long articles will be cut off
+mid-run — this is safe, not corrupting: each completed step is persisted, so
+pressing `try again` resumes from where it stopped (SPEC §10).
 
 ## 4. Vercel
 
