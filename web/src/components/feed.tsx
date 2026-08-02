@@ -603,22 +603,23 @@ function LogRow({
 						{host}
 					</span>
 				) : null}
-				<span className="min-w-0 flex-1 truncate text-[13px] font-medium">
-					{bookmark.title || "(untitled)"}
+				{/* Gmail-style: title keeps space priority (basis auto, shrinkable),
+				    the muted note preview fills ONLY the leftover (basis 0) and
+				    truncates first. `?? null` guards the window where page 1
+				    predates the m10 backend and rows arrive without a `note` key. */}
+				<span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+					<span className="min-w-0 shrink truncate text-[13px] font-medium">
+						{bookmark.title || "(untitled)"}
+					</span>
+					{(bookmark.note ?? null) !== null ? (
+						<span className="min-w-0 flex-1 basis-0 truncate text-[12.5px] text-muted-foreground">
+							— {(bookmark.note as string).replace(/\s+/g, " ")}
+						</span>
+					) : null}
 				</span>
 				{bookmark.highlights.length > 0 ? (
 					<span className="shrink-0 rounded-full bg-[oklch(0.97_0_0)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-accent)]">
 						✱ {bookmark.highlights.length}
-					</span>
-				) : null}
-				{/* `?? null` guards the window where page 1 predates the m10 backend
-				    and rows arrive without a `note` key. */}
-				{(bookmark.note ?? null) !== null ? (
-					<span
-						title="Has note"
-						className="shrink-0 rounded-full bg-[oklch(0.97_0_0)] px-[7px] py-px font-mono text-[10.5px] text-[oklch(0.55_0_0)]"
-					>
-						▤
 					</span>
 				) : null}
 				{bookmark.tags.length > 0 ? (
