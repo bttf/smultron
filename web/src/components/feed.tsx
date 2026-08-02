@@ -7,7 +7,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { relativeTime } from "../lib/relativeTime";
+import { textFragmentUrl } from "../lib/textFragment";
 import { cn } from "../lib/utils";
+
+type ApiHighlight = {
+	id: number;
+	text: string;
+	createdAt: string;
+};
 
 type ApiBookmark = {
 	id: number;
@@ -18,6 +25,7 @@ type ApiBookmark = {
 	createdAt: string;
 	updatedAt: string;
 	archivedAt: string | null;
+	highlights: ApiHighlight[];
 };
 
 type ListResponse = { bookmarks: ApiBookmark[]; nextCursor: string | null };
@@ -179,6 +187,33 @@ export function Feed() {
 		mutate();
 	}
 
+	async function deleteHighlight(bookmarkId: number, highlightId: number) {
+		const res = await fetch(`/api/highlights/${highlightId}`, {
+			method: "DELETE",
+		});
+		if (!res.ok) {
+			throw new Error(`request failed (${res.status})`);
+		}
+
+		// Local override: prune the deleted highlight from this bookmark's
+		// nested list, merging onto any existing override (e.g. a pending
+		// title/tags edit) rather than replacing it outright.
+		setOverrides((prev) => {
+			const current = items.find((b) => b.id === bookmarkId);
+			const nextHighlights = (current?.highlights ?? []).filter(
+				(h) => h.id !== highlightId,
+			);
+			const next = new Map(prev);
+			next.set(bookmarkId, {
+				...prev.get(bookmarkId),
+				highlights: nextHighlights,
+			});
+			return next;
+		});
+		// Background revalidate page 1, same as patchRow above.
+		mutate();
+	}
+
 	const noQuery = query.trim().length === 0;
 
 	return (
@@ -222,6 +257,7 @@ export function Feed() {
 							bookmark={b}
 							archivedView={archived}
 							onPatch={patchRow}
+							onDeleteHighlight={deleteHighlight}
 						/>
 					))}
 				</ul>
@@ -424,6 +460,7 @@ function BookmarkCard({
 	bookmark,
 	archivedView,
 	onPatch,
+	onDeleteHighlight,
 }: {
 	bookmark: ApiBookmark;
 	archivedView: boolean;
@@ -431,6 +468,7 @@ function BookmarkCard({
 		id: number,
 		patch: { title?: string; tags?: string[]; archived?: boolean },
 	) => Promise<void>;
+	onDeleteHighlight: (bookmarkId: number, highlightId: number) => Promise<void>;
 }) {
 	const host = hostOf(bookmark.url);
 
@@ -468,6 +506,86 @@ function BookmarkCard({
 				tags={bookmark.tags}
 				onSave={(tags) => onPatch(bookmark.id, { tags })}
 			/>
+
+			<HighlightsSection
+				bookmark={bookmark}
+				onDelete={(highlightId) => onDeleteHighlight(bookmark.id, highlightId)}
+			/>
+		</li>
+	);
+}
+
+function HighlightsSection({
+	bookmark,
+	onDelete,
+}: {
+	bookmark: ApiBookmark;
+	onDelete: (highlightId: number) => Promise<void>;
+}) {
+	// Collapsed by default; local per-card expand state (SPEC §9) — no need to
+	// lift this into Feed's state since each card keeps its own instance as
+	// long as it stays mounted (stable `key={b.id}` across polls/reorders).
+	const [expanded, setExpanded] = useState(false);
+	const { highlights } = bookmark;
+
+	if (highlights.length === 0) {
+		return null;
+	}
+
+	return (
+		<div className="flex flex-col gap-1.5 border-t border-border pt-1.5">
+			<button
+				type="button"
+				onClick={() => setExpanded((e) => !e)}
+				aria-expanded={expanded}
+				className="w-fit text-left text-xs text-muted-foreground hover:text-foreground hover:underline"
+			>
+				{highlights.length}{" "}
+				{highlights.length === 1 ? "highlight" : "highlights"}
+			</button>
+			{expanded ? (
+				<ul className="flex flex-col gap-1.5 border-l-2 border-border pl-2.5">
+					{highlights.map((h) => (
+						<HighlightRow
+							key={h.id}
+							highlight={h}
+							pageUrl={bookmark.url}
+							onDelete={() => onDelete(h.id)}
+						/>
+					))}
+				</ul>
+			) : null}
+		</div>
+	);
+}
+
+function HighlightRow({
+	highlight,
+	pageUrl,
+	onDelete,
+}: {
+	highlight: ApiHighlight;
+	pageUrl: string;
+	onDelete: () => void;
+}) {
+	return (
+		<li className="flex items-start justify-between gap-2">
+			<a
+				href={textFragmentUrl(pageUrl, highlight.text)}
+				target="_blank"
+				rel="noreferrer"
+				title={highlight.text}
+				className="line-clamp-2 min-w-0 flex-1 text-xs text-muted-foreground hover:text-foreground hover:underline"
+			>
+				{highlight.text}
+			</a>
+			<button
+				type="button"
+				onClick={onDelete}
+				className="shrink-0 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+			>
+				Delete
+			</button>
 		</li>
 	);
 }
