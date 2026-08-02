@@ -822,18 +822,6 @@ function LogRow({
 						})}
 					</span>
 				) : null}
-				{/* Archive/restore lives in the row on desktop; on mobile it moves
-				    into the expanded panel to keep the row compact. */}
-				<button
-					type="button"
-					onClick={(e) => {
-						e.stopPropagation();
-						onPatch(bookmark.id, { archived: !archivedView });
-					}}
-					className="hidden shrink-0 px-1 py-0.5 text-[11px] text-[var(--log-ghost)] hover:text-foreground md:block"
-				>
-					{archivedView ? "Restore" : "Archive"}
-				</button>
 			</div>
 			{expanded ? (
 				<ExpandedPanel
@@ -919,13 +907,12 @@ function ExpandedPanel({
 					</div>
 				</Fragment>
 			) : null}
-			{/* Mobile-only: the row hides its archive/restore CTA to stay compact,
-			    so it surfaces here in the expanded panel. Desktop keeps it on the
-			    row (md:hidden). */}
+			{/* Archive/restore lives only in the expanded panel — the row omits it
+			    to stay compact across all viewports. */}
 			<button
 				type="button"
 				onClick={() => onPatch(bookmark.id, { archived: !archivedView })}
-				className="self-start rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)] md:hidden"
+				className="self-start rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)]"
 			>
 				{archivedView ? "Restore" : "Archive"}
 			</button>
