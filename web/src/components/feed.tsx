@@ -225,10 +225,11 @@ export function Feed() {
 		new Map(),
 	);
 	const [removed, setRemoved] = useState<Set<number>>(new Set());
-	// Shelf overlays, same reconciliation model as overrides/removed: a just-
-	// pinned row (PATCH response) shows in the shelf immediately, a just-
-	// unpinned/archived one leaves it immediately; the next revalidated page
-	// agrees and the overlays become no-ops.
+	// Shelf overlays: a just-pinned row (PATCH response) shows in the shelf
+	// immediately, a just-unpinned/archived one leaves it immediately. Unlike
+	// overrides/removed they are RELEASED once the server confirms them (the
+	// reconcile effect below) — a confirmed overlay left in place would mask
+	// later pin state changes made from the extension popup.
 	const [pinnedExtra, setPinnedExtra] = useState<ApiBookmark[]>([]);
 	const [unpinned, setUnpinned] = useState<Set<number>>(new Set());
 
@@ -256,6 +257,47 @@ export function Feed() {
 			setCursor(data?.nextCursor ?? null);
 		}
 	}, [data, morePages.length]);
+
+	// Release shelf overlays the server has confirmed. An overlay's job is
+	// only to cover the window between a PATCH 2xx and the next revalidation;
+	// holding it longer masks pin changes made from the OTHER surface (the
+	// extension popup): a kept `pinnedExtra` snapshot would resurrect as a
+	// stale card after a popup unpin, and a kept `unpinned` id would hide a
+	// popup re-pin from the shelf (while the server hides it from the log) —
+	// the row would vanish from the UI entirely. A response that still shows
+	// the pre-PATCH state (a poll that raced the PATCH) confirms nothing and
+	// leaves the overlays in place, so the optimistic UI never flickers back.
+	useEffect(() => {
+		const base = data?.pinned;
+		if (!base) {
+			return;
+		}
+		const baseIds = new Set(base.map((b) => b.id));
+		// Confirmed pins: the server's shelf now carries the row itself. Scoped
+		// to pinnedExtra members so the released `removed` ids are exactly the
+		// PIN-time removals — an archive-time removal of an already-pinned row
+		// must NOT be released just because stale data still lists the row as
+		// pinned (that would flash the archived row back into the log).
+		const confirmed = new Set(
+			pinnedExtra.filter((p) => baseIds.has(p.id)).map((p) => p.id),
+		);
+		if (confirmed.size > 0) {
+			setPinnedExtra((prev) => prev.filter((p) => !confirmed.has(p.id)));
+			setRemoved((prev) => {
+				if (![...prev].some((id) => confirmed.has(id))) {
+					return prev;
+				}
+				return new Set([...prev].filter((id) => !confirmed.has(id)));
+			});
+		}
+		// Confirmed unpins: the row has left the server's shelf.
+		setUnpinned((prev) => {
+			if (![...prev].some((id) => !baseIds.has(id))) {
+				return prev;
+			}
+			return new Set([...prev].filter((id) => baseIds.has(id)));
+		});
+	}, [data, pinnedExtra]);
 
 	const items = useMemo(() => {
 		const base = [...(data?.bookmarks ?? []), ...morePages.flat()];
@@ -362,17 +404,19 @@ export function Feed() {
 			}
 		} else if (patch.pinned !== undefined) {
 			if (patch.pinned) {
-				// Into the shelf (front — most recently pinned first). In the
-				// feed view the row also leaves the log (the server excludes
-				// pinned rows there); in search it stays listed — pinned rows
-				// remain findable — so it just takes the override.
+				// Into the shelf (front — most recently pinned first). The row
+				// also leaves the current list when that list can no longer
+				// hold it: the feed log (the server excludes pinned rows) and
+				// the archived view (pinning unarchives, search or not). In a
+				// live search it stays listed — pinned rows remain findable —
+				// so it just takes the override.
 				setPinnedExtra((prev) => [updated, ...prev.filter((b) => b.id !== id)]);
 				setUnpinned((prev) => {
 					const next = new Set(prev);
 					next.delete(id);
 					return next;
 				});
-				if (noQuery) {
+				if (noQuery || archived) {
 					setRemoved((prev) => new Set(prev).add(id));
 					setExpanded((prev) => (prev === id ? null : prev));
 				} else {

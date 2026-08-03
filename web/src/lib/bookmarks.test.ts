@@ -906,6 +906,57 @@ describe("pins (m13)", () => {
 		expect(updated?.pinnedAt).not.toBeNull();
 		expect(updated?.updatedAt).toEqual(before.updatedAt);
 	});
+
+	it("web-add conflict (addBookmark) keeps pinned_at while bumping", async () => {
+		const before = await seedOne({ pinnedAt: T0 });
+		const { bookmark, created } = await addBookmark(
+			db,
+			USER_A,
+			"https://example.com/pin-me",
+		);
+		expect(created).toBe(false);
+		expect(bookmark.id).toBe(before.id);
+		// Bump + unarchive only (§5 web add) — the pin survives the re-save.
+		expect(bookmark.pinnedAt).toEqual(T0);
+		expect(bookmark.updatedAt.getTime()).toBeGreaterThan(
+			before.updatedAt.getTime(),
+		);
+	});
+
+	it("cursor pagination never surfaces pinned rows on any page", async () => {
+		// 60 unpinned rows (2 pages) with 3 pinned rows interleaved in the
+		// same updated_at range — the not-pinned condition must compose with
+		// the keyset cursor on both pages.
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		await seed([
+			...makeFeedRows(USER_A, 60),
+			...[10, 30, 55].map((i) => ({
+				userId: USER_A,
+				url: `https://example.com/pinned-${i}`,
+				title: `Pinned ${i}`,
+				createdAt: new Date(base - i * 1000 - 500),
+				updatedAt: new Date(base - i * 1000 - 500),
+				pinnedAt: new Date(base),
+			})),
+		]);
+
+		const page1 = await listBookmarks(db, USER_A, {});
+		expect(page1.bookmarks).toHaveLength(50);
+		expect(page1.nextCursor).not.toBeNull();
+
+		const page2 = await listBookmarks(db, USER_A, {
+			cursor: page1.nextCursor ?? undefined,
+		});
+		expect(page2.bookmarks).toHaveLength(10);
+		expect(page2.nextCursor).toBeNull();
+
+		const titles = [...page1.bookmarks, ...page2.bookmarks].map((b) => b.title);
+		expect(titles).toHaveLength(60);
+		expect(titles.some((t) => t.startsWith("Pinned"))).toBe(false);
+		expect(page1.matching).toBe(60);
+		expect(page1.total).toBe(63);
+		expect(page1.pinned).toHaveLength(3);
+	});
 });
 
 describe("patchBookmark — note (m10)", () => {
