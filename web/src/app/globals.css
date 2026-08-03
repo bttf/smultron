@@ -197,4 +197,10 @@
 		   active scheme. */
 		color-scheme: light dark;
 	}
+	/* Tailwind v4 preflight dropped the v3 `cursor: pointer` button default;
+	   restore it — every button here is clickable. */
+	button:not(:disabled),
+	[role="button"]:not(:disabled) {
+		cursor: pointer;
+	}
 }

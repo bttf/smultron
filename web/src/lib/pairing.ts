@@ -21,6 +21,12 @@ export type PairingDb = PgDatabase<PgQueryResultHKT, any, any>;
 
 export const TOKEN_BYTES = 32;
 
+// Cookie set by skipPairingAction when the user dismisses the pairing gate
+// on `/` (they can add bookmarks from the site without the extension, m11).
+// Purely a UI preference — pairing itself is unaffected and stays available
+// in /settings. Checked by the home page alongside getPairingStatus.
+export const SKIP_PAIRING_COOKIE = "smultron_skip_pairing";
+
 /** 32 random bytes as base64url — 43 chars, URL-safe, no padding. */
 export function generateRawToken(): string {
 	return randomBytes(TOKEN_BYTES).toString("base64url");

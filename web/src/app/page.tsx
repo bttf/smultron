@@ -1,6 +1,9 @@
 // / (home) — SPEC §7 gating: no session -> /login; wrong email -> signed out
 // (getAuthState) -> /not-allowed; authed but unpaired -> PairingGate blocks
-// the happy path; paired -> the feed (Feed, src/components/feed.tsx).
+// the happy path (skippable via the SKIP_PAIRING_COOKIE cookie — web adds
+// work without the extension, m11); paired or skipped -> the feed (Feed,
+// src/components/feed.tsx).
+import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Feed } from "../components/feed";
@@ -8,7 +11,7 @@ import { PairingGate } from "../components/pairing";
 import { db } from "../db";
 import { getAuthState } from "../lib/auth";
 import { signOutAction } from "../lib/authActions";
-import { getPairingStatus } from "../lib/pairing";
+import { getPairingStatus, SKIP_PAIRING_COOKIE } from "../lib/pairing";
 
 function Header() {
 	return (
@@ -46,8 +49,9 @@ export default async function Home() {
 	}
 
 	const pairing = await getPairingStatus(db, auth.user.id);
+	const skipped = (await cookies()).get(SKIP_PAIRING_COOKIE)?.value === "1";
 
-	if (pairing.paired) {
+	if (pairing.paired || skipped) {
 		// Full-viewport log shell (m9): the page itself never scrolls — the
 		// feed's log pane and facets aside scroll internally.
 		return (

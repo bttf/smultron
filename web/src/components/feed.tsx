@@ -672,7 +672,7 @@ function EmptyState({
 		? "No matches."
 		: archived
 			? "No archived bookmarks yet."
-			: "Bookmarks will appear as you save them in Chrome — the initial backfill runs when the extension starts.";
+			: "No bookmarks yet — hit + Add above, or save one in Chrome (the extension backfills when it starts).";
 	return (
 		<p className="max-w-md px-4 py-6 font-mono text-xs text-muted-foreground">
 			{message}
