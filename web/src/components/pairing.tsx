@@ -4,6 +4,7 @@
 // Talks ONLY to the pairing API routes — never to the DB (Hard rule #2).
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { skipPairingAction } from "../lib/pairingActions";
 
 type GenerateState =
 	| { phase: "idle" }
@@ -203,6 +204,15 @@ export function PairingGate({ hasToken }: { hasToken: boolean }) {
 			</ol>
 
 			<PairingTokenPanel hasToken={hasToken} poll="always" />
+
+			<form action={skipPairingAction} className="border-t border-border pt-4">
+				<button
+					type="submit"
+					className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+				>
+					I know what I&apos;m doing, skip.
+				</button>
+			</form>
 		</main>
 	);
 }
