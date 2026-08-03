@@ -203,6 +203,30 @@ describe("applySync", () => {
 			expect(row.archivedAt).toBeNull();
 		});
 
+		it("keeps pinned_at intact (pins are site-owned, m13)", async () => {
+			await applySync(db, USER_A, "live", [
+				{
+					url: "https://a.com/x",
+					title: "t",
+					chromeId: "c1",
+					dateAddedMs: PAST.getTime(),
+				},
+			]);
+			const pinTime = new Date("2026-02-01T00:00:00.000Z");
+			await db
+				.update(bookmarks)
+				.set({ pinnedAt: pinTime })
+				.where(eq(bookmarks.userId, USER_A));
+
+			const result = await applySync(db, USER_A, "live", [
+				{ url: "https://a.com/x", title: "t2", chromeId: "c1" },
+			]);
+			expect(result).toEqual({ inserted: 0, bumped: 1, skipped: 0 });
+
+			const [row] = await allRows();
+			expect(row.pinnedAt).toEqual(pinTime);
+		});
+
 		it("counts mixed batches (one new, one existing)", async () => {
 			await applySync(db, USER_A, "live", [
 				{ url: "https://a.com/x", title: "t", chromeId: "c1" },

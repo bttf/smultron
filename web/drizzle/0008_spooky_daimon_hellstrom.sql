@@ -1,0 +1,2 @@
+ALTER TABLE "smultron"."bookmarks" ADD COLUMN "pinned_at" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX "bookmarks_pinned_idx" ON "smultron"."bookmarks" USING btree ("user_id","pinned_at" DESC NULLS LAST) WHERE "smultron"."bookmarks"."pinned_at" is not null;

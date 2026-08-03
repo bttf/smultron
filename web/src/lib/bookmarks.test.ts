@@ -77,6 +77,7 @@ type SeedRow = {
 	createdAt: Date;
 	updatedAt: Date;
 	archivedAt?: Date | null;
+	pinnedAt?: Date | null;
 };
 
 async function seed(rows: SeedRow[]) {
@@ -91,6 +92,7 @@ async function seed(rows: SeedRow[]) {
 			createdAt: r.createdAt,
 			updatedAt: r.updatedAt,
 			archivedAt: r.archivedAt ?? null,
+			pinnedAt: r.pinnedAt ?? null,
 		})),
 	);
 }
@@ -734,6 +736,175 @@ describe("patchBookmark", () => {
 		await seedOne(USER_A);
 		const { bookmarks: rows } = await listBookmarks(db, USER_B, {});
 		expect(rows).toHaveLength(0);
+	});
+});
+
+describe("pins (m13)", () => {
+	const T0 = new Date("2026-01-01T00:00:00.000Z");
+
+	async function seedOne(extra: Partial<SeedRow> = {}) {
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/pin-me",
+				title: "Pin Me",
+				createdAt: T0,
+				updatedAt: T0,
+				...extra,
+			},
+		]);
+		const [row] = await db
+			.select()
+			.from(bookmarks)
+			.where(eq(bookmarks.userId, USER_A));
+		if (!row) {
+			throw new Error("seed failed");
+		}
+		return row;
+	}
+
+	it("pins: sets pinned_at, leaving updated_at byte-identical", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			pinned: true,
+		});
+		expect(updated?.pinnedAt).not.toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+
+		const after = await rawRow(before.id);
+		expect(after?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("unpins: clears pinned_at, leaving updated_at byte-identical", async () => {
+		const before = await seedOne({ pinnedAt: T0 });
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			pinned: false,
+		});
+		expect(updated?.pinnedAt).toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("re-pinning refreshes pinned_at (moves the row to the shelf front)", async () => {
+		const before = await seedOne({ pinnedAt: T0 });
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			pinned: true,
+		});
+		expect(updated?.pinnedAt?.getTime()).toBeGreaterThan(T0.getTime());
+	});
+
+	it("pinning unarchives (a pinned row is a live row)", async () => {
+		const before = await seedOne({ archivedAt: T0 });
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			pinned: true,
+		});
+		expect(updated?.pinnedAt).not.toBeNull();
+		expect(updated?.archivedAt).toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("archiving unpins (the shelf only holds live rows)", async () => {
+		const before = await seedOne({ pinnedAt: T0 });
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			archived: true,
+		});
+		expect(updated?.archivedAt).not.toBeNull();
+		expect(updated?.pinnedAt).toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("feed log excludes pinned rows; the shelf carries them, most recently pinned first", async () => {
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		await seed([
+			...makeFeedRows(USER_A, 3),
+			{
+				userId: USER_A,
+				url: "https://example.com/pin-old",
+				title: "Pinned earlier",
+				tags: ["tools"],
+				createdAt: new Date(base - 10_000),
+				updatedAt: new Date(base - 10_000),
+				pinnedAt: new Date(base - 5_000),
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/pin-new",
+				title: "Pinned later",
+				createdAt: new Date(base - 20_000),
+				updatedAt: new Date(base - 20_000),
+				pinnedAt: new Date(base - 1_000),
+			},
+		]);
+
+		const result = await listBookmarks(db, USER_A, {});
+		// The log: only the 3 unpinned rows.
+		expect(result.bookmarks.map((b) => b.title)).toEqual([
+			"Page 0",
+			"Page 1",
+			"Page 2",
+		]);
+		// The shelf: pinned rows ordered pinned_at desc.
+		expect(result.pinned.map((b) => b.title)).toEqual([
+			"Pinned later",
+			"Pinned earlier",
+		]);
+		// total describes the view (pins included); matching describes the log.
+		expect(result.total).toBe(5);
+		expect(result.matching).toBe(3);
+		// Facets keep counting pinned rows — they're still part of the view.
+		expect(result.facets).toEqual([{ tag: "tools", count: 1 }]);
+	});
+
+	it("search includes pinned rows (they stay findable) and counts them in matching", async () => {
+		await seedOne({ pinnedAt: T0, title: "Wild strawberry patch" });
+		const result = await listBookmarks(db, USER_A, { q: "strawberry" });
+		expect(result.bookmarks.map((b) => b.title)).toEqual([
+			"Wild strawberry patch",
+		]);
+		expect(result.matching).toBe(1);
+		expect(result.pinned.map((b) => b.title)).toEqual([
+			"Wild strawberry patch",
+		]);
+	});
+
+	it("the shelf is user-scoped and identical across live/archived views", async () => {
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/a",
+				title: "A's pin",
+				createdAt: T0,
+				updatedAt: T0,
+				pinnedAt: T0,
+			},
+			{
+				userId: USER_B,
+				url: "https://example.com/b",
+				title: "B's pin",
+				createdAt: T0,
+				updatedAt: T0,
+				pinnedAt: T0,
+			},
+		]);
+
+		const live = await listBookmarks(db, USER_A, {});
+		expect(live.pinned.map((b) => b.title)).toEqual(["A's pin"]);
+
+		const archived = await listBookmarks(db, USER_A, { archived: true });
+		expect(archived.pinned.map((b) => b.title)).toEqual(["A's pin"]);
+	});
+
+	it("pins by raw URL (by-url patch), never bumping updated_at", async () => {
+		const before = await seedOne({ url: "https://example.com/pin-me" });
+		const updated = await patchBookmarkByUrl(
+			db,
+			USER_A,
+			// Messy raw variant — normalization must land on the same row.
+			"https://example.com/pin-me/#frag",
+			{ pinned: true },
+		);
+		expect(updated?.id).toBe(before.id);
+		expect(updated?.pinnedAt).not.toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
 	});
 });
 

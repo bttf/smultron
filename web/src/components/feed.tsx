@@ -30,6 +30,9 @@ type ApiBookmark = {
 	createdAt: string;
 	updatedAt: string;
 	archivedAt: string | null;
+	// m13: null = not pinned. Pinned rows live in the response's `pinned`
+	// shelf and are excluded from the feed log server-side.
+	pinnedAt: string | null;
 	highlights: ApiHighlight[];
 };
 
@@ -42,11 +45,20 @@ type ListResponse = {
 	total?: number;
 	matching?: number;
 	facets?: Array<{ tag: string; count: number }>;
+	// m13 pinned shelf: every pinned row, most recently pinned first.
+	// Optional for the same integration-window reason as the aggregates.
+	pinned?: ApiBookmark[];
 };
 
 type PatchFn = (
 	id: number,
-	patch: { title?: string; tags?: string[]; note?: string; archived?: boolean },
+	patch: {
+		title?: string;
+		tags?: string[];
+		note?: string;
+		archived?: boolean;
+		pinned?: boolean;
+	},
 ) => Promise<void>;
 
 class FetchError extends Error {}
@@ -135,6 +147,9 @@ export function Feed() {
 	const [facetFilter, setFacetFilter] = useState("");
 	// Single expanded row at a time (mock semantics); null = all collapsed.
 	const [expanded, setExpanded] = useState<number | null>(null);
+	// m13 pinned shelf (mock `Feed with Pins`): collapsible card grid above
+	// the log. Open/closed is per-load UI state, like the mock.
+	const [pinsOpen, setPinsOpen] = useState(true);
 	// m11 add composer (mock `Smultron Feed - Add Bookmark`): the toolbar's
 	// "+ Add" toggles an inline URL bar pinned above the log.
 	const [composerOpen, setComposerOpen] = useState(false);
@@ -210,6 +225,12 @@ export function Feed() {
 		new Map(),
 	);
 	const [removed, setRemoved] = useState<Set<number>>(new Set());
+	// Shelf overlays, same reconciliation model as overrides/removed: a just-
+	// pinned row (PATCH response) shows in the shelf immediately, a just-
+	// unpinned/archived one leaves it immediately; the next revalidated page
+	// agrees and the overlays become no-ops.
+	const [pinnedExtra, setPinnedExtra] = useState<ApiBookmark[]>([]);
+	const [unpinned, setUnpinned] = useState<Set<number>>(new Set());
 
 	// Reset all paging/local-edit state whenever the query, tag filter, or the
 	// feed/archive view changes (the SWR key, `key`, captures all of them).
@@ -223,6 +244,8 @@ export function Feed() {
 		setCursor(null);
 		setOverrides(new Map());
 		setRemoved(new Set());
+		setPinnedExtra([]);
+		setUnpinned(new Set());
 	}
 
 	// Only sync `cursor` from the polled page 1 while no deeper page has been
@@ -314,6 +337,7 @@ export function Feed() {
 			tags?: string[];
 			note?: string;
 			archived?: boolean;
+			pinned?: boolean;
 		},
 	) {
 		const res = await fetch(`/api/bookmarks/${id}`, {
@@ -331,6 +355,42 @@ export function Feed() {
 			// it's currently shown in — and its panel must not stay open.
 			setRemoved((prev) => new Set(prev).add(id));
 			setExpanded((prev) => (prev === id ? null : prev));
+			if (patch.archived) {
+				// The server unpins on archive — drop the row from the shelf too.
+				setUnpinned((prev) => new Set(prev).add(id));
+				setPinnedExtra((prev) => prev.filter((b) => b.id !== id));
+			}
+		} else if (patch.pinned !== undefined) {
+			if (patch.pinned) {
+				// Into the shelf (front — most recently pinned first). In the
+				// feed view the row also leaves the log (the server excludes
+				// pinned rows there); in search it stays listed — pinned rows
+				// remain findable — so it just takes the override.
+				setPinnedExtra((prev) => [updated, ...prev.filter((b) => b.id !== id)]);
+				setUnpinned((prev) => {
+					const next = new Set(prev);
+					next.delete(id);
+					return next;
+				});
+				if (noQuery) {
+					setRemoved((prev) => new Set(prev).add(id));
+					setExpanded((prev) => (prev === id ? null : prev));
+				} else {
+					setOverrides((prev) => new Map(prev).set(id, updated));
+				}
+			} else {
+				// Out of the shelf immediately; the revalidated page puts the
+				// row back into the feed log (clear any pin-time removal so
+				// the overlay doesn't keep filtering it out).
+				setUnpinned((prev) => new Set(prev).add(id));
+				setPinnedExtra((prev) => prev.filter((b) => b.id !== id));
+				setRemoved((prev) => {
+					const next = new Set(prev);
+					next.delete(id);
+					return next;
+				});
+				setOverrides((prev) => new Map(prev).set(id, updated));
+			}
 		} else {
 			setOverrides((prev) => new Map(prev).set(id, updated));
 		}
@@ -454,6 +514,15 @@ export function Feed() {
 	const facets = data?.facets ?? [];
 	const total = data?.total ?? 0;
 	const matching = data?.matching ?? 0;
+
+	// Shelf = server's pinned list + rows pinned since the last revalidation
+	// (front — most recent first), minus rows unpinned/archived since. Once
+	// the revalidated page lands the overlays dedupe into no-ops.
+	const shelf = useMemo(() => {
+		const base = data?.pinned ?? [];
+		const extra = pinnedExtra.filter((p) => !base.some((b) => b.id === p.id));
+		return [...extra, ...base].filter((b) => !unpinned.has(b.id));
+	}, [data, pinnedExtra, unpinned]);
 
 	const facetFilterTrimmed = facetFilter.trim().toLowerCase();
 	const visibleFacets = facetFilterTrimmed
@@ -605,6 +674,17 @@ export function Feed() {
 						</div>
 					) : null}
 
+					{/* m13 pinned shelf — live view only (pinned rows are never
+					    archived); stays visible during search, per the mock. */}
+					{!archived && shelf.length > 0 ? (
+						<PinnedShelf
+							items={shelf}
+							open={pinsOpen}
+							onToggleOpen={() => setPinsOpen((open) => !open)}
+							onUnpin={(id) => patchRow(id, { pinned: false })}
+						/>
+					) : null}
+
 					{error ? (
 						<p className="px-4 py-3 font-mono text-xs text-destructive">
 							Couldn&apos;t load bookmarks: {error.message}
@@ -616,7 +696,11 @@ export function Feed() {
 							Loading…
 						</p>
 					) : items.length === 0 ? (
-						<EmptyState archived={archived} noQuery={noQuery} />
+						<EmptyState
+							archived={archived}
+							noQuery={noQuery}
+							hasPins={!archived && shelf.length > 0}
+						/>
 					) : (
 						// Stale rows (previous key, kept by keepPreviousData) dim
 						// while the new page is in flight.
@@ -664,19 +748,124 @@ export function Feed() {
 function EmptyState({
 	archived,
 	noQuery,
+	hasPins,
 }: {
 	archived: boolean;
 	noQuery: boolean;
+	/** m13: an empty LOG with a populated shelf isn't "no bookmarks". */
+	hasPins: boolean;
 }) {
 	const message = !noQuery
 		? "No matches."
 		: archived
 			? "No archived bookmarks yet."
-			: "No bookmarks yet — hit + Add above, or save one in Chrome (the extension backfills when it starts).";
+			: hasPins
+				? "Everything is pinned."
+				: "No bookmarks yet — hit + Add above, or save one in Chrome (the extension backfills when it starts).";
 	return (
 		<p className="max-w-md px-4 py-6 font-mono text-xs text-muted-foreground">
 			{message}
 		</p>
+	);
+}
+
+// m13 pinned shelf (mock `Feed with Pins`): PINNED strip with count and a
+// hide/show toggle, over a collapsible auto-fill card grid.
+function PinnedShelf({
+	items,
+	open,
+	onToggleOpen,
+	onUnpin,
+}: {
+	items: ApiBookmark[];
+	open: boolean;
+	onToggleOpen: () => void;
+	onUnpin: (id: number) => void;
+}) {
+	return (
+		<Fragment>
+			<div
+				className={cn(
+					"flex items-center gap-2 bg-[var(--log-panel)] px-4 pt-1.5",
+					// Closed: the strip is the whole shelf, so it draws the rule
+					// the grid would otherwise carry.
+					!open && "border-b border-[var(--log-rule)] pb-1.5",
+				)}
+			>
+				<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+					PINNED
+				</span>
+				<span className="font-mono text-[10.5px] text-[var(--log-faint)]">
+					{items.length}
+				</span>
+				<button
+					type="button"
+					onClick={onToggleOpen}
+					className="ml-auto font-mono text-[10px] text-[var(--log-faint)] hover:text-[var(--log-fg)]"
+				>
+					{open ? "hide ▴" : "show ▾"}
+				</button>
+			</div>
+			{open ? (
+				<div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-2 border-b border-[var(--log-rule)] bg-[var(--log-panel)] px-4 pt-2.5 pb-3">
+					{items.map((b) => (
+						<PinnedCard key={b.id} bookmark={b} onUnpin={() => onUnpin(b.id)} />
+					))}
+				</div>
+			) : null}
+		</Fragment>
+	);
+}
+
+function PinnedCard({
+	bookmark,
+	onUnpin,
+}: {
+	bookmark: ApiBookmark;
+	onUnpin: () => void;
+}) {
+	const host = hostOf(bookmark.url);
+	const openBookmark = () =>
+		window.open(bookmark.url, "_blank", "noopener,noreferrer");
+
+	return (
+		// The card holds a nested unpin button, which rules out wrapping it in
+		// an <a> (invalid nesting) — same trade-off as LogRow.
+		// biome-ignore lint/a11y/useSemanticElements: see above — the nested unpin button forbids a native link/button wrapper.
+		<div
+			role="button"
+			tabIndex={0}
+			onClick={openBookmark}
+			onKeyDown={(e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					openBookmark();
+				}
+			}}
+			title={bookmark.url}
+			className="flex cursor-pointer flex-col gap-1.5 rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-2 hover:border-[var(--log-strong-border)]"
+		>
+			<div className="flex items-center gap-1.5">
+				{host ? <Favicon host={host} /> : null}
+				<span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
+					{host ?? bookmark.url}
+				</span>
+				<button
+					type="button"
+					aria-label={`Unpin ${bookmark.title || bookmark.url}`}
+					onClick={(e) => {
+						e.stopPropagation();
+						onUnpin();
+					}}
+					className="shrink-0 font-mono text-[10px] text-[var(--log-ghost)] hover:text-[var(--log-accent)]"
+				>
+					✕
+				</button>
+			</div>
+			<span className="line-clamp-2 text-[12.5px] font-medium leading-[1.4]">
+				{bookmark.title || "(untitled)"}
+			</span>
+		</div>
 	);
 }
 
@@ -907,15 +1096,32 @@ function ExpandedPanel({
 					</div>
 				</Fragment>
 			) : null}
-			{/* Archive/restore lives only in the expanded panel — the row omits it
-			    to stay compact across all viewports. */}
-			<button
-				type="button"
-				onClick={() => onPatch(bookmark.id, { archived: !archivedView })}
-				className="self-start rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)]"
-			>
-				{archivedView ? "Restore" : "Archive"}
-			</button>
+			{/* Pin + archive/restore live only in the expanded panel — the row
+			    omits them to stay compact across all viewports. In the feed the
+			    log never holds pinned rows, so the button reads "★ Pin" there;
+			    a pinned row surfaced by search reads "Unpin". */}
+			<div className="flex gap-1.5">
+				<button
+					type="button"
+					onClick={() =>
+						// `?? null` guards rows served before the m13 backend
+						// landed (same as the note preview above).
+						onPatch(bookmark.id, {
+							pinned: (bookmark.pinnedAt ?? null) === null,
+						})
+					}
+					className="rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)]"
+				>
+					{(bookmark.pinnedAt ?? null) === null ? "★ Pin" : "Unpin"}
+				</button>
+				<button
+					type="button"
+					onClick={() => onPatch(bookmark.id, { archived: !archivedView })}
+					className="rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)]"
+				>
+					{archivedView ? "Restore" : "Archive"}
+				</button>
+			</div>
 		</div>
 	);
 }

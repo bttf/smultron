@@ -43,6 +43,12 @@ export const bookmarks = smultron
 			updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 			// null = live; soft delete.
 			archivedAt: timestamp("archived_at", { withTimezone: true }),
+			// Pinned to the feed's quick-access shelf (m13); null = not pinned.
+			// Ordering key for the shelf (most recently pinned first). A site
+			// edit — setting/clearing it NEVER bumps updated_at (Hard rule #1) —
+			// and mutually exclusive with archived_at: archiving unpins,
+			// pinning unarchives.
+			pinnedAt: timestamp("pinned_at", { withTimezone: true }),
 		},
 		(table) => [
 			unique().on(table.userId, table.urlNormalized),
@@ -56,6 +62,10 @@ export const bookmarks = smultron
 			index("bookmarks_feed_idx")
 				.on(table.userId, table.updatedAt.desc())
 				.where(sql`${table.archivedAt} is null`),
+			// Pinned shelf: a user's pinned rows, most recently pinned first.
+			index("bookmarks_pinned_idx")
+				.on(table.userId, table.pinnedAt.desc())
+				.where(sql`${table.pinnedAt} is not null`),
 		],
 	)
 	.enableRLS();

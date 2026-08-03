@@ -243,6 +243,30 @@
       .btn-secondary:hover {
         background: var(--soft);
       }
+      /* m13 pin toggle: resting = btn-secondary look; .pinned takes the
+         accent-tinted state from the Extension Popup mock (border 35%,
+         fill 6%, accent text). */
+      .btn-pin {
+        padding: 5px 10px;
+        border: 1px solid var(--input-border);
+        border-radius: 6px;
+        background: var(--card);
+        font: inherit;
+        font-size: 11.5px;
+        color: var(--btn-fg);
+        cursor: pointer;
+      }
+      .btn-pin:hover {
+        background: var(--soft);
+      }
+      .btn-pin.pinned {
+        border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+        background: color-mix(in oklab, var(--accent) 6%, transparent);
+        color: var(--accent);
+      }
+      .btn-pin.pinned:hover {
+        background: color-mix(in oklab, var(--accent) 12%, transparent);
+      }
       .btn-accent {
         padding: 5px 12px;
         border: none;
