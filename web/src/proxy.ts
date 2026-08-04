@@ -104,7 +104,13 @@ export const config = {
 	// static extensions, and the extension's Bearer-token endpoints
 	// (/api/sync, /api/hello, /api/bookmarks/by-url), which must stay out of
 	// session logic entirely.
+	//
+	// `webmanifest` is in the extension list so /manifest.webmanifest (m14) is
+	// served as-is: browsers fetch it before/without a session and a redirect
+	// to /login would break installability. `/share` — the manifest's share
+	// target — stays matched, so an unauthenticated share still lands on
+	// /login (the route re-checks auth itself either way).
 	matcher: [
-		"/((?!_next/static|_next/image|favicon.ico|api/sync|api/hello|api/bookmarks/by-url|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|txt|xml|json)$).*)",
+		"/((?!_next/static|_next/image|favicon.ico|api/sync|api/hello|api/bookmarks/by-url|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|txt|xml|json|webmanifest)$).*)",
 	],
 };
