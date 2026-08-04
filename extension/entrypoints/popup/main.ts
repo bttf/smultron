@@ -24,6 +24,8 @@ interface BookmarkDto {
 	createdAt: string;
 	updatedAt: string;
 	archivedAt: string | null;
+	/** m13: null = not pinned to the feed's shelf. */
+	pinnedAt: string | null;
 }
 
 interface PopupConfig {
@@ -190,6 +192,7 @@ function patchBookmarkByUrl(
 		tags?: string[];
 		note?: string;
 		archived?: boolean;
+		pinned?: boolean;
 	},
 ): Promise<ApiResult<BookmarkDto>> {
 	return apiFetch(
@@ -434,6 +437,16 @@ function renderEditor(
 		el("div", "saved-line", `saved ${relativeTime(bookmark.createdAt)}`),
 	);
 	const actions = el("div", "footer-actions");
+	// m13 pin toggle. Like Archive, it PATCHes immediately (a state toggle,
+	// not a content edit) — the mock's ★ Pin / ★ Pinned button.
+	let pinned = bookmark.pinnedAt !== null;
+	const pinButton = el("button", "btn-pin");
+	pinButton.type = "button";
+	function paintPinButton(): void {
+		pinButton.classList.toggle("pinned", pinned);
+		pinButton.textContent = pinned ? "★ Pinned" : "★ Pin";
+	}
+	paintPinButton();
 	const archiveButton = el(
 		"button",
 		"btn-secondary",
@@ -442,7 +455,7 @@ function renderEditor(
 	archiveButton.type = "button";
 	const saveButton = el("button", "btn-accent", "Save");
 	saveButton.type = "button";
-	actions.append(archiveButton, saveButton);
+	actions.append(pinButton, archiveButton, saveButton);
 	footer.append(actions);
 
 	const errorLine = el("div", "error-line hidden");
@@ -452,10 +465,42 @@ function renderEditor(
 		errorLine.classList.remove("hidden");
 	}
 
+	function setBusy(busy: boolean): void {
+		saveButton.disabled = busy;
+		archiveButton.disabled = busy;
+		pinButton.disabled = busy;
+	}
+
+	pinButton.addEventListener("click", () => {
+		void (async () => {
+			setBusy(true);
+			errorLine.classList.add("hidden");
+			const result = await patchBookmarkByUrl(config, {
+				url: tabUrl.href,
+				pinned: !pinned,
+			});
+			if (!result.ok) {
+				setBusy(false);
+				showError(`${pinned ? "unpin" : "pin"} failed: ${failureText(result)}`);
+				return;
+			}
+			if (archived && result.value.archivedAt === null) {
+				// Pinning unarchives (SPEC §8) — full re-render so the header
+				// status and the Restore/Archive label follow.
+				renderEditor(config, tabUrl, result.value);
+				return;
+			}
+			// Repaint the toggle in place so unsaved title/tags/note edits
+			// survive the pin.
+			pinned = result.value.pinnedAt !== null;
+			paintPinButton();
+			setBusy(false);
+		})();
+	});
+
 	saveButton.addEventListener("click", () => {
 		void (async () => {
-			saveButton.disabled = true;
-			archiveButton.disabled = true;
+			setBusy(true);
 			errorLine.classList.add("hidden");
 			const result = await patchBookmarkByUrl(config, {
 				url: tabUrl.href,
@@ -463,8 +508,7 @@ function renderEditor(
 				tags: [...tags],
 				note: noteInput.value, // empty string clears the note
 			});
-			saveButton.disabled = false;
-			archiveButton.disabled = false;
+			setBusy(false);
 			if (!result.ok) {
 				showError(`save failed: ${failureText(result)}`);
 				return;
@@ -478,16 +522,14 @@ function renderEditor(
 
 	archiveButton.addEventListener("click", () => {
 		void (async () => {
-			saveButton.disabled = true;
-			archiveButton.disabled = true;
+			setBusy(true);
 			errorLine.classList.add("hidden");
 			const result = await patchBookmarkByUrl(config, {
 				url: tabUrl.href,
 				archived: !archived,
 			});
 			if (!result.ok) {
-				saveButton.disabled = false;
-				archiveButton.disabled = false;
+				setBusy(false);
 				showError(
 					`${archived ? "restore" : "archive"} failed: ${failureText(result)}`,
 				);

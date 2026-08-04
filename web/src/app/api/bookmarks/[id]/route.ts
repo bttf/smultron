@@ -24,15 +24,22 @@ const bodySchema = z
 		// Mirrors the highlights text cap (SPEC §8).
 		note: z.string().max(10_000).optional(),
 		archived: z.boolean().optional(),
+		pinned: z.boolean().optional(),
 	})
 	.refine(
 		(data) =>
 			data.title !== undefined ||
 			data.tags !== undefined ||
 			data.note !== undefined ||
-			data.archived !== undefined,
-		{ message: "at least one of title/tags/note/archived is required" },
-	);
+			data.archived !== undefined ||
+			data.pinned !== undefined,
+		{ message: "at least one of title/tags/note/archived/pinned is required" },
+	)
+	// Archiving unpins and pinning unarchives (SPEC §8, m13) — asking for
+	// both at once is contradictory, so reject it instead of picking a winner.
+	.refine((data) => !(data.archived === true && data.pinned === true), {
+		message: "archived and pinned cannot both be true",
+	});
 
 export async function PATCH(
 	request: Request,

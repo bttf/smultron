@@ -48,15 +48,22 @@ const patchSchema = z
 		tags: z.array(z.string().min(1)).max(64).optional(),
 		note: z.string().max(10_000).optional(),
 		archived: z.boolean().optional(),
+		pinned: z.boolean().optional(),
 	})
 	.refine(
 		(data) =>
 			data.title !== undefined ||
 			data.tags !== undefined ||
 			data.note !== undefined ||
-			data.archived !== undefined,
-		{ message: "at least one of title/tags/note/archived is required" },
-	);
+			data.archived !== undefined ||
+			data.pinned !== undefined,
+		{ message: "at least one of title/tags/note/archived/pinned is required" },
+	)
+	// Mirrors PATCH /api/bookmarks/:id — archived+pinned both true is
+	// contradictory (archiving unpins, pinning unarchives; SPEC §8, m13).
+	.refine((data) => !(data.archived === true && data.pinned === true), {
+		message: "archived and pinned cannot both be true",
+	});
 
 export async function PATCH(request: Request) {
 	const auth = await authenticateApiToken(request);

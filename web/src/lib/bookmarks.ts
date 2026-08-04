@@ -16,6 +16,11 @@
 //     search branch always returns `nextCursor: null` and caps at one page
 //     (PAGE_SIZE rows), ranked by ts_rank then recency. Good enough for a
 //     single-user tool's search box; deeper search paging is out of scope.
+//   - m13 pins: the feed's log (no `q`) excludes pinned rows — they render
+//     in the shelf carried by `pinned` on every response — and `matching`
+//     counts what the log can reach, so it excludes them too. Search
+//     includes pinned rows (findability wins). `total` and `facets` keep
+//     counting them: they describe the view, not the log.
 //   - m9 log view: `tags` filters with AND semantics (`tags @> ARRAY[...]`,
 //     exact strings). Every response carries view aggregates — `total`
 //     (view only), `matching` (view + q + tags, uncapped), `facets`
@@ -62,6 +67,8 @@ export type Bookmark = {
 	createdAt: Date;
 	updatedAt: Date;
 	archivedAt: Date | null;
+	/** Pinned to the shelf (m13); null = not pinned. Shelf ordering key. */
+	pinnedAt: Date | null;
 	/** Ordered `created_at asc` (SPEC §8); `[]` when none. */
 	highlights: BookmarkHighlight[];
 };
@@ -76,6 +83,7 @@ const BOOKMARK_COLUMNS = {
 	createdAt: bookmarks.createdAt,
 	updatedAt: bookmarks.updatedAt,
 	archivedAt: bookmarks.archivedAt,
+	pinnedAt: bookmarks.pinnedAt,
 };
 
 export const PAGE_SIZE = 50;
@@ -199,11 +207,21 @@ export type TagFacet = { tag: string; count: number };
 export type ListBookmarksResult = {
 	bookmarks: Bookmark[];
 	nextCursor: string | null;
+	/**
+	 * The pinned shelf (m13): ALL of the user's pinned rows, ordered
+	 * `pinned_at desc` (most recently pinned first). Independent of the
+	 * current view and of q/tags — the shelf is always fully visible.
+	 * Pinned rows are always live (archiving unpins), so the archived view
+	 * gets the same list; the client only renders it on the live feed.
+	 */
+	pinned: Bookmark[];
 	/** Rows in the current view (user + archived state), ignoring q and tags. */
 	total: number;
 	/**
-	 * Rows in the current view matching q AND the tag filter — the FULL
-	 * count, not capped at PAGE_SIZE. Equals `total` when no q and no tags.
+	 * Rows the LOG can reach — full count, not capped at PAGE_SIZE. The
+	 * feed branch (no q) excludes pinned rows (they render in the shelf,
+	 * not the log), so its `matching` does too; search (`q`) includes
+	 * pinned rows and so does its `matching`.
 	 */
 	matching: number;
 	/**
@@ -301,22 +319,40 @@ export async function listBookmarks(
 		)`
 		: undefined;
 
+	// The feed's log never shows pinned rows — they render in the shelf above
+	// it (m13). Search DOES include them (a pinned bookmark must stay findable).
+	const notPinnedCond = isNull(bookmarks.pinnedAt);
+
 	// Aggregates (returned on every page — uniform shape):
-	//   total    — view only; matching — view + q + tags (full count, no cap);
-	//   facets   — view + q, IGNORING tags (an active tag keeps its count).
-	// `matching === total` by definition when there's no q and no tags, so
-	// skip the redundant count in that case.
-	const [total, matching, facets] = await Promise.all([
+	//   total    — view only; facets — view + q, IGNORING tags (an active tag
+	//   keeps its count); matching — whatever the LOG query below can reach
+	//   (feed: view + tags MINUS pinned; search: view + q + tags incl. pinned).
+	//   pinned   — the shelf: every pinned row, most recently pinned first,
+	//   view/filter-independent (pinned rows are always live — archiving unpins).
+	const [total, matching, facets, pinnedRows] = await Promise.all([
 		countBookmarks(db, viewCond),
-		matchCond || tagsCond
-			? countBookmarks(db, and(viewCond, matchCond, tagsCond))
-			: undefined,
+		countBookmarks(
+			db,
+			q
+				? and(viewCond, matchCond, tagsCond)
+				: and(viewCond, tagsCond, notPinnedCond),
+		),
 		tagFacets(db, and(viewCond, matchCond)),
+		db
+			.select(BOOKMARK_COLUMNS)
+			.from(bookmarks)
+			.where(and(eq(bookmarks.userId, userId), isNotNull(bookmarks.pinnedAt)))
+			.orderBy(desc(bookmarks.pinnedAt), desc(bookmarks.id)),
 	]);
-	const aggregates = { total, matching: matching ?? total, facets };
+	const aggregates = {
+		total,
+		matching,
+		facets,
+		pinned: await withHighlights(db, pinnedRows),
+	};
 
 	if (!q) {
-		const conditions = [viewCond, tagsCond];
+		const conditions = [viewCond, tagsCond, notPinnedCond];
 
 		if (cursor) {
 			// Keyset pagination: strictly "after" the cursor row in the
@@ -427,6 +463,10 @@ export type PatchBookmarkInput = {
 	/** Trimmed server-side; empty-after-trim stores NULL (note removed). */
 	note?: string;
 	archived?: boolean;
+	/** m13: true (re)pins — `pinned_at = now()`, moving the row to the front
+	 *  of the shelf — and false unpins. Mutually exclusive with `archived`:
+	 *  archiving unpins, pinning unarchives (routes reject both-true). */
+	pinned?: boolean;
 };
 
 type PatchSet = {
@@ -434,6 +474,7 @@ type PatchSet = {
 	tags?: string[];
 	note?: string | null;
 	archivedAt?: Date | null;
+	pinnedAt?: Date | null;
 };
 
 /** Maps the wire-level patch input to column assignments (note trim→null). */
@@ -451,6 +492,19 @@ function buildPatchSet(input: PatchBookmarkInput): PatchSet {
 	}
 	if (input.archived !== undefined) {
 		set.archivedAt = input.archived ? new Date() : null;
+		if (input.archived) {
+			// Archiving unpins — the shelf only ever holds live rows.
+			set.pinnedAt = null;
+		}
+	}
+	if (input.pinned !== undefined) {
+		set.pinnedAt = input.pinned ? new Date() : null;
+		if (input.pinned) {
+			// Pinning unarchives — a pinned row is a live row. Routes reject
+			// {archived: true, pinned: true}, so this never fights the branch
+			// above.
+			set.archivedAt = null;
+		}
 	}
 	return set;
 }

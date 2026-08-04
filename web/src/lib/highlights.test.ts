@@ -79,6 +79,7 @@ type SeedBookmark = {
 	title?: string;
 	tags?: string[];
 	archivedAt?: Date | null;
+	pinnedAt?: Date | null;
 };
 
 async function seedBookmark(row: SeedBookmark) {
@@ -94,6 +95,7 @@ async function seedBookmark(row: SeedBookmark) {
 			createdAt: PAST,
 			updatedAt: PAST,
 			archivedAt: row.archivedAt ?? null,
+			pinnedAt: row.pinnedAt ?? null,
 		})
 		.returning();
 	const bookmark = inserted[0];
@@ -181,6 +183,28 @@ describe("applyHighlight", () => {
 
 		const after = await rawBookmark(before.id);
 		expect(after.archivedAt).toBeNull();
+		expect(after.updatedAt.getTime()).toBeGreaterThan(
+			before.updatedAt.getTime(),
+		);
+	});
+
+	it("keeps pinned_at intact while bumping (pins are site-owned, m13)", async () => {
+		const pinTime = new Date("2026-02-01T00:00:00.000Z");
+		const before = await seedBookmark({
+			userId: USER_A,
+			url: "https://a.com/x",
+			urlNormalized: "https://a.com/x",
+			pinnedAt: pinTime,
+		});
+
+		const created = await applyHighlight(db, USER_A, {
+			url: "https://a.com/x",
+			text: "snippet",
+		});
+		expect(created).not.toBeNull();
+
+		const after = await rawBookmark(before.id);
+		expect(after.pinnedAt).toEqual(pinTime);
 		expect(after.updatedAt.getTime()).toBeGreaterThan(
 			before.updatedAt.getTime(),
 		);
