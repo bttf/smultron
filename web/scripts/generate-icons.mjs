@@ -25,6 +25,9 @@ const BERRY_DARK = "#b81f2c";
 const LEAF = "#2f9e44";
 const SEED = "#ffe8a3";
 const BG = "#ffffff";
+// Maskable full-bleed background: a light berry tint, not BERRY itself —
+// the berry body would vanish against its own colour.
+const MASK_BG = "#ffe9ec";
 
 /**
  * Draws the strawberry on a 100x100 user-space canvas, scaled/translated so
@@ -90,9 +93,9 @@ const targets = [
 	// any-purpose: art inset a little, rounded-square background.
 	[path.join(iconsDir, "icon-192.png"), 192, 0.82, true, BG],
 	[path.join(iconsDir, "icon-512.png"), 512, 0.82, true, BG],
-	// maskable: full-bleed berry-red background, art inside the 80% safe zone.
-	[path.join(iconsDir, "maskable-192.png"), 192, 0.62, false, BG],
-	[path.join(iconsDir, "maskable-512.png"), 512, 0.62, false, BG],
+	// maskable: full-bleed berry-tinted background, art inside the 80% safe zone.
+	[path.join(iconsDir, "maskable-192.png"), 192, 0.62, false, MASK_BG],
+	[path.join(iconsDir, "maskable-512.png"), 512, 0.62, false, MASK_BG],
 	// iOS home screen: opaque, square (iOS applies its own rounding).
 	[path.join(publicDir, "apple-touch-icon.png"), 180, 0.82, false, BG],
 ];

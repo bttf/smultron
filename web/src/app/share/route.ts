@@ -27,6 +27,15 @@ function seeOther(request: Request, target: string): Response {
 }
 
 export async function GET(request: Request) {
+	// CSRF guard: this GET writes to the DB, and auth cookies are SameSite=Lax,
+	// so any site could top-level-navigate a signed-in user here. Real share
+	// launches arrive as Sec-Fetch-Site "none" (or without the header on older
+	// WebViews) and in-app navigations as "same-origin" — only reject what is
+	// provably cross-site.
+	if (request.headers.get("sec-fetch-site") === "cross-site") {
+		return seeOther(request, "/?shared=invalid");
+	}
+
 	// The proxy already redirects unauthenticated page requests, but routes
 	// are the authority (src/proxy.ts header) — guard anyway.
 	const user = await getAuthedUser();
@@ -49,6 +58,12 @@ export async function GET(request: Request) {
 		return seeOther(request, "/?shared=invalid");
 	}
 
-	const { created } = await addBookmark(db, user.id, sharedUrl);
-	return seeOther(request, created ? "/?shared=added" : "/?shared=exists");
+	// A transient DB failure should land the user back on the feed, not on a
+	// bare 500 — this is a browser navigation, never an API call.
+	try {
+		const { created } = await addBookmark(db, user.id, sharedUrl);
+		return seeOther(request, created ? "/?shared=added" : "/?shared=exists");
+	} catch {
+		return seeOther(request, "/?shared=error");
+	}
 }

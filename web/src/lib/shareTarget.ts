@@ -75,7 +75,8 @@ function fromField(value: string | undefined): string | null {
 /**
  * Precedence: an explicit valid `url` param wins; otherwise the first http(s)
  * URL embedded in `text`; otherwise the first in `title`. Returns null when
- * nothing shareable is present (caller shows an "invalid share" toast).
+ * nothing shareable is present (the /share route redirects with
+ * `?shared=invalid`; no UI consumes the param yet).
  */
 export function extractSharedUrl(params: {
 	title?: string;
