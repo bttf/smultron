@@ -61,6 +61,12 @@ export type Bookmark = {
 	url: string;
 	urlNormalized: string;
 	title: string;
+	/**
+	 * Absolute favicon URL from the m15 metadata fill; null when it never ran
+	 * or the page declared no icon (the UI falls back to a hostname-derived
+	 * favicon service).
+	 */
+	faviconUrl: string | null;
 	tags: string[];
 	/** User note (m10); null = none. */
 	note: string | null;
@@ -73,11 +79,13 @@ export type Bookmark = {
 	highlights: BookmarkHighlight[];
 };
 
-const BOOKMARK_COLUMNS = {
+/** The bookmark columns every route serializes (exported for `bookmarkMetadata.ts`). */
+export const BOOKMARK_COLUMNS = {
 	id: bookmarks.id,
 	url: bookmarks.url,
 	urlNormalized: bookmarks.urlNormalized,
 	title: bookmarks.title,
+	faviconUrl: bookmarks.faviconUrl,
 	tags: bookmarks.tags,
 	note: bookmarks.note,
 	createdAt: bookmarks.createdAt,
@@ -89,7 +97,25 @@ const BOOKMARK_COLUMNS = {
 export const PAGE_SIZE = 50;
 
 /** A page row before its highlights are attached. */
-type BookmarkRow = Omit<Bookmark, "highlights">;
+export type BookmarkRow = Omit<Bookmark, "highlights">;
+
+/**
+ * The title a web add (SPEC §5) fills in when it has nothing better: the
+ * hostname without `www.`. Also the marker the m15 metadata fill looks for —
+ * a row still carrying it has never had a real title, so Firecrawl's may
+ * replace it (`bookmarkMetadata.ts`). Keep the two in one place so they
+ * cannot drift apart.
+ */
+export function hostnameTitle(rawUrl: string): string {
+	try {
+		return new URL(rawUrl).hostname.replace(/^www\./, "");
+	} catch {
+		// Unparseable input still stores (normalizeUrl falls back to the
+		// trimmed original) — it just gets no autofilled title. The route
+		// rejects these before we get here; this is belt-and-braces.
+		return "";
+	}
+}
 
 /**
  * Attaches each row's highlights (SPEC §8: nested, `created_at asc`) with a
@@ -424,14 +450,6 @@ export async function addBookmark(
 	rawUrl: string,
 ): Promise<{ bookmark: BookmarkRow; created: boolean }> {
 	const now = new Date();
-	let host = "";
-	try {
-		host = new URL(rawUrl).hostname;
-	} catch {
-		// Unparseable input still stores (normalizeUrl falls back to the
-		// trimmed original) — it just gets no autofilled title. The route
-		// rejects these before we get here; this is belt-and-braces.
-	}
 
 	const rows = await db
 		.insert(bookmarks)
@@ -439,7 +457,7 @@ export async function addBookmark(
 			userId,
 			url: rawUrl,
 			urlNormalized: normalizeUrl(rawUrl),
-			title: host.replace(/^www\./, ""),
+			title: hostnameTitle(rawUrl),
 			tags: [],
 			createdAt: now,
 			updatedAt: now,

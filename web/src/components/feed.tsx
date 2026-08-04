@@ -23,6 +23,10 @@ type ApiBookmark = {
 	url: string;
 	urlNormalized: string;
 	title: string;
+	// m15: the page's own favicon, filled in from Firecrawl after a web add.
+	// Optional (and nullable) — rows saved before m15, or pages that declare
+	// no icon, fall back to the hostname-derived favicon service.
+	faviconUrl?: string | null;
 	tags: string[];
 	// m10: PATCHing `note: ""` clears it — the server stores null and the
 	// returned row (landing in `overrides`) reflects that.
@@ -155,6 +159,10 @@ export function Feed() {
 	const [composerOpen, setComposerOpen] = useState(false);
 	const [urlDraft, setUrlDraft] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
+	// m15: the add request waits on the Firecrawl title/favicon fill, so it can
+	// take a few seconds — the composer stays open and says what it's doing
+	// instead of appearing to have swallowed the URL.
+	const [adding, setAdding] = useState(false);
 	// Row to flash after an add (new or resurfaced duplicate)…
 	const [flashId, setFlashId] = useState<number | null>(null);
 	// …and, for a NEWLY created bookmark only, the row whose expanded panel
@@ -498,6 +506,16 @@ export function Feed() {
 		setComposerOpen(false);
 	}
 
+	/**
+	 * Esc while the metadata fill is in flight: the save is already committed
+	 * server-side, so just get out of the way — the row still arrives on the
+	 * next poll. Only the flash/expand affordance is lost.
+	 */
+	function dismissComposer() {
+		closeComposer();
+		setAdding(false);
+	}
+
 	async function submitAdd() {
 		let raw = urlDraft.trim();
 		if (!raw || submittingRef.current) {
@@ -520,6 +538,7 @@ export function Feed() {
 		}
 
 		submittingRef.current = true;
+		setAdding(true);
 		try {
 			const res = await fetch("/api/bookmarks", {
 				method: "POST",
@@ -550,8 +569,11 @@ export function Feed() {
 			// If we were in the archived view, the key change refetches anyway
 			// and this bound mutate hits the old key — a harmless extra fetch.
 			mutate();
+		} catch {
+			setAddError("save failed");
 		} finally {
 			submittingRef.current = false;
+			setAdding(false);
 		}
 	}
 
@@ -689,14 +711,23 @@ export function Feed() {
 										submitAdd();
 									} else if (e.key === "Escape") {
 										e.preventDefault();
-										closeComposer();
+										dismissComposer();
 									}
 								}}
+								readOnly={adding}
 								placeholder="Paste a URL and press ⏎"
 								spellCheck={false}
-								className="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-[5px] font-mono text-[12.5px] outline-none focus:border-[var(--log-accent)]"
+								className={cn(
+									"min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-[5px] font-mono text-[12.5px] outline-none focus:border-[var(--log-accent)]",
+									adding && "text-muted-foreground",
+								)}
 							/>
-							{addError ? (
+							{/* m15: saved, now waiting on the page's title + favicon. */}
+							{adding ? (
+								<span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+									fetching page details…
+								</span>
+							) : addError ? (
 								<span className="shrink-0 font-mono text-[11px] text-destructive">
 									{addError}
 								</span>
@@ -704,13 +735,14 @@ export function Feed() {
 							<button
 								type="button"
 								onClick={submitAdd}
-								className="shrink-0 rounded-md bg-[var(--log-accent-solid)] px-3 py-[5px] text-[11.5px] font-medium text-white hover:bg-[var(--log-accent-solid-hover)]"
+								disabled={adding}
+								className="shrink-0 rounded-md bg-[var(--log-accent-solid)] px-3 py-[5px] text-[11.5px] font-medium text-white hover:bg-[var(--log-accent-solid-hover)] disabled:opacity-60"
 							>
-								Save
+								{adding ? "Saving…" : "Save"}
 							</button>
 							<button
 								type="button"
-								onClick={closeComposer}
+								onClick={dismissComposer}
 								className="shrink-0 px-1 py-0.5 text-[11px] text-[var(--log-faint)] hover:text-foreground"
 							>
 								esc
@@ -890,7 +922,7 @@ function PinnedCard({
 			className="flex cursor-pointer flex-col gap-1.5 rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-2 hover:border-[var(--log-strong-border)]"
 		>
 			<div className="flex items-center gap-1.5">
-				{host ? <Favicon host={host} /> : null}
+				{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
 				<span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
 					{host ?? bookmark.url}
 				</span>
@@ -921,20 +953,41 @@ function hostOf(url: string): string | null {
 	}
 }
 
-function Favicon({ host }: { host: string }) {
-	const [broken, setBroken] = useState(false);
-	if (broken) {
+/**
+ * The row's icon: the favicon the page itself declared (m15, stored on the
+ * bookmark) when we have one, otherwise Google's hostname-derived service —
+ * which is also the fallback when the stored URL fails to load (gone, blocked
+ * as mixed content, no longer served). Both failing renders nothing.
+ *
+ * Failures are tracked by URL rather than by index so a favicon that arrives
+ * later (the fill landing on a poll) is tried without any state to reset.
+ */
+function Favicon({ host, src }: { host: string; src?: string | null }) {
+	const [broken, setBroken] = useState<string[]>([]);
+	const sources = [
+		...(src ? [src] : []),
+		`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`,
+	];
+	const current = sources.find((url) => !broken.includes(url));
+	if (!current) {
 		return null;
 	}
 	return (
 		// biome-ignore lint/performance/noImgElement: a tiny 32px favicon icon doesn't warrant next/image's overhead here.
 		<img
-			src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`}
+			// Keyed so a swap to the fallback remounts instead of reusing the
+			// errored <img> (which wouldn't re-fire onError for the next source).
+			key={current}
+			src={current}
 			alt=""
 			width={14}
 			height={14}
 			className="shrink-0 rounded-[2px]"
-			onError={() => setBroken(true)}
+			onError={() =>
+				setBroken((prev) =>
+					prev.includes(current) ? prev : [...prev, current],
+				)
+			}
 		/>
 	);
 }
@@ -1005,7 +1058,7 @@ function LogRow({
 				<span className="hidden w-[88px] shrink-0 whitespace-nowrap font-mono text-[11px] text-muted-foreground md:inline">
 					{formatTimestamp(new Date(bookmark.updatedAt))}
 				</span>
-				{host ? <Favicon host={host} /> : null}
+				{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
 				{host ? (
 					<span className="hidden w-[148px] shrink-0 truncate font-mono text-[11px] text-muted-foreground md:block">
 						{host}
