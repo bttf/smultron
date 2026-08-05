@@ -1,0 +1,1 @@
+ALTER TABLE "smultron"."bookmarks" ADD COLUMN "favicon_url" text;

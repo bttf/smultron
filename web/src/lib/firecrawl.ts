@@ -1,4 +1,5 @@
-// Firecrawl scrape client — SPEC §10 (article pipeline, step 1).
+// Firecrawl scrape client — SPEC §10 (article pipeline, step 1) and the m15
+// web-add metadata fetch (SPEC §5).
 //
 // One page in, readable markdown out. Deliberately a thin `fetch` wrapper
 // rather than the `@mendable/firecrawl-js` SDK: we use exactly one endpoint,
@@ -6,7 +7,7 @@
 // while letting us map failures onto PipelineError precisely.
 //
 // API: POST https://api.firecrawl.dev/v2/scrape, Bearer auth. Response is
-// `{ success, data: { markdown, metadata: { title, sourceURL, statusCode } } }`.
+// `{ success, data: { markdown, rawHtml, metadata: { title, sourceURL, statusCode } } }`.
 import { PipelineError } from "./pipelineError";
 
 const SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
@@ -18,8 +19,16 @@ const SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
  */
 const SCRAPE_TIMEOUT_MS = 90_000;
 
+/**
+ * The metadata fetch (m15) blocks the user's add request, so it gets a much
+ * tighter budget than the article scrape: a page that hasn't answered in this
+ * long isn't worth making someone watch a spinner for. The add still succeeds
+ * — the bookmark keeps its hostname title (SPEC §5).
+ */
+const METADATA_TIMEOUT_MS = 20_000;
+
 /** Our own abort, slightly above Firecrawl's, so its error wins when it can. */
-const REQUEST_TIMEOUT_MS = SCRAPE_TIMEOUT_MS + 15_000;
+const requestTimeoutFor = (scrapeTimeoutMs: number) => scrapeTimeoutMs + 15_000;
 
 /**
  * Below this, whatever came back is a cookie wall, a JS-only shell, or a 404
@@ -37,14 +46,28 @@ export type ScrapedArticle = {
 	sourceUrl: string | null;
 };
 
+/** Page title + favicon for a bookmark's metadata fill (m15, SPEC §5). */
+export type PageMetadata = {
+	/** `<title>`/og title as Firecrawl saw it; null when the page had none. */
+	title: string | null;
+	/** Absolute favicon URL; null when the page declared none we could resolve. */
+	faviconUrl: string | null;
+	/** Resolved URL after redirects; null when absent from the response. */
+	sourceUrl: string | null;
+};
+
 /** Shape of the bits of Firecrawl's response we actually read. */
 type ScrapeResponse = {
 	success?: boolean;
 	error?: string;
 	data?: {
 		markdown?: string | null;
+		rawHtml?: string | null;
 		metadata?: {
 			title?: string | string[] | null;
+			// Undocumented but present on many responses — read opportunistically,
+			// with the raw HTML's <link rel="icon"> as the real source of truth.
+			favicon?: string | string[] | null;
 			sourceURL?: string | null;
 			statusCode?: number | null;
 			error?: string | null;
@@ -109,17 +132,15 @@ function httpFailure(status: number, body: string): PipelineError {
 }
 
 /**
- * Scrapes `url` into markdown.
- *
- * `onlyMainContent` strips nav/header/footer server-side — the LLM clean pass
- * (SPEC §10) still has plenty to do, but this removes the bulk cheaply.
- * `maxAge` lets Firecrawl serve a recent cached crawl: re-scraping the same
- * bookmark within the day shouldn't re-bill or re-fetch.
- *
- * Throws `PipelineError` on every failure path, including a page that
- * scraped "successfully" but yielded no usable text.
+ * Runs one `/v2/scrape` request and returns the parsed payload, mapping every
+ * failure — transport, HTTP, malformed JSON, Firecrawl's own `success: false`,
+ * and a non-2xx TARGET page — onto `PipelineError`. Shared by the article
+ * scrape and the m15 metadata fetch so both report failures identically.
  */
-export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
+async function requestScrape(
+	body: Record<string, unknown>,
+	scrapeTimeoutMs: number,
+): Promise<ScrapeResponse> {
 	const apiKey = process.env.FIRECRAWL_API_KEY;
 	if (!apiKey) {
 		throw new PipelineError(
@@ -138,15 +159,12 @@ export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({
-				url,
-				formats: ["markdown"],
-				onlyMainContent: true,
-				blockAds: true,
-				timeout: SCRAPE_TIMEOUT_MS,
+				...body,
+				timeout: scrapeTimeoutMs,
 				// 24h: a re-scrape the same day reuses Firecrawl's cached crawl.
 				maxAge: 86_400_000,
 			}),
-			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+			signal: AbortSignal.timeout(requestTimeoutFor(scrapeTimeoutMs)),
 		});
 	} catch (cause) {
 		const timedOut =
@@ -199,6 +217,30 @@ export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
 		);
 	}
 
+	return payload;
+}
+
+/**
+ * Scrapes `url` into markdown.
+ *
+ * `onlyMainContent` strips nav/header/footer server-side — the LLM clean pass
+ * (SPEC §10) still has plenty to do, but this removes the bulk cheaply.
+ *
+ * Throws `PipelineError` on every failure path, including a page that
+ * scraped "successfully" but yielded no usable text.
+ */
+export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
+	const payload = await requestScrape(
+		{
+			url,
+			formats: ["markdown"],
+			onlyMainContent: true,
+			blockAds: true,
+		},
+		SCRAPE_TIMEOUT_MS,
+	);
+
+	const metadata = payload.data?.metadata ?? null;
 	const markdown = payload.data?.markdown?.trim() ?? "";
 	if (markdown.length < MIN_USEFUL_MARKDOWN) {
 		throw new PipelineError(
@@ -214,5 +256,163 @@ export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
 		markdown,
 		title: firstString(metadata?.title),
 		sourceUrl: firstString(metadata?.sourceURL),
+	};
+}
+
+/**
+ * Only the document head can carry the icon links, and a `<link>` past the
+ * first 300 KB is not one we need. Bounds the regex scans below on pages that
+ * inline megabytes of markup.
+ */
+const HEAD_SCAN_CHARS = 300_000;
+
+/** Favicon URLs go in a text column and an <img src> — keep them sane. */
+const MAX_FAVICON_URL_CHARS = 2048;
+
+const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
+const LINK_TAG_RE = /<link\b[^>]*>/gi;
+
+/** Reads one attribute off a single tag's source (quoted or bare). */
+function attr(tag: string, name: string): string | null {
+	const match = new RegExp(
+		`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s"'>]+))`,
+		"i",
+	).exec(tag);
+	if (!match) {
+		return null;
+	}
+	const value = match[2] ?? match[3] ?? match[4] ?? "";
+	return value.trim() || null;
+}
+
+/** The handful of entities that actually show up in a `<title>`. */
+function decodeEntities(text: string): string {
+	return text
+		.replace(/&(#\d+|#x[0-9a-f]+|[a-z]+);/gi, (entity, body: string) => {
+			if (body.startsWith("#")) {
+				const code = body.startsWith("#x")
+					? Number.parseInt(body.slice(2), 16)
+					: Number.parseInt(body.slice(1), 10);
+				return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+					? String.fromCodePoint(code)
+					: entity;
+			}
+			const named: Record<string, string> = {
+				amp: "&",
+				lt: "<",
+				gt: ">",
+				quot: '"',
+				apos: "'",
+				nbsp: " ",
+			};
+			return named[body.toLowerCase()] ?? entity;
+		})
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/** `<title>` text, as a fallback when Firecrawl's metadata carried none. */
+export function titleFromHtml(html: string): string | null {
+	const match = TITLE_RE.exec(html.slice(0, HEAD_SCAN_CHARS));
+	if (!match) {
+		return null;
+	}
+	const decoded = decodeEntities(match[1]);
+	return decoded === "" ? null : decoded;
+}
+
+/**
+ * The page's declared icon href, still relative if that's how it was written.
+ * Prefers a real `icon`/`shortcut icon` link over `apple-touch-icon` (the
+ * former is what browsers show in a tab), first declaration wins within a
+ * tier. Returns null when the page declares none — callers must NOT invent
+ * `/favicon.ico`: a stored URL that 404s is worse than no URL at all, since
+ * the UI's hostname-based fallback always renders something.
+ */
+export function faviconHrefFromHtml(html: string): string | null {
+	const head = html.slice(0, HEAD_SCAN_CHARS);
+	let fallback: string | null = null;
+
+	for (const [tag] of head.matchAll(LINK_TAG_RE)) {
+		const rel = attr(tag, "rel")?.toLowerCase();
+		if (!rel) {
+			continue;
+		}
+		const rels = rel.split(/\s+/);
+		const href = attr(tag, "href");
+		if (!href) {
+			continue;
+		}
+		if (rels.includes("icon") || rels.includes("shortcut")) {
+			return href;
+		}
+		if (!fallback && rels.some((r) => r.endsWith("touch-icon"))) {
+			fallback = href;
+		}
+	}
+
+	return fallback;
+}
+
+/**
+ * Resolves a favicon href against the page URL and keeps only what is safe to
+ * store and render: absolute http(s), within the column's sanity bound. A
+ * `data:` icon is dropped rather than inlined into every feed response.
+ */
+export function resolveFaviconUrl(
+	href: string | null,
+	baseUrl: string,
+): string | null {
+	if (!href) {
+		return null;
+	}
+	let resolved: URL;
+	try {
+		resolved = new URL(href, baseUrl);
+	} catch {
+		return null;
+	}
+	if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+		return null;
+	}
+	return resolved.href.length <= MAX_FAVICON_URL_CHARS ? resolved.href : null;
+}
+
+/**
+ * Fetches just what a bookmark row needs after a web add (m15, SPEC §5): the
+ * page's real title and its favicon.
+ *
+ * Asks for `rawHtml` rather than `markdown` — the title comes back in the
+ * metadata either way, and the favicon is only ever in the markup (Firecrawl
+ * exposes it in the separate `branding` format, which costs an extra
+ * extraction). `onlyMainContent` is off for the same reason: the icon links
+ * live in the head that main-content extraction throws away.
+ *
+ * Throws `PipelineError` like `scrapeArticle` — the caller (which is holding a
+ * user's add request open) decides that a failure just means no metadata.
+ */
+export async function scrapePageMetadata(url: string): Promise<PageMetadata> {
+	const payload = await requestScrape(
+		{
+			url,
+			formats: ["rawHtml"],
+			onlyMainContent: false,
+			blockAds: true,
+		},
+		METADATA_TIMEOUT_MS,
+	);
+
+	const metadata = payload.data?.metadata ?? null;
+	const html = payload.data?.rawHtml ?? "";
+	const sourceUrl = firstString(metadata?.sourceURL);
+	// Resolve relative hrefs against the URL the page was actually served from.
+	const base = sourceUrl ?? url;
+
+	return {
+		title: firstString(metadata?.title) ?? titleFromHtml(html),
+		faviconUrl:
+			resolveFaviconUrl(firstString(metadata?.favicon), base) ??
+			resolveFaviconUrl(faviconHrefFromHtml(html), base),
+		sourceUrl,
 	};
 }
