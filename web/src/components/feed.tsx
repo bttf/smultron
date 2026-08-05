@@ -1176,9 +1176,12 @@ function ExpandedPanel({
 function CopyUrlButton({ url }: { url: string }) {
 	const [copied, setCopied] = useState(false);
 	const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const unmountedRef = useRef(false);
 
 	useEffect(() => {
+		unmountedRef.current = false;
 		return () => {
+			unmountedRef.current = true;
 			if (resetRef.current) {
 				clearTimeout(resetRef.current);
 			}
@@ -1193,6 +1196,11 @@ function CopyUrlButton({ url }: { url: string }) {
 			// button in its idle state rather than lie with a checkmark.
 			return;
 		}
+		if (unmountedRef.current) {
+			// Panel collapsed while the clipboard promise was in flight — don't
+			// schedule a reset timer nothing will clear.
+			return;
+		}
 		setCopied(true);
 		if (resetRef.current) {
 			clearTimeout(resetRef.current);
@@ -1204,7 +1212,10 @@ function CopyUrlButton({ url }: { url: string }) {
 		<button
 			type="button"
 			onClick={copy}
-			aria-label="Copy URL to clipboard"
+			// State-dependent label: a static one would mask the visible text
+			// change in the accessible name, leaving screen readers with no
+			// success confirmation.
+			aria-label={copied ? "Copied" : "Copy URL to clipboard"}
 			title="Copy URL"
 			className={cn(
 				"shrink-0 font-mono text-[11px] leading-none",
