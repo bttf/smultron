@@ -1086,14 +1086,17 @@ function ExpandedPanel({
 		// The row above already draws the 1px rule (its border-b), so the panel
 		// only draws its own bottom rule — a border-t here would double up.
 		<div className="flex flex-col gap-2 border-b border-[var(--log-rule)] bg-[var(--log-panel)] pt-2.5 pr-4 pb-3.5 pl-11">
-			<a
-				href={bookmark.url}
-				target="_blank"
-				rel="noreferrer"
-				className="max-w-[720px] truncate font-mono text-[11.5px] text-[var(--log-accent)] hover:underline"
-			>
-				{bookmark.url}
-			</a>
+			<div className="flex max-w-[720px] items-center gap-1.5">
+				<a
+					href={bookmark.url}
+					target="_blank"
+					rel="noreferrer"
+					className="min-w-0 truncate font-mono text-[11.5px] text-[var(--log-accent)] hover:underline"
+				>
+					{bookmark.url}
+				</a>
+				<CopyUrlButton url={bookmark.url} />
+			</div>
 			<span className="font-mono text-[11px] text-muted-foreground">
 				saved {formatTimestamp(new Date(bookmark.createdAt))} ·{" "}
 				{relativeTime(new Date(bookmark.createdAt))}
@@ -1167,6 +1170,62 @@ function ExpandedPanel({
 				</button>
 			</div>
 		</div>
+	);
+}
+
+function CopyUrlButton({ url }: { url: string }) {
+	const [copied, setCopied] = useState(false);
+	const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const unmountedRef = useRef(false);
+
+	useEffect(() => {
+		unmountedRef.current = false;
+		return () => {
+			unmountedRef.current = true;
+			if (resetRef.current) {
+				clearTimeout(resetRef.current);
+			}
+		};
+	}, []);
+
+	async function copy() {
+		try {
+			await navigator.clipboard.writeText(url);
+		} catch {
+			// Clipboard unavailable (permissions/insecure context) — leave the
+			// button in its idle state rather than lie with a checkmark.
+			return;
+		}
+		if (unmountedRef.current) {
+			// Panel collapsed while the clipboard promise was in flight — don't
+			// schedule a reset timer nothing will clear.
+			return;
+		}
+		setCopied(true);
+		if (resetRef.current) {
+			clearTimeout(resetRef.current);
+		}
+		resetRef.current = setTimeout(() => setCopied(false), 1500);
+	}
+
+	return (
+		<button
+			type="button"
+			onClick={copy}
+			// State-dependent label: a static one would mask the visible text
+			// change in the accessible name, leaving screen readers with no
+			// success confirmation.
+			aria-label={copied ? "Copied" : "Copy URL to clipboard"}
+			title="Copy URL"
+			className={cn(
+				"shrink-0 font-mono text-[11px] leading-none",
+				copied
+					? "text-[var(--log-accent)]"
+					: "text-[var(--log-faint)] hover:text-[var(--log-accent)]",
+			)}
+		>
+			{copied ? "✓ copied" : "⧉"}
+		</button>
 	);
 }
 
