@@ -10,15 +10,22 @@
 //   public/icons/icon-512.png
 //   public/icons/maskable-192.png  maskable, full-bleed bg + safe-zone padding
 //   public/icons/maskable-512.png
-//   public/apple-touch-icon.png    180px, opaque background (iOS won't mask)
+//   src/app/apple-icon.png         180px, opaque background (iOS won't mask).
+//                                  Lives in app/ (not public/) so it goes
+//                                  through Next's `apple-icon` file convention
+//                                  alongside app/icon.png — see layout.tsx for
+//                                  why declaring icons in `metadata` instead
+//                                  would drop the favicon.
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const publicDir = path.join(here, "..", "public");
+const webDir = path.join(here, "..");
+const publicDir = path.join(webDir, "public");
 const iconsDir = path.join(publicDir, "icons");
+const appDir = path.join(webDir, "src", "app");
 
 const BERRY = "#e0313f";
 const BERRY_DARK = "#b81f2c";
@@ -97,7 +104,7 @@ const targets = [
 	[path.join(iconsDir, "maskable-192.png"), 192, 0.62, false, MASK_BG],
 	[path.join(iconsDir, "maskable-512.png"), 512, 0.62, false, MASK_BG],
 	// iOS home screen: opaque, square (iOS applies its own rounding).
-	[path.join(publicDir, "apple-touch-icon.png"), 180, 0.82, false, BG],
+	[path.join(appDir, "apple-icon.png"), 180, 0.82, false, BG],
 ];
 
 for (const [file, size, artFraction, rounded, background] of targets) {
@@ -106,5 +113,5 @@ for (const [file, size, artFraction, rounded, background] of targets) {
 		svg({ size, artFraction, rounded, background }),
 		size,
 	);
-	console.log(`wrote ${path.relative(publicDir, file)} (${size}px, ${bytes}B)`);
+	console.log(`wrote ${path.relative(webDir, file)} (${size}px, ${bytes}B)`);
 }
