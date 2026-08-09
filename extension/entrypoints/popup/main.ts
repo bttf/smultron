@@ -1,10 +1,10 @@
 // Browser-action popup: look up the active tab's bookmark via
 // GET /api/bookmarks/by-url, edit title/tags/note locally, save with one
-// PATCH, archive/restore. Pages that aren't bookmarked yet are bookmarked
-// AUTOMATICALLY on open (default folder — the background's onCreated
-// listener live-syncs it); a manual retry CTA only appears if that fails.
-// All popup traffic is DIRECT fetch with truthful user-visible outcomes —
-// never the outbox.
+// PATCH, archive/restore, or create the bookmark from the "Bookmark this
+// page" CTA (default folder — the background's onCreated listener live-syncs
+// it). Opening the popup mutates NOTHING — no Chrome bookmark, no DB row;
+// every write is user-initiated. All popup traffic is DIRECT fetch with
+// truthful user-visible outcomes — never the outbox.
 
 import { relativeTime } from "@/src/relativeTime";
 import { filterTagSuggestions } from "@/src/tagSuggestions";
@@ -54,6 +54,7 @@ function mustGet<T extends Element>(selector: string): T {
 	return found;
 }
 
+const brandEl = mustGet<HTMLButtonElement>("#brand");
 const statusEl = mustGet<HTMLSpanElement>("#status");
 const statusLabelEl = mustGet<HTMLSpanElement>("#status-label");
 const viewEl = mustGet<HTMLDivElement>("#view");
@@ -279,10 +280,10 @@ async function createAndWaitForSync(
 	try {
 		// A Chrome bookmark may already exist even though the server row
 		// hasn't landed (sync lagging, or a retry after a poll timeout) —
-		// skip the create and just poll, so reopening the popup never mints
-		// duplicate Chrome rows. A URL-variant miss here is acceptable: the
-		// server dedupes by normalized URL (same rule as highlight capture,
-		// SPEC §6).
+		// skip the create and just poll, so repeat CTA clicks and popup
+		// reopens never mint duplicate Chrome rows. A URL-variant miss here
+		// is acceptable: the server dedupes by normalized URL (same rule as
+		// highlight capture, SPEC §6).
 		const existing = await browser.bookmarks.search({ url: tabUrl.href });
 		if (existing.length === 0) {
 			// Default folder (no parentId): the background onCreated listener
@@ -316,20 +317,20 @@ async function createAndWaitForSync(
 }
 
 /**
- * Fallback view when the automatic bookmark failed: page row + retry CTA
- * with the failure message visible.
+ * Not-bookmarked view: page row + the CTA that creates the bookmark. The
+ * create only ever runs on click — opening the popup mutates nothing. On
+ * failure the CTA stays put with the message so the click can be retried.
  */
 function renderNotBookmarked(
 	config: PopupConfig,
 	tabUrl: URL,
 	tabTitle: string,
-	initialError: string,
 ): void {
 	setHeaderStatus("not-bookmarked");
 	const { row } = pageRow(tabUrl, tabTitle, { editable: false });
 	const button = el("button", "btn-accent", "Bookmark this page");
 	button.type = "button";
-	const errorLine = el("div", "error-line", initialError);
+	const errorLine = el("div", "error-line hidden");
 	const actions = el("div", "footer-actions");
 	actions.append(button);
 
@@ -351,27 +352,6 @@ function renderNotBookmarked(
 	});
 
 	render(row, actions, errorLine);
-}
-
-/**
- * Auto-bookmark on open: show the page row in a syncing state, create the
- * bookmark immediately, then swap to the editor. On failure, fall back to
- * the manual CTA so the user can retry.
- */
-async function autoBookmark(
-	config: PopupConfig,
-	tabUrl: URL,
-	tabTitle: string,
-): Promise<void> {
-	setHeaderStatus("syncing");
-	const { row } = pageRow(tabUrl, tabTitle, { editable: false });
-	render(row);
-	const result = await createAndWaitForSync(config, tabUrl, tabTitle);
-	if (result.ok) {
-		renderEditor(config, tabUrl, result.bookmark);
-	} else {
-		renderNotBookmarked(config, tabUrl, tabTitle, result.message);
-	}
 }
 
 function renderEditor(
@@ -675,6 +655,16 @@ function renderEditor(
 // ---------------------------------------------------------------------------
 // Entry.
 
+// Header brand → the site in a new tab. Wired at module scope, so it works in
+// EVERY popup state (unpaired, non-http tab, not-bookmarked, editor); the
+// target resolves per click — the configured base URL, else the default.
+brandEl.addEventListener("click", () => {
+	void (async () => {
+		const config = await loadPopupConfig();
+		await browser.tabs.create({ url: config?.baseUrl ?? DEFAULT_BASE_URL });
+	})();
+});
+
 async function init(): Promise<void> {
 	renderLoading();
 
@@ -706,7 +696,7 @@ async function init(): Promise<void> {
 	}
 
 	if (result.value === null) {
-		await autoBookmark(config, tabUrl, tab?.title ?? rawUrl);
+		renderNotBookmarked(config, tabUrl, tab?.title ?? rawUrl);
 	} else {
 		renderEditor(config, tabUrl, result.value);
 	}
