@@ -194,10 +194,21 @@ async function renderGlowIcons(): Promise<Record<number, ImageData> | null> {
 	return glowIcons;
 }
 
-async function applyIcon(tabId: number, state: IconState): Promise<void> {
+/**
+ * `stillCurrent` is re-checked immediately before EACH setIcon: the first
+ * glow render of a worker's life awaits fetch + decode, and without the
+ * re-check an older refresh could out-paint a newer one that already
+ * finished (e.g. glow landing on a page archived mid-render).
+ */
+async function applyIcon(
+	tabId: number,
+	state: IconState,
+	stillCurrent: () => boolean,
+): Promise<void> {
 	if (state === "glow") {
 		const imageData = await renderGlowIcons();
 		if (imageData !== null) {
+			if (!stillCurrent()) return;
 			try {
 				await browser.action.setIcon({ tabId, imageData });
 				return;
@@ -206,6 +217,7 @@ async function applyIcon(tabId: number, state: IconState): Promise<void> {
 			}
 		}
 	}
+	if (!stillCurrent()) return;
 	try {
 		await browser.action.setIcon({ tabId, path: DEFAULT_ICON_PATH });
 	} catch {
@@ -298,9 +310,11 @@ function refreshActiveTabIcon(
 
 			const paint = async (state: IconState): Promise<void> => {
 				// Superseded while we were awaiting — the newer request owns
-				// the icon now.
-				if (seq !== paintSeq) return;
-				await applyIcon(tabId, state);
+				// the icon now. applyIcon re-checks before each setIcon, since
+				// the glow render awaits again.
+				const stillCurrent = () => seq === paintSeq;
+				if (!stillCurrent()) return;
+				await applyIcon(tabId, state, stillCurrent);
 			};
 
 			if (!isTrackableUrl(url)) {
@@ -405,5 +419,14 @@ export default defineBackground(() => {
 		if (ping === undefined) return;
 		trackedCache.set(ping.url, ping.tracked);
 		refreshActiveTabIcon({ url: ping.url });
+	});
+
+	browser.storage.onChanged.addListener((changes, area) => {
+		// Re-pairing (the options page rewrote the config) makes every cached
+		// tracked verdict meaningless — different account or server. Drop the
+		// cache and repaint from scratch.
+		if (area !== "local" || changes[CONFIG_KEY] === undefined) return;
+		trackedCache.clear();
+		refreshActiveTabIcon();
 	});
 });
