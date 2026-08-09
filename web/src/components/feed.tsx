@@ -104,10 +104,9 @@ export function Feed() {
 	const enrichingId = enriching?.id ?? null;
 	// Row to flash after an add (new or resurfaced duplicate)…
 	const [flashId, setFlashId] = useState<number | null>(null);
-	// …and the row whose expanded panel should focus its add-tag input
-	// (mock: `focusLater(tagRef)`) — set optimistically at submit, when
-	// created-vs-duplicate isn't known yet; kept across the id swap so the
-	// reconcile can't yank focus mid-typing.
+	// …and, for a NEWLY created bookmark only, the row whose expanded panel
+	// should focus its add-tag input (mock: `focusLater(tagRef)`). Set at
+	// reconcile (never to a temp id): the panel needs the real row.
 	const [justAddedId, setJustAddedId] = useState<number | null>(null);
 	// m18 optimistic add (SPEC §9): rows rendered the moment Enter is pressed,
 	// before the POST is in flight. A row carries a negative temp id until the
@@ -578,9 +577,9 @@ export function Feed() {
 	// (The draft only refills an EMPTY composer — if the user is already
 	// typing another URL there, their draft wins over the failed one.)
 	function rollbackAdd(tempId: number, draft: string, message: string) {
+		// (No expanded/justAdded cleanup: neither ever targets a temp id —
+		// expansion and tag focus only happen at reconcile, with the real id.)
 		setAdded((prev) => prev.filter((a) => a.id !== tempId));
-		setExpanded((prev) => (prev === tempId ? null : prev));
-		setJustAddedId((prev) => (prev === tempId ? null : prev));
 		setFlashId((prev) => (prev === tempId ? null : prev));
 		setEnriching((prev) => (prev?.id === tempId ? null : prev));
 		setComposerOpen(true);
@@ -612,8 +611,12 @@ export function Feed() {
 		// m18 optimistic add (SPEC §9): the row renders NOW — a temp row with a
 		// negative id, the same hostname title the server autofills (§5), and
 		// the enriching shimmer already on, at the top of the live view (search
-		// and tag filters are kept), flashed, expanded, tag input focused.
-		// Nothing the user sees waits on the network.
+		// and tag filters are kept), flashed. Nothing the user sees waits on
+		// the network. Expansion + tag-input focus wait for the reconcile
+		// below: the panel's editors and article section need a PATCHable id,
+		// and a duplicate's real tags/note must be showing before the user can
+		// edit them (a tag save computed against the temp row's empty arrays
+		// would clobber the existing ones).
 		const tempId = tempIdRef.current--;
 		const nowIso = new Date().toISOString();
 		const tempRow: ApiBookmark = {
@@ -638,8 +641,6 @@ export function Feed() {
 		}
 		setArchived(false);
 		setAdded((prev) => [tempRow, ...prev]);
-		setExpanded(tempId);
-		setJustAddedId(tempId);
 		setEnriching({
 			id: tempId,
 			title: tempRow.title,
@@ -673,21 +674,29 @@ export function Feed() {
 				// A resurfaced duplicate that is PINNED lives in the shelf, not
 				// the log (m13) — drop the overlay row and let the revalidation
 				// refresh the shelf. Otherwise the server's row replaces the
-				// temp row and all id-keyed state follows it. (`highlights` is
-				// the one field POST doesn't return; a duplicate's highlights
-				// arrive with the revalidated page.)
+				// temp row. The `a.id !== id` filter drops a stale overlay copy
+				// of the SAME real row (re-adding a URL whose earlier reconcile
+				// hasn't been released yet) — without it the log would render
+				// two rows with one React key. (`highlights` is the one field
+				// POST doesn't return; a duplicate's highlights arrive with the
+				// revalidated page.)
 				const pinned = bookmark.pinnedAt !== null;
-				setAdded((prev) =>
-					pinned
-						? prev.filter((a) => a.id !== tempId)
-						: prev.map((a) =>
+				setAdded((prev) => {
+					const rest = prev.filter((a) => a.id !== id);
+					return pinned
+						? rest.filter((a) => a.id !== tempId)
+						: rest.map((a) =>
 								a.id === tempId ? { ...bookmark, highlights: [] } : a,
-							),
-				);
-				setExpanded((prev) => (prev === tempId ? (pinned ? null : id) : prev));
-				setJustAddedId((prev) =>
-					prev === tempId ? (pinned ? null : id) : prev,
-				);
+							);
+				});
+				// Mock semantics (SPEC §9): the reconciled row auto-expands, and
+				// a NEWLY created bookmark focuses the panel's add-tag input
+				// (tagging is the expected next action). Deliberately not done
+				// at submit — see the comment above the temp row.
+				if (!pinned) {
+					setExpanded(id);
+				}
+				setJustAddedId(created && !pinned ? id : null);
 				setFlashId((prev) => (prev === tempId ? (pinned ? null : id) : prev));
 				setTimeout(
 					() => setFlashId((prev) => (prev === id ? null : prev)),
@@ -717,10 +726,12 @@ export function Feed() {
 			} catch {
 				rollbackAdd(tempId, raw, "save failed");
 				return null;
-			} finally {
-				pendingAddsRef.current.delete(tempId);
 			}
 		})();
+		// Entries are kept for the session (never deleted): a patch can race in
+		// AFTER the promise settles but BEFORE the id-swap render commits, and
+		// it must still resolve the real id instead of concluding the add died.
+		// A handful of settled promises per session is free.
 		pendingAddsRef.current.set(tempId, send);
 	}
 
@@ -942,6 +953,13 @@ export function Feed() {
 									activeTags={activeTags}
 									tagSuggestions={tagSuggestions}
 									onToggleExpand={() => {
+										// A still-optimistic row (temp id) can't
+										// open: the panel's editors and article
+										// section need a real, PATCHable id. The
+										// reconcile expands it moments later.
+										if (b.id < 0) {
+											return;
+										}
 										// A manual toggle ends the just-added
 										// affordance — re-expanding later must
 										// not steal focus into the tag input.
