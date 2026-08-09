@@ -5,9 +5,10 @@
 // infinite-scroll sentinel. Row edits (title/tags/note/archive, highlight
 // delete) PATCH/DELETE then reconcile local state — see the comments inside
 // `Feed` for the reconciliation model.
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { relativeTime } from "../lib/relativeTime";
+import { filterTagSuggestions } from "../lib/tagSuggestions";
 import { textFragmentUrl } from "../lib/textFragment";
 import { cn } from "../lib/utils";
 import { ArticleSection } from "./article";
@@ -559,6 +560,13 @@ export function Feed() {
 	const total = data?.total ?? 0;
 	const matching = data?.matching ?? 0;
 
+	// m14 tag autocomplete source: the current response's facet tags, already
+	// ordered count desc / tag asc by the server. No extra fetch, no new SWR key.
+	const tagSuggestions = useMemo(
+		() => (data?.facets ?? []).map((f) => f.tag),
+		[data],
+	);
+
 	// Shelf = server's pinned list + rows pinned since the last revalidation
 	// (front — most recent first), minus rows unpinned/archived since. Once
 	// the revalidated page lands the overlays dedupe into no-ops.
@@ -760,6 +768,7 @@ export function Feed() {
 									flash={flashId === b.id}
 									autoFocusTags={justAddedId === b.id}
 									activeTags={activeTags}
+									tagSuggestions={tagSuggestions}
 									onToggleExpand={() => {
 										// A manual toggle ends the just-added
 										// affordance — re-expanding later must
@@ -946,6 +955,7 @@ function LogRow({
 	flash,
 	autoFocusTags,
 	activeTags,
+	tagSuggestions,
 	onToggleExpand,
 	onToggleTag,
 	onPatch,
@@ -959,6 +969,8 @@ function LogRow({
 	/** Focus the expanded panel's add-tag input (newly created via the composer). */
 	autoFocusTags: boolean;
 	activeTags: string[];
+	/** m14: existing tags in usage order, fed to the panel's add-tag input. */
+	tagSuggestions: string[];
 	onToggleExpand: () => void;
 	onToggleTag: (tag: string) => void;
 	onPatch: PatchFn;
@@ -1061,6 +1073,7 @@ function LogRow({
 					bookmark={bookmark}
 					archivedView={archivedView}
 					autoFocusTags={autoFocusTags}
+					tagSuggestions={tagSuggestions}
 					onPatch={onPatch}
 					onDeleteHighlight={onDeleteHighlight}
 				/>
@@ -1073,12 +1086,14 @@ function ExpandedPanel({
 	bookmark,
 	archivedView,
 	autoFocusTags,
+	tagSuggestions,
 	onPatch,
 	onDeleteHighlight,
 }: {
 	bookmark: ApiBookmark;
 	archivedView: boolean;
 	autoFocusTags: boolean;
+	tagSuggestions: string[];
 	onPatch: PatchFn;
 	onDeleteHighlight: (bookmarkId: number, highlightId: number) => Promise<void>;
 }) {
@@ -1117,6 +1132,7 @@ function ExpandedPanel({
 				<TagChips
 					tags={bookmark.tags}
 					autoFocusInput={autoFocusTags}
+					suggestions={tagSuggestions}
 					onSave={(tags) => onPatch(bookmark.id, { tags })}
 				/>
 			</div>
@@ -1324,28 +1340,49 @@ function EditableTitle({
 function TagChips({
 	tags,
 	autoFocusInput,
+	suggestions,
 	onSave,
 }: {
 	tags: string[];
 	/** m11: a bookmark just created via the composer opens ready to tag. */
 	autoFocusInput: boolean;
+	/** m14 autocomplete source: existing tags in usage order (the feed facets). */
+	suggestions: string[];
 	onSave: (next: string[]) => void;
 }) {
 	const [draft, setDraft] = useState("");
+	// -1 = nothing highlighted, so Enter falls through to the raw draft.
+	const [highlighted, setHighlighted] = useState(-1);
+	// Open-ness is its own state, not "matches exist": Escape closes the
+	// dropdown while KEEPING the draft, and blur closes it too (SPEC §9).
+	const [open, setOpen] = useState(false);
+	const inputRef = useRef<HTMLInputElement>(null);
+	const listId = useId();
 
-	function addTag() {
-		const next = draft.trim();
+	const matches = useMemo(
+		() => filterTagSuggestions(suggestions, tags, draft),
+		[suggestions, tags, draft],
+	);
+	const showList = open && matches.length > 0;
+	const activeId =
+		showList && highlighted >= 0 ? `${listId}-${highlighted}` : undefined;
+
+	// The single add path (⏎ on the draft, ⏎ on a highlight, pointer select):
+	// after ANY add the input clears, the dropdown closes and focus stays put.
+	function addTag(value: string) {
+		const next = value.trim();
 		if (!next) {
 			return;
 		}
+		setDraft("");
+		setHighlighted(-1);
+		setOpen(false);
 		if (tags.includes(next)) {
-			// Duplicate — nothing to add, but clear the input so the rejected
-			// text doesn't linger looking un-submitted.
-			setDraft("");
+			// Duplicate — nothing to add, but the input still clears so the
+			// rejected text doesn't linger looking un-submitted.
 			return;
 		}
 		onSave([...tags, next]);
-		setDraft("");
 	}
 
 	return (
@@ -1366,24 +1403,93 @@ function TagChips({
 					</button>
 				</span>
 			))}
-			<input
-				// biome-ignore lint/a11y/noAutofocus: only set right after the user added a bookmark via the composer — tagging is the expected next action.
-				autoFocus={autoFocusInput}
-				value={draft}
-				onChange={(e) => setDraft(e.target.value)}
-				onKeyDown={(e) => {
-					if (e.key === "Enter") {
-						e.preventDefault();
-						addTag();
-					} else if (e.key === "Escape") {
-						e.preventDefault();
-						setDraft("");
-						e.currentTarget.blur();
-					}
-				}}
-				placeholder="add tag ⏎"
-				className="w-[84px] rounded border border-dashed border-[var(--log-dash)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-fg)] outline-none focus:border-solid focus:border-[var(--log-accent)]"
-			/>
+			{/* Anchor for the absolutely-positioned suggestion list below. */}
+			<div className="relative">
+				<input
+					ref={inputRef}
+					// biome-ignore lint/a11y/noAutofocus: only set right after the user added a bookmark via the composer — tagging is the expected next action.
+					autoFocus={autoFocusInput}
+					value={draft}
+					role="combobox"
+					aria-expanded={showList}
+					aria-controls={listId}
+					aria-activedescendant={activeId}
+					aria-autocomplete="list"
+					aria-label="Add tag"
+					onChange={(e) => {
+						// Typing refilters and resets the highlight to none.
+						setDraft(e.target.value);
+						setHighlighted(-1);
+						setOpen(true);
+					}}
+					onBlur={() => {
+						setOpen(false);
+						setHighlighted(-1);
+					}}
+					onKeyDown={(e) => {
+						if (e.key === "ArrowDown" && showList) {
+							// From none → first; wraps at the end.
+							e.preventDefault();
+							setHighlighted((i) => (i + 1) % matches.length);
+						} else if (e.key === "ArrowUp" && showList) {
+							// From none → last; wraps at the start.
+							e.preventDefault();
+							setHighlighted((i) => (i <= 0 ? matches.length - 1 : i - 1));
+						} else if (e.key === "Enter") {
+							e.preventDefault();
+							addTag(
+								showList && highlighted >= 0 ? matches[highlighted] : draft,
+							);
+						} else if (e.key === "Escape") {
+							e.preventDefault();
+							if (showList) {
+								// Close the dropdown first, keeping the draft; a
+								// second Escape clears it as before.
+								setOpen(false);
+								setHighlighted(-1);
+							} else {
+								setDraft("");
+								e.currentTarget.blur();
+							}
+						}
+					}}
+					placeholder="add tag ⏎"
+					className="w-[84px] rounded border border-dashed border-[var(--log-dash)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-fg)] outline-none focus:border-solid focus:border-[var(--log-accent)]"
+				/>
+				{showList ? (
+					<div
+						id={listId}
+						role="listbox"
+						className="absolute top-[calc(100%+2px)] left-0 z-20 max-h-[152px] min-w-[128px] overflow-y-auto rounded border border-[var(--log-dash)] bg-[var(--log-panel)] py-px shadow-md"
+					>
+						{matches.map((tag, i) => (
+							<button
+								key={tag}
+								id={`${listId}-${i}`}
+								type="button"
+								role="option"
+								aria-selected={i === highlighted}
+								tabIndex={-1}
+								// mousedown (not click) so the add commits BEFORE the
+								// input blurs and closes the list.
+								onMouseDown={(e) => {
+									e.preventDefault();
+									addTag(tag);
+									inputRef.current?.focus();
+								}}
+								className={cn(
+									"block w-full truncate px-2 py-px text-left font-mono text-[10.5px] text-[var(--log-fg)]",
+									i === highlighted
+										? "bg-[var(--log-facet-active)]"
+										: "hover:bg-[var(--log-soft)]",
+								)}
+							>
+								{tag}
+							</button>
+						))}
+					</div>
+				) : null}
+			</div>
 		</div>
 	);
 }
