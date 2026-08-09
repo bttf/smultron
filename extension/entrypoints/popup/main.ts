@@ -6,6 +6,7 @@
 // All popup traffic is DIRECT fetch with truthful user-visible outcomes —
 // never the outbox.
 
+import { createCoalescedSender } from "@/src/coalesce";
 import { relativeTime } from "@/src/relativeTime";
 import { filterTagSuggestions } from "@/src/tagSuggestions";
 import {
@@ -382,8 +383,41 @@ function renderEditor(
 	const archived = bookmark.archivedAt !== null;
 	setHeaderStatus(archived ? "archived" : "bookmarked");
 
-	// Edits accumulate locally; Save sends one PATCH.
+	// Title and note edits accumulate locally; Save sends one PATCH.
 	const tags = [...bookmark.tags];
+
+	// m15: tag mutations are a state toggle like pin/archive — each one PATCHes
+	// the full array immediately (PATCH by-url never bumps updated_at). Sends
+	// coalesce: ≤1 in flight, a mutation mid-flight becomes one trailing send
+	// carrying the latest array. On failure the local chips stand and Save —
+	// which still sends `tags` — is the retry path (SPEC §6).
+	let tagErrorText: string | undefined;
+	const saveTags = createCoalescedSender<string[]>(async (next) => {
+		const result = await patchBookmarkByUrl(config, {
+			url: tabUrl.href,
+			tags: next,
+		});
+		if (!result.ok) {
+			tagErrorText = `tag save failed: ${failureText(result)} — use Save to retry`;
+			showError(tagErrorText);
+			return false;
+		}
+		if (tagErrorText !== undefined) {
+			// Retract our own message only; Save/Archive/Pin own the line
+			// whenever theirs is the one on screen.
+			if (errorLine.textContent === tagErrorText) {
+				errorLine.classList.add("hidden");
+			}
+			tagErrorText = undefined;
+		}
+		return true;
+	});
+
+	/** Every tag mutation: repaint at once (the feedback), then push the state. */
+	function commitTags(): void {
+		renderChips();
+		saveTags([...tags]);
+	}
 
 	const { row, titleInput } = pageRow(tabUrl, bookmark.title, {
 		editable: true,
@@ -432,7 +466,7 @@ function renderEditor(
 			remove.type = "button";
 			remove.addEventListener("click", () => {
 				tags.splice(index, 1);
-				renderChips();
+				commitTags();
 			});
 			chip.append(remove);
 			return chip;
@@ -503,7 +537,7 @@ function renderEditor(
 		closeSuggestions();
 		if (tag !== "" && !tags.includes(tag)) {
 			tags.push(tag);
-			renderChips();
+			commitTags();
 		}
 		tagInput.focus();
 	}
@@ -540,7 +574,7 @@ function renderEditor(
 		} else if (event.key === "Backspace" && tagInput.value === "") {
 			if (tags.length > 0) {
 				tags.pop();
-				renderChips();
+				commitTags();
 				tagInput.focus();
 			}
 		}
