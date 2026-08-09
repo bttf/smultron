@@ -1364,8 +1364,12 @@ function TagChips({
 		[suggestions, tags, draft],
 	);
 	const showList = open && matches.length > 0;
-	const activeId =
-		showList && highlighted >= 0 ? `${listId}-${highlighted}` : undefined;
+	// `matches` can shrink UNDER an open dropdown without a keystroke (the
+	// `suggestions` prop follows the ~10s SWR poll; `tags` follows a PATCH), so
+	// the stored index is clamped rather than trusted — Enter and
+	// aria-activedescendant must never index past the end.
+	const active = highlighted < matches.length ? highlighted : -1;
+	const activeId = showList && active >= 0 ? `${listId}-${active}` : undefined;
 
 	// The single add path (⏎ on the draft, ⏎ on a highlight, pointer select):
 	// after ANY add the input clears, the dropdown closes and focus stays put.
@@ -1430,16 +1434,14 @@ function TagChips({
 						if (e.key === "ArrowDown" && showList) {
 							// From none → first; wraps at the end.
 							e.preventDefault();
-							setHighlighted((i) => (i + 1) % matches.length);
+							setHighlighted((active + 1) % matches.length);
 						} else if (e.key === "ArrowUp" && showList) {
 							// From none → last; wraps at the start.
 							e.preventDefault();
-							setHighlighted((i) => (i <= 0 ? matches.length - 1 : i - 1));
+							setHighlighted(active <= 0 ? matches.length - 1 : active - 1);
 						} else if (e.key === "Enter") {
 							e.preventDefault();
-							addTag(
-								showList && highlighted >= 0 ? matches[highlighted] : draft,
-							);
+							addTag(showList && active >= 0 ? matches[active] : draft);
 						} else if (e.key === "Escape") {
 							e.preventDefault();
 							if (showList) {
@@ -1468,7 +1470,7 @@ function TagChips({
 								id={`${listId}-${i}`}
 								type="button"
 								role="option"
-								aria-selected={i === highlighted}
+								aria-selected={i === active}
 								tabIndex={-1}
 								// mousedown (not click) so the add commits BEFORE the
 								// input blurs and closes the list.
@@ -1479,7 +1481,7 @@ function TagChips({
 								}}
 								className={cn(
 									"block w-full truncate px-2 py-px text-left font-mono text-[10.5px] text-[var(--log-fg)]",
-									i === highlighted
+									i === active
 										? "bg-[var(--log-facet-active)]"
 										: "hover:bg-[var(--log-soft)]",
 								)}
