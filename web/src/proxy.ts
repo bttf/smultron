@@ -10,8 +10,8 @@
 // getAuthedUser() — the proxy is an optimistic layer, not the authority
 // (see node_modules/next/dist/docs/01-app/01-getting-started/16-proxy.md).
 //
-// /api/sync, /api/hello and /api/bookmarks/by-url are token-authed by the
-// extension and are excluded in the matcher below — they must NEVER hit
+// /api/sync, /api/hello, /api/bookmarks/by-url and /api/tags are token-authed
+// by the extension and are excluded in the matcher below — they must NEVER hit
 // session/redirect logic. (/api/highlights is Bearer-authed too but shares
 // its path prefix with the session-authed DELETE /api/highlights/:id, so it
 // stays matched — harmless, since matched /api/* is never redirected.)
@@ -102,8 +102,8 @@ export async function proxy(request: NextRequest) {
 export const config = {
 	// Everything EXCEPT: Next internals/static assets, files with common
 	// static extensions, and the extension's Bearer-token endpoints
-	// (/api/sync, /api/hello, /api/bookmarks/by-url), which must stay out of
-	// session logic entirely.
+	// (/api/sync, /api/hello, /api/bookmarks/by-url, /api/tags), which must stay
+	// out of session logic entirely.
 	//
 	// `webmanifest` is in the extension list so /manifest.webmanifest (m14) is
 	// served as-is: browsers fetch it before/without a session and a redirect
@@ -111,6 +111,6 @@ export const config = {
 	// target — stays matched, so an unauthenticated share still lands on
 	// /login (the route re-checks auth itself either way).
 	matcher: [
-		"/((?!_next/static|_next/image|favicon.ico|api/sync|api/hello|api/bookmarks/by-url|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|txt|xml|json|webmanifest)$).*)",
+		"/((?!_next/static|_next/image|favicon.ico|api/sync|api/hello|api/bookmarks/by-url|api/tags|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|txt|xml|json|webmanifest)$).*)",
 	],
 };

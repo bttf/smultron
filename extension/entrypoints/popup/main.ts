@@ -7,6 +7,7 @@
 // never the outbox.
 
 import { relativeTime } from "@/src/relativeTime";
+import { filterTagSuggestions } from "@/src/tagSuggestions";
 import {
 	CONFIG_KEY,
 	DEFAULT_BASE_URL,
@@ -41,6 +42,8 @@ type ApiResult<T> =
 const SYNC_POLL_INTERVAL_MS = 800;
 const SYNC_POLL_TIMEOUT_MS = 12_000;
 const SAVED_FLASH_MS = 1_600;
+/** Listbox id + option-id prefix for the m14 tag-suggestion combobox. */
+const SUGGESTIONS_ID = "tag-suggestions";
 
 // ---------------------------------------------------------------------------
 // DOM helpers — user/tab-derived strings only ever go through textContent.
@@ -208,6 +211,16 @@ function patchBookmarkByUrl(
 		(parsed) =>
 			(parsed as { bookmark?: BookmarkDto }).bookmark ??
 			(parsed as BookmarkDto),
+	);
+}
+
+/** m14: the caller's distinct tags, ordered count desc / tag asc (SPEC §8). */
+function getTags(config: PopupConfig): Promise<ApiResult<string[]>> {
+	return apiFetch(
+		config,
+		"/api/tags",
+		{ method: "GET" },
+		(body) => (body as { tags: string[] }).tags ?? [],
 	);
 }
 
@@ -379,11 +392,37 @@ function renderEditor(
 	// TAGS block.
 	const tagsBlock = el("div", "block");
 	tagsBlock.append(el("div", "block-label", "TAGS"));
+	// Relative wrapper so the suggestion dropdown overlays the NOTE block
+	// instead of pushing it down.
+	const tagField = el("div", "tag-field");
 	const chips = el("div", "chips");
 	const tagInput = el("input", "tag-input");
 	tagInput.type = "text";
 	tagInput.placeholder = "add tag ⏎";
 	tagInput.spellcheck = false;
+	tagInput.setAttribute("role", "combobox");
+	tagInput.setAttribute("aria-autocomplete", "list");
+	tagInput.setAttribute("aria-expanded", "false");
+	tagInput.setAttribute("aria-controls", SUGGESTIONS_ID);
+	const suggestionList = el("div", "suggestions hidden");
+	suggestionList.id = SUGGESTIONS_ID;
+	suggestionList.setAttribute("role", "listbox");
+
+	// m14 autocomplete source: ONE direct GET /api/tags per card render,
+	// non-blocking — the card never waits on it, and on failure suggestions
+	// are silently absent (SPEC §6).
+	let availableTags: string[] = [];
+	void getTags(config).then((result) => {
+		if (!result.ok) return;
+		availableTags = result.value;
+		// The user may already be typing when the list lands — only then does
+		// a late arrival open the dropdown.
+		if (document.activeElement === tagInput) refreshSuggestions();
+	});
+
+	// Dropdown state: `suggestions` non-empty ⇔ the dropdown is open.
+	let suggestions: string[] = [];
+	let highlighted = -1;
 
 	function renderChips(): void {
 		const nodes: HTMLElement[] = tags.map((tag, index) => {
@@ -401,15 +440,103 @@ function renderEditor(
 		chips.replaceChildren(...nodes, tagInput);
 	}
 
-	tagInput.addEventListener("keydown", (event) => {
-		if (event.key === "Enter") {
-			event.preventDefault();
-			const tag = tagInput.value.trim();
-			tagInput.value = "";
-			if (tag === "" || tags.includes(tag)) return;
+	function closeSuggestions(): void {
+		suggestions = [];
+		highlighted = -1;
+		suggestionList.replaceChildren();
+		suggestionList.classList.add("hidden");
+		tagInput.setAttribute("aria-expanded", "false");
+		tagInput.removeAttribute("aria-activedescendant");
+	}
+
+	function paintHighlight(): void {
+		const options = Array.from(suggestionList.children);
+		options.forEach((option, index) => {
+			const active = index === highlighted;
+			option.classList.toggle("active", active);
+			option.setAttribute("aria-selected", active ? "true" : "false");
+		});
+		const active = highlighted === -1 ? undefined : options[highlighted];
+		if (active === undefined) tagInput.removeAttribute("aria-activedescendant");
+		else tagInput.setAttribute("aria-activedescendant", active.id);
+	}
+
+	/**
+	 * Recompute from the live draft and the local `tags` array (so a tag just
+	 * added disappears from the list); open only with ≥1 match, highlight reset.
+	 */
+	function refreshSuggestions(): void {
+		suggestions = filterTagSuggestions(availableTags, tags, tagInput.value);
+		if (suggestions.length === 0) {
+			closeSuggestions();
+			return;
+		}
+		highlighted = -1;
+		suggestionList.replaceChildren(
+			...suggestions.map((tag, index) => {
+				const option = el("div", "suggestion", tag);
+				option.id = `${SUGGESTIONS_ID}-${index}`;
+				option.setAttribute("role", "option");
+				option.setAttribute("aria-selected", "false");
+				// Commit on pointerdown/mousedown, before the input blurs;
+				// preventDefault keeps focus (and suppresses the compat
+				// mousedown for pointer-aware browsers). `addTag` is
+				// idempotent, so a duplicate compat event is harmless.
+				const commit = (event: Event): void => {
+					event.preventDefault();
+					addTag(tag);
+				};
+				option.addEventListener("pointerdown", commit);
+				option.addEventListener("mousedown", commit);
+				return option;
+			}),
+		);
+		suggestionList.classList.remove("hidden");
+		tagInput.setAttribute("aria-expanded", "true");
+		paintHighlight();
+	}
+
+	/** Single add path: draft cleared, dropdown closed, focus back in input. */
+	function addTag(raw: string): void {
+		const tag = raw.trim();
+		tagInput.value = "";
+		closeSuggestions();
+		if (tag !== "" && !tags.includes(tag)) {
 			tags.push(tag);
 			renderChips();
-			tagInput.focus();
+		}
+		tagInput.focus();
+	}
+
+	tagInput.addEventListener("input", () => {
+		refreshSuggestions();
+	});
+	tagInput.addEventListener("blur", () => {
+		closeSuggestions();
+	});
+
+	tagInput.addEventListener("keydown", (event) => {
+		const open = suggestions.length > 0;
+		if (open && event.key === "ArrowDown") {
+			// From no highlight → first; wraps.
+			event.preventDefault();
+			highlighted = (highlighted + 1) % suggestions.length;
+			paintHighlight();
+		} else if (open && event.key === "ArrowUp") {
+			// From no highlight → last; wraps.
+			event.preventDefault();
+			highlighted = highlighted <= 0 ? suggestions.length - 1 : highlighted - 1;
+			paintHighlight();
+		} else if (open && event.key === "Escape") {
+			// Closes the dropdown only, keeping the draft; with no dropdown
+			// open Escape keeps its default popup behavior.
+			event.preventDefault();
+			event.stopPropagation();
+			closeSuggestions();
+		} else if (event.key === "Enter") {
+			event.preventDefault();
+			const picked = highlighted === -1 ? undefined : suggestions[highlighted];
+			addTag(picked ?? tagInput.value);
 		} else if (event.key === "Backspace" && tagInput.value === "") {
 			if (tags.length > 0) {
 				tags.pop();
@@ -420,7 +547,8 @@ function renderEditor(
 	});
 
 	renderChips();
-	tagsBlock.append(chips);
+	tagField.append(chips, suggestionList);
+	tagsBlock.append(tagField);
 
 	// NOTE block.
 	const noteBlock = el("div", "block");
