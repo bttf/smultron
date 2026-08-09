@@ -306,10 +306,11 @@ function validFaviconUrl(value: string | null): string | null {
  * response's `metadata` — Firecrawl parses the document and resolves the icon
  * href to an absolute URL itself, so no HTML ever reaches us. The summary
  * costs no extra credit over a plain scrape, but it is LLM-generated, so a
- * cache miss can take a while — hence the deadline the caller holds it to.
+ * cache miss can take a while — fine since m18: the fill always runs in
+ * `after()`, never in a request a user is waiting on.
  *
- * Throws `PipelineError` like `scrapeArticle` — the caller (which is holding a
- * user's add request open) decides that a failure just means no metadata.
+ * Throws `PipelineError` like `scrapeArticle` — the caller decides that a
+ * failure just means no metadata.
  */
 export async function scrapePageMetadata(url: string): Promise<PageMetadata> {
 	const payload = await requestScrape(

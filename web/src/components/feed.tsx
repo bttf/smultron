@@ -1449,8 +1449,15 @@ function EditableTitle({
 	const [value, setValue] = useState(title);
 
 	useEffect(() => {
-		setValue(title);
-	}, [title]);
+		// Sync the draft to a fresher server title ONLY while not editing —
+		// since m18 the metadata fill routinely lands seconds after the panel
+		// auto-expands, and it must never replace keystrokes in progress (the
+		// server-side mid-flight guard protects the save; this protects the
+		// draft).
+		if (!editing) {
+			setValue(title);
+		}
+	}, [title, editing]);
 
 	if (editing) {
 		return (
