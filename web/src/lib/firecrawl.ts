@@ -82,13 +82,18 @@ type ScrapeResponse = {
  * whitespace of a multi-line `<title>` collapsed the way a browser tab shows
  * it — these land verbatim in a feed row.
  */
-function firstString(
-	value: string | string[] | null | undefined,
-): string | null {
+function firstString(value: unknown): string | null {
+	// The JSON is runtime-unvalidated, so guard the TYPE, not just nullish —
+	// a number/object here must degrade to null, never throw (the fill's
+	// per-field independence depends on it).
 	const raw = Array.isArray(value)
-		? value.find((entry) => entry.trim() !== "")
+		? value.find(
+				(entry): entry is string =>
+					typeof entry === "string" && entry.trim() !== "",
+			)
 		: value;
-	const normalized = raw?.replace(/\s+/g, " ").trim();
+	if (typeof raw !== "string") return null;
+	const normalized = raw.replace(/\s+/g, " ").trim();
 	return normalized ? normalized : null;
 }
 
@@ -317,7 +322,10 @@ export async function scrapePageMetadata(url: string): Promise<PageMetadata> {
 	);
 
 	const metadata = payload.data?.metadata ?? null;
-	const summary = payload.data?.summary?.trim();
+	// Same type-guarded degradation as firstString, but WITHOUT the
+	// whitespace collapse — a summary is prose and keeps its newlines.
+	const rawSummary = payload.data?.summary;
+	const summary = typeof rawSummary === "string" ? rawSummary.trim() : "";
 
 	return {
 		title: firstString(metadata?.title),

@@ -177,6 +177,34 @@ describe("scrapePageMetadata", () => {
 		expect(await scrapePageMetadata("https://example.com")).toEqual(empty);
 	});
 
+	it("degrades non-string JSON per-field instead of throwing", async () => {
+		// The response is runtime-unvalidated: a number/object in one field
+		// must cost only that field — never the others, and never a raw
+		// TypeError escaping past the PipelineError contract.
+		stubScrape({
+			summary: 123,
+			metadata: {
+				title: { weird: true },
+				favicon: ["https://example.com/i.ico", 7],
+			},
+		} as unknown as ScrapeData);
+		expect(await scrapePageMetadata("https://example.com")).toEqual({
+			title: null,
+			faviconUrl: "https://example.com/i.ico",
+			summary: null,
+		});
+
+		stubScrape({
+			summary: "Valid summary.",
+			metadata: { title: [42, "Recovered Title"], favicon: 9000 },
+		} as unknown as ScrapeData);
+		expect(await scrapePageMetadata("https://example.com")).toEqual({
+			title: "Recovered Title",
+			faviconUrl: null,
+			summary: "Valid summary.",
+		});
+	});
+
 	it("still maps Firecrawl failures onto PipelineError", async () => {
 		vi.stubGlobal(
 			"fetch",
