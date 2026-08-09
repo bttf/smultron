@@ -177,8 +177,12 @@ async function renderGreyIcons(): Promise<Record<number, ImageData> | null> {
 				const image = ctx.getImageData(0, 0, size, size);
 				const px = image.data;
 				for (let i = 0; i < px.length; i += 4) {
-					// Rec. 601 luma.
-					const luma = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+					// Rec. 601 luma. (?? 0 only satisfies noUncheckedIndexedAccess —
+					// i+2 < length by construction.)
+					const luma =
+						0.299 * (px[i] ?? 0) +
+						0.587 * (px[i + 1] ?? 0) +
+						0.114 * (px[i + 2] ?? 0);
 					px[i] = luma;
 					px[i + 1] = luma;
 					px[i + 2] = luma;
