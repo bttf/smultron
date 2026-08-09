@@ -150,10 +150,13 @@ const DEFAULT_ICON_PATH = {
  * lazily after worker death). `null` = rendering failed in this worker;
  * don't retry it on every tab switch, just use the packaged default icon.
  */
-let stateIcons: {
-	base: Record<number, ImageData>;
-	glow: Record<number, ImageData>;
-} | null | undefined;
+let stateIcons:
+	| {
+			base: Record<number, ImageData>;
+			glow: Record<number, ImageData>;
+	  }
+	| null
+	| undefined;
 
 /**
  * Render both icon states from the base PNGs. The artwork is drawn inset by
