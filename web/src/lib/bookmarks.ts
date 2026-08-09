@@ -62,7 +62,7 @@ export type Bookmark = {
 	urlNormalized: string;
 	title: string;
 	/**
-	 * Absolute favicon URL from the m15 metadata fill; null when it never ran
+	 * Absolute favicon URL from the m17 metadata fill; null when it never ran
 	 * or the page declared no icon (the UI falls back to a hostname-derived
 	 * favicon service).
 	 */

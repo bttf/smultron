@@ -1,4 +1,4 @@
-// Web-add metadata fill (m15, SPEC §5) — the page title and favicon that a
+// Web-add metadata fill (m17, SPEC §5) — the page title and favicon that a
 // manually added bookmark can't know at insert time.
 //
 // A Chrome capture arrives with the tab's real title; a URL typed into the Add

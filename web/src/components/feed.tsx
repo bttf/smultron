@@ -24,7 +24,7 @@ type ApiBookmark = {
 	url: string;
 	urlNormalized: string;
 	title: string;
-	// m15: the page's own favicon, filled in from Firecrawl after a web add.
+	// m17: the page's own favicon, filled in from Firecrawl after a web add.
 	// Optional (and nullable) — rows saved before m17, or pages that declare
 	// no icon, fall back to the hostname-derived favicon service.
 	faviconUrl?: string | null;
@@ -160,7 +160,7 @@ export function Feed() {
 	const [composerOpen, setComposerOpen] = useState(false);
 	const [urlDraft, setUrlDraft] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
-	// m15: the add request waits on the Firecrawl title/favicon fill, so it can
+	// m17: the add request waits on the Firecrawl title/favicon fill, so it can
 	// take a few seconds — the composer stays open and says what it's doing
 	// instead of appearing to have swallowed the URL.
 	const [adding, setAdding] = useState(false);
@@ -730,7 +730,7 @@ export function Feed() {
 									adding && "text-muted-foreground",
 								)}
 							/>
-							{/* m15: saved, now waiting on the page's title + favicon. */}
+							{/* m17: saved, now waiting on the page's title + favicon. */}
 							{adding ? (
 								<span className="shrink-0 font-mono text-[11px] text-muted-foreground">
 									fetching page details…
@@ -963,7 +963,7 @@ function hostOf(url: string): string | null {
 }
 
 /**
- * The row's icon: the favicon the page itself declared (m15, stored on the
+ * The row's icon: the favicon the page itself declared (m17, stored on the
  * bookmark) when we have one, otherwise Google's hostname-derived service —
  * which is also the fallback when the stored URL fails to load (gone, blocked
  * as mixed content, no longer served). Both failing renders nothing.

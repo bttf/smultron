@@ -46,7 +46,7 @@ export type ScrapedArticle = {
 	sourceUrl: string | null;
 };
 
-/** Page title + favicon for a bookmark's metadata fill (m15, SPEC §5). */
+/** Page title + favicon for a bookmark's metadata fill (m17, SPEC §5). */
 export type PageMetadata = {
 	/** `<title>`/og title as Firecrawl saw it; null when the page had none. */
 	title: string | null;
