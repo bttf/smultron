@@ -94,19 +94,32 @@ export function Feed() {
 	const [composerOpen, setComposerOpen] = useState(false);
 	const [urlDraft, setUrlDraft] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
-	// m18 (SPEC §9): the add returns immediately, before the §5 metadata fill
-	// has run, so a NEWLY created row shows its title/favicon as a shimmer.
-	// This is the snapshot of the row as POST returned it — the state clears
-	// when a later response differs from it (the fill landed), at
-	// ENRICH_DEADLINE_MS, or when the user edits the row's title/note.
+	// m18 (SPEC §9): an add renders before the §5 metadata fill has run, so a
+	// NEWLY added row shows its title/favicon as a shimmer. This snapshot
+	// starts from the optimistic temp row at submit and is re-snapshotted from
+	// the POST's row at reconcile — the state clears when a later response
+	// differs from it (the fill landed), at ENRICH_DEADLINE_MS, when the user
+	// edits the row's title/note, or when the POST reports a duplicate.
 	const [enriching, setEnriching] = useState<EnrichSnapshot | null>(null);
 	const enrichingId = enriching?.id ?? null;
 	// Row to flash after an add (new or resurfaced duplicate)…
 	const [flashId, setFlashId] = useState<number | null>(null);
 	// …and, for a NEWLY created bookmark only, the row whose expanded panel
-	// should focus its add-tag input (mock: `focusLater(tagRef)`).
+	// should focus its add-tag input (mock: `focusLater(tagRef)`). Set at
+	// reconcile (never to a temp id): the panel needs the real row.
 	const [justAddedId, setJustAddedId] = useState<number | null>(null);
-	const submittingRef = useRef(false);
+	// m18 optimistic add (SPEC §9): rows rendered the moment Enter is pressed,
+	// before the POST is in flight. A row carries a negative temp id until the
+	// POST reconciles it to the server's row; it leaves the overlay when a
+	// page-1 response carries its id (release effect below), on entering the
+	// archived view, or on rollback after a failed POST.
+	const [added, setAdded] = useState<ApiBookmark[]>([]);
+	const tempIdRef = useRef(-1);
+	// In-flight adds by temp id — a patch against a temp row awaits the real id.
+	const pendingAddsRef = useRef(new Map<number, Promise<number | null>>());
+	// Set when submitAdd itself changes the SWR key (archived → live): the
+	// key-change reset must not clear the overlay row it was just handed.
+	const keepAddedRef = useRef(false);
 	const searchInputRef = useRef<HTMLInputElement>(null);
 	const logRef = useRef<HTMLDivElement>(null);
 	const sentinelRef = useRef<HTMLDivElement>(null);
@@ -193,6 +206,13 @@ export function Feed() {
 		setRemoved(new Set());
 		setPinnedExtra([]);
 		setUnpinned(new Set());
+		if (keepAddedRef.current) {
+			// This key change is submitAdd's own archived→live switch — the
+			// optimistic row belongs to the view we're entering.
+			keepAddedRef.current = false;
+		} else {
+			setAdded([]);
+		}
 	}
 
 	// Only sync `cursor` from the polled page 1 while no deeper page has been
@@ -255,15 +275,54 @@ export function Feed() {
 			});
 	}, [data, morePages, overrides, removed]);
 
+	// Release optimistic adds the server has confirmed into page 1 — same
+	// contract as the shelf overlays above: once the polled page carries the
+	// row, the overlay copy must go, or a later key change could resurrect a
+	// stale version at the top of an unrelated view.
+	useEffect(() => {
+		const base = data?.bookmarks;
+		if (!base) {
+			return;
+		}
+		const ids = new Set(base.map((b) => b.id));
+		setAdded((prev) =>
+			prev.some((a) => ids.has(a.id))
+				? prev.filter((a) => !ids.has(a.id))
+				: prev,
+		);
+	}, [data]);
+
+	// What the log actually renders: optimistic adds above the polled page.
+	// An overlay row takes `overrides` patches like any other row and respects
+	// `removed` (archiving a just-added row). The dataIds filter closes the
+	// paint-before-effect gap of the release above; the id filter on `items`
+	// covers the resurfaced-duplicate window, where the row's old copy may
+	// still sit mid-list in stale data while the overlay shows it on top.
+	const rows = useMemo(() => {
+		if (added.length === 0) {
+			return items;
+		}
+		const dataIds = new Set((data?.bookmarks ?? []).map((b) => b.id));
+		const overlay = added
+			.filter((a) => !dataIds.has(a.id) && !removed.has(a.id))
+			.map((a) => {
+				const patch = overrides.get(a.id);
+				return patch ? { ...a, ...patch } : a;
+			});
+		const overlayIds = new Set(overlay.map((a) => a.id));
+		return [...overlay, ...items.filter((b) => !overlayIds.has(b.id))];
+	}, [added, data, items, overrides, removed]);
+
 	// m18 clear #1 (SPEC §9): the fill has landed once ANY of the three
 	// snapshotted fields differs on the row we now hold — whether it arrived on
 	// a poll or in a PATCH response (`overrides`). A tag edit alone leaves all
-	// three equal, so it can't end the shimmer early.
+	// three equal, so it can't end the shimmer early. Scans `rows` (not
+	// `items`) so an overlay row is compared against what's actually rendered.
 	useEffect(() => {
 		if (!enriching) {
 			return;
 		}
-		const row = items.find((b) => b.id === enriching.id);
+		const row = rows.find((b) => b.id === enriching.id);
 		if (!row) {
 			return;
 		}
@@ -274,7 +333,7 @@ export function Feed() {
 		) {
 			setEnriching(null);
 		}
-	}, [items, enriching]);
+	}, [rows, enriching]);
 
 	// m18 clear #2: the deadline. Re-armed per enriching row; cleared on unmount
 	// and whenever the state clears some other way.
@@ -376,6 +435,18 @@ export function Feed() {
 			pinned?: boolean;
 		},
 	) {
+		// A patch against a still-optimistic row (negative temp id) waits for
+		// its POST to deliver the real id — by then every id-keyed state has
+		// been swapped, so the rest proceeds against the real row. A null
+		// resolution means the add failed and was rolled back.
+		if (id < 0) {
+			const pending = pendingAddsRef.current.get(id);
+			const realId = pending ? await pending : null;
+			if (realId === null) {
+				throw new Error("save failed");
+			}
+			return patchRow(realId, patch);
+		}
 		const res = await fetch(`/api/bookmarks/${id}`, {
 			method: "PATCH",
 			headers: { "content-type": "application/json" },
@@ -501,9 +572,24 @@ export function Feed() {
 		setComposerOpen(false);
 	}
 
-	async function submitAdd() {
+	// The POST behind an optimistic add failed: pull the temp row back out and
+	// reopen the composer so the URL isn't lost and retry is one Enter away.
+	// (The draft only refills an EMPTY composer — if the user is already
+	// typing another URL there, their draft wins over the failed one.)
+	function rollbackAdd(tempId: number, draft: string, message: string) {
+		// (No expanded/justAdded cleanup: neither ever targets a temp id —
+		// expansion and tag focus only happen at reconcile, with the real id.)
+		setAdded((prev) => prev.filter((a) => a.id !== tempId));
+		setFlashId((prev) => (prev === tempId ? null : prev));
+		setEnriching((prev) => (prev?.id === tempId ? null : prev));
+		setComposerOpen(true);
+		setUrlDraft((prev) => (prev.trim() === "" ? draft : prev));
+		setAddError(message);
+	}
+
+	function submitAdd() {
 		let raw = urlDraft.trim();
-		if (!raw || submittingRef.current) {
+		if (!raw) {
 			return;
 		}
 		// Mock behavior: scheme-less input gets https:// prepended, then must
@@ -522,56 +608,131 @@ export function Feed() {
 			return;
 		}
 
-		// Ref-only guard (no pending UI): m18's add returns in one round trip,
-		// but Enter and the Save button can still both fire inside it.
-		submittingRef.current = true;
-		try {
-			const res = await fetch("/api/bookmarks", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ url: raw }),
-			});
-			if (!res.ok) {
-				setAddError(`save failed (${res.status})`);
-				return;
-			}
-			const { bookmark, created } = (await res.json()) as {
-				bookmark: Pick<ApiBookmark, "id" | "title" | "faviconUrl" | "note">;
-				created: boolean;
-			};
-
-			// Mock semantics: close the composer, land in the live view (search
-			// and tag filters are kept), flash the row and open its panel. The
-			// revalidated page puts the row on top (its updated_at is now).
-			closeComposer();
-			setArchived(false);
-			setExpanded(bookmark.id);
-			setJustAddedId(created ? bookmark.id : null);
-			// m18 (SPEC §9): only a fresh insert is waiting on a fill — a
-			// resurfaced duplicate already carries whatever metadata it has.
-			setEnriching(
-				created
-					? {
-							id: bookmark.id,
-							title: bookmark.title,
-							faviconUrl: bookmark.faviconUrl ?? null,
-							note: bookmark.note ?? null,
-						}
-					: null,
-			);
-			setFlashId(bookmark.id);
-			setTimeout(
-				() => setFlashId((prev) => (prev === bookmark.id ? null : prev)),
-				2000,
-			);
-			// If we were in the archived view, the key change refetches anyway
-			// and this bound mutate hits the old key — a harmless extra fetch.
-			mutate();
-		} catch {
-			setAddError("save failed");
-		} finally {
-			submittingRef.current = false;
+		// m18 optimistic add (SPEC §9): the row renders NOW — a temp row with a
+		// negative id, the same hostname title the server autofills (§5), and
+		// the enriching shimmer already on, at the top of the live view (search
+		// and tag filters are kept), flashed. Nothing the user sees waits on
+		// the network. Expansion + tag-input focus wait for the reconcile
+		// below: the panel's editors and article section need a PATCHable id,
+		// and a duplicate's real tags/note must be showing before the user can
+		// edit them (a tag save computed against the temp row's empty arrays
+		// would clobber the existing ones).
+		const tempId = tempIdRef.current--;
+		const nowIso = new Date().toISOString();
+		const tempRow: ApiBookmark = {
+			id: tempId,
+			url: raw,
+			urlNormalized: raw,
+			title: parsedUrl.hostname.replace(/^www\./, ""),
+			faviconUrl: null,
+			tags: [],
+			note: null,
+			createdAt: nowIso,
+			updatedAt: nowIso,
+			archivedAt: null,
+			pinnedAt: null,
+			highlights: [],
+		};
+		closeComposer();
+		if (archived) {
+			// Leaving the archived view changes the SWR key — keep the overlay
+			// row through that reset.
+			keepAddedRef.current = true;
 		}
+		setArchived(false);
+		setAdded((prev) => [tempRow, ...prev]);
+		setEnriching({
+			id: tempId,
+			title: tempRow.title,
+			faviconUrl: null,
+			note: null,
+		});
+		setFlashId(tempId);
+		setTimeout(
+			() => setFlashId((prev) => (prev === tempId ? null : prev)),
+			2000,
+		);
+
+		// The POST reconciles the temp row when it lands. Registered in
+		// pendingAddsRef so a patch fired at the temp row can await the real id.
+		const send = (async (): Promise<number | null> => {
+			try {
+				const res = await fetch("/api/bookmarks", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ url: raw }),
+				});
+				if (!res.ok) {
+					rollbackAdd(tempId, raw, `save failed (${res.status})`);
+					return null;
+				}
+				const { bookmark, created } = (await res.json()) as {
+					bookmark: Omit<ApiBookmark, "highlights">;
+					created: boolean;
+				};
+				const id = bookmark.id;
+				// A resurfaced duplicate that is PINNED lives in the shelf, not
+				// the log (m13) — drop the overlay row and let the revalidation
+				// refresh the shelf. Otherwise the server's row replaces the
+				// temp row. The `a.id !== id` filter drops a stale overlay copy
+				// of the SAME real row (re-adding a URL whose earlier reconcile
+				// hasn't been released yet) — without it the log would render
+				// two rows with one React key. (`highlights` is the one field
+				// POST doesn't return; a duplicate's highlights arrive with the
+				// revalidated page.)
+				const pinned = bookmark.pinnedAt !== null;
+				setAdded((prev) => {
+					const rest = prev.filter((a) => a.id !== id);
+					return pinned
+						? rest.filter((a) => a.id !== tempId)
+						: rest.map((a) =>
+								a.id === tempId ? { ...bookmark, highlights: [] } : a,
+							);
+				});
+				// Mock semantics (SPEC §9): the reconciled row auto-expands, and
+				// a NEWLY created bookmark focuses the panel's add-tag input
+				// (tagging is the expected next action). Deliberately not done
+				// at submit — see the comment above the temp row.
+				if (!pinned) {
+					setExpanded(id);
+				}
+				setJustAddedId(created && !pinned ? id : null);
+				setFlashId((prev) => (prev === tempId ? (pinned ? null : id) : prev));
+				setTimeout(
+					() => setFlashId((prev) => (prev === id ? null : prev)),
+					2000,
+				);
+				// m18 (SPEC §9): only a fresh insert is waiting on a fill — a
+				// resurfaced duplicate already carries whatever metadata it has,
+				// so its shimmer ends here. Re-snapshot from the server's row
+				// (identical to the temp row today, but the snapshot must match
+				// what the row now shows).
+				setEnriching((prev) =>
+					prev?.id !== tempId
+						? prev
+						: created
+							? {
+									id,
+									title: bookmark.title,
+									faviconUrl: bookmark.faviconUrl ?? null,
+									note: bookmark.note ?? null,
+								}
+							: null,
+				);
+				// If we were in the archived view, the key change refetched
+				// anyway and this bound mutate hits the old key — harmless.
+				mutate();
+				return id;
+			} catch {
+				rollbackAdd(tempId, raw, "save failed");
+				return null;
+			}
+		})();
+		// Entries are kept for the session (never deleted): a patch can race in
+		// AFTER the promise settles but BEFORE the id-swap render commits, and
+		// it must still resolve the real id instead of concluding the add died.
+		// A handful of settled promises per session is free.
+		pendingAddsRef.current.set(tempId, send);
 	}
 
 	const facets = data?.facets ?? [];
@@ -722,8 +883,9 @@ export function Feed() {
 								spellCheck={false}
 								className="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-[5px] font-mono text-[12.5px] outline-none focus:border-[var(--log-accent)]"
 							/>
-							{/* m18: no pending state — the add is one fast round trip and
-							    the composer closes on success. Errors keep it open. */}
+							{/* m18: no pending state — submit closes the composer and
+							    renders the row optimistically; a failed POST reopens it
+							    with the draft. Invalid input keeps it open. */}
 							{addError ? (
 								<span className="shrink-0 font-mono text-[11px] text-destructive">
 									{addError}
@@ -767,7 +929,7 @@ export function Feed() {
 						<p className="px-4 py-6 font-mono text-xs text-muted-foreground">
 							Loading…
 						</p>
-					) : items.length === 0 ? (
+					) : rows.length === 0 ? (
 						<EmptyState
 							archived={archived}
 							noQuery={noQuery}
@@ -779,7 +941,7 @@ export function Feed() {
 						<div
 							className={cn("transition-opacity", isLoading && "opacity-60")}
 						>
-							{items.map((b) => (
+							{rows.map((b) => (
 								<LogRow
 									key={b.id}
 									bookmark={b}
@@ -791,6 +953,13 @@ export function Feed() {
 									activeTags={activeTags}
 									tagSuggestions={tagSuggestions}
 									onToggleExpand={() => {
+										// A still-optimistic row (temp id) can't
+										// open: the panel's editors and article
+										// section need a real, PATCHable id. The
+										// reconcile expands it moments later.
+										if (b.id < 0) {
+											return;
+										}
 										// A manual toggle ends the just-added
 										// affordance — re-expanding later must
 										// not steal focus into the tag input.
