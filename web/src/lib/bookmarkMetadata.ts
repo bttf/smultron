@@ -18,9 +18,10 @@
 //      placeholder (or an empty title) is title-eligible, and only a NULL note
 //      is seeded; both guards are re-checked IN the UPDATE, so an edit made
 //      while the fetch was in flight wins.
-//   3. It NEVER rejects. It runs both inside a request the user is waiting on
-//      and fire-and-forget in `after()`, where a rejection would be swallowed.
-//      A failed fetch simply leaves the bookmark with its hostname title.
+//   3. It NEVER rejects. Since m18 it runs only fire-and-forget in `after()`
+//      (SPEC §5 — nothing waits on the fill), where a rejection would be
+//      swallowed. A failed fetch simply leaves the bookmark with its hostname
+//      title, which the UI treats exactly like a slow one.
 //
 // The fetcher is injected (same pattern as `runArticleJob`) so the semantics
 // tests run offline against PGlite with no Firecrawl account in sight.
@@ -42,42 +43,6 @@ const MAX_TITLE_CHARS = 500;
 
 /** The note's own ceiling, matching what the PATCH routes accept (SPEC §8). */
 const MAX_NOTE_CHARS = 10_000;
-
-/**
- * How long POST /api/bookmarks holds the add request open waiting for the
- * fill (SPEC §5). Long enough that the common case — the composer closing
- * onto a row with its real title — is what the user sees; short enough that a
- * slow page doesn't turn a save into a stare. Past it the response ships the
- * un-filled row and the fill finishes in `after()`, landing on the next SWR
- * poll (~10s).
- */
-export const METADATA_WAIT_MS = 12_000;
-
-/**
- * Resolves with `promise`'s value, or `undefined` once `ms` have passed —
- * whichever comes first. The promise itself keeps running; the caller hands
- * it to `after()` so its write still happens.
- */
-export function settleWithin<T>(
-	promise: Promise<T>,
-	ms: number,
-): Promise<T | undefined> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(() => resolve(undefined), ms);
-		promise.then(
-			(value) => {
-				clearTimeout(timer);
-				resolve(value);
-			},
-			() => {
-				// enrichBookmarkMetadata never rejects; belt-and-braces so a
-				// future caller can't hang the request on a rejection.
-				clearTimeout(timer);
-				resolve(undefined);
-			},
-		);
-	});
-}
 
 /**
  * Whether the row still wants anything Firecrawl could tell us. False for a

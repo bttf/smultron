@@ -20,7 +20,7 @@ import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
-import { enrichBookmarkMetadata, settleWithin } from "./bookmarkMetadata";
+import { enrichBookmarkMetadata } from "./bookmarkMetadata";
 import { addBookmark } from "./bookmarks";
 import type { PageMetadata } from "./firecrawl";
 import { PipelineError } from "./pipelineError";
@@ -401,32 +401,5 @@ describe("enrichBookmarkMetadata", () => {
 			bookmarkId: again.id,
 		});
 		expect(filled?.title).toBe("The Real Page Title");
-	});
-});
-
-describe("settleWithin", () => {
-	it("returns the value when the promise wins", async () => {
-		expect(await settleWithin(Promise.resolve("done"), 1000)).toBe("done");
-	});
-
-	it("returns undefined once the deadline passes (the promise keeps running)", async () => {
-		let finished = false;
-		const slow = new Promise<string>((resolve) => {
-			setTimeout(() => {
-				finished = true;
-				resolve("late");
-			}, 50);
-		});
-
-		expect(await settleWithin(slow, 5)).toBeUndefined();
-		expect(finished).toBe(false);
-		// The caller hands `slow` to after(); it still completes.
-		expect(await slow).toBe("late");
-		expect(finished).toBe(true);
-	});
-
-	it("returns undefined rather than rejecting when the promise rejects", async () => {
-		const rejected = Promise.reject(new Error("boom"));
-		expect(await settleWithin(rejected, 1000)).toBeUndefined();
 	});
 });
