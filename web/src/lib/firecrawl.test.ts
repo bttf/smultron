@@ -1,114 +1,195 @@
-// The HTML-parsing half of the m17 metadata fetch (SPEC §5). Firecrawl's
-// metadata carries the title but not the favicon, so `scrapePageMetadata`
-// asks for rawHtml and reads the icon link out of the markup — these are the
-// pure functions that do it. The network half is exercised through the
-// injected fetcher in bookmarkMetadata.test.ts.
-import { describe, expect, it } from "vitest";
-import {
-	faviconHrefFromHtml,
-	resolveFaviconUrl,
-	titleFromHtml,
-} from "./firecrawl";
+// The m17 metadata fetch (SPEC §5). `scrapePageMetadata` asks Firecrawl for
+// the `summary` format and reads title/favicon straight off the response's
+// `metadata` object — Firecrawl parses the page and resolves the icon href for
+// us, so there is no HTML parsing left on our side. What IS still ours is what
+// we're willing to store: these tests pin the response-shape handling and the
+// favicon-URL validation, with `fetch` stubbed (same pattern as tts.test.ts).
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { scrapePageMetadata } from "./firecrawl";
+import { PipelineError } from "./pipelineError";
 
-describe("titleFromHtml", () => {
-	it("reads the <title>, collapsing whitespace and decoding entities", () => {
-		expect(
-			titleFromHtml(
-				"<html><head><title>\n  Tom &amp; Jerry &#8212;\n  the &quot;good&quot; one\n</title></head>",
-			),
-		).toBe('Tom & Jerry — the "good" one');
-	});
+const originalEnv = { ...process.env };
 
-	it("handles attributes on the tag and is case-insensitive", () => {
-		expect(titleFromHtml('<TITLE data-x="1">Hello</TITLE>')).toBe("Hello");
-	});
-
-	it("returns null with no title, or an empty one", () => {
-		expect(titleFromHtml("<html><head></head></html>")).toBeNull();
-		expect(titleFromHtml("<title>   </title>")).toBeNull();
-	});
+beforeEach(() => {
+	process.env.FIRECRAWL_API_KEY = "test-key";
 });
 
-describe("faviconHrefFromHtml", () => {
-	it("prefers rel=icon over apple-touch-icon regardless of document order", () => {
-		const html = `
-			<link rel="apple-touch-icon" href="/touch.png">
-			<link rel="icon" type="image/png" href="/favicon-32.png">
-		`;
-		expect(faviconHrefFromHtml(html)).toBe("/favicon-32.png");
-	});
-
-	it("matches the legacy `shortcut icon` rel", () => {
-		expect(
-			faviconHrefFromHtml(`<link rel="shortcut icon" href="/fav.ico">`),
-		).toBe("/fav.ico");
-	});
-
-	it("falls back to apple-touch-icon when that is all there is", () => {
-		expect(
-			faviconHrefFromHtml(`<link rel="apple-touch-icon" href="/touch.png">`),
-		).toBe("/touch.png");
-	});
-
-	it("takes the first declaration within a tier", () => {
-		const html = `
-			<link rel="icon" href="/first.ico">
-			<link rel="icon" sizes="32x32" href="/second.png">
-		`;
-		expect(faviconHrefFromHtml(html)).toBe("/first.ico");
-	});
-
-	it("reads single-quoted and unquoted attributes", () => {
-		expect(faviconHrefFromHtml("<link rel='icon' href='/a.ico'>")).toBe(
-			"/a.ico",
-		);
-		expect(faviconHrefFromHtml("<link rel=icon href=/b.ico>")).toBe("/b.ico");
-	});
-
-	it("ignores unrelated links, and links with no href", () => {
-		const html = `
-			<link rel="stylesheet" href="/site.css">
-			<link rel="canonical" href="https://example.com/post">
-			<link rel="icon">
-		`;
-		expect(faviconHrefFromHtml(html)).toBeNull();
-	});
-
-	it("returns null rather than guessing /favicon.ico", () => {
-		// A stored URL that 404s is worse than none: the UI's hostname fallback
-		// always renders something.
-		expect(faviconHrefFromHtml("<html><head></head></html>")).toBeNull();
-	});
+afterEach(() => {
+	vi.unstubAllGlobals();
+	process.env = { ...originalEnv };
 });
 
-describe("resolveFaviconUrl", () => {
-	it("resolves root-relative, path-relative and protocol-relative hrefs", () => {
-		const base = "https://example.com/blog/post";
-		expect(resolveFaviconUrl("/favicon.ico", base)).toBe(
-			"https://example.com/favicon.ico",
+type ScrapeData = {
+	summary?: unknown;
+	metadata?: unknown;
+};
+
+/** Bodies of every scrape request made, in call order. */
+const requests: Array<Record<string, unknown>> = [];
+
+/** Stubs `fetch` with one `/v2/scrape` response envelope. */
+function stubScrape(data: ScrapeData | null, status = 200) {
+	requests.length = 0;
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (_url: string, init: RequestInit) => {
+			requests.push(JSON.parse(String(init.body)));
+			return new Response(JSON.stringify({ success: true, data }), {
+				status,
+				headers: { "Content-Type": "application/json" },
+			});
+		}),
+	);
+}
+
+const FULL: ScrapeData = {
+	summary: "A short digest of the page, as Firecrawl's LLM saw it.",
+	metadata: {
+		title: "The Real Page Title",
+		favicon: "https://example.com/icon.png",
+		sourceURL: "https://example.com/post",
+		statusCode: 200,
+	},
+};
+
+describe("scrapePageMetadata", () => {
+	it("asks for the summary format and returns title, favicon and summary", async () => {
+		stubScrape(FULL);
+
+		expect(await scrapePageMetadata("https://example.com/post")).toEqual({
+			title: "The Real Page Title",
+			faviconUrl: "https://example.com/icon.png",
+			summary: "A short digest of the page, as Firecrawl's LLM saw it.",
+		});
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.url).toBe("https://example.com/post");
+		// No rawHtml/markdown: the response metadata carries everything we fill.
+		expect(requests[0]?.formats).toEqual(["summary"]);
+	});
+
+	it("normalizes a multi-line title and takes the first of repeated ones", async () => {
+		stubScrape({
+			metadata: { title: "\n  Tom & Jerry —\n  the good one\n" },
+		});
+		expect((await scrapePageMetadata("https://example.com")).title).toBe(
+			"Tom & Jerry — the good one",
 		);
-		expect(resolveFaviconUrl("icon.png", base)).toBe(
-			"https://example.com/blog/icon.png",
-		);
-		expect(resolveFaviconUrl("//cdn.example.net/i.png", base)).toBe(
-			"https://cdn.example.net/i.png",
+
+		stubScrape({ metadata: { title: ["   ", "Second", "Third"] } });
+		expect((await scrapePageMetadata("https://example.com")).title).toBe(
+			"Second",
 		);
 	});
 
-	it("keeps an absolute href as-is", () => {
-		expect(
-			resolveFaviconUrl("https://cdn.example.net/i.png", "https://example.com"),
-		).toBe("https://cdn.example.net/i.png");
+	it("returns a null title when the page had none", async () => {
+		stubScrape({ metadata: { favicon: "https://example.com/i.ico" } });
+		expect((await scrapePageMetadata("https://example.com")).title).toBeNull();
+
+		stubScrape({ metadata: { title: "   " } });
+		expect((await scrapePageMetadata("https://example.com")).title).toBeNull();
 	});
 
-	it("drops null, unparseable, non-http(s) and oversized hrefs", () => {
-		const base = "https://example.com";
-		expect(resolveFaviconUrl(null, base)).toBeNull();
-		expect(resolveFaviconUrl("http://", base)).toBeNull();
-		// data: icons would inline kilobytes into every feed response.
+	it("accepts an absolute http(s) favicon as Firecrawl resolved it", async () => {
+		stubScrape({
+			metadata: { favicon: "http://cdn.example.net/deep/path/i.png?v=2" },
+		});
+		expect((await scrapePageMetadata("https://example.com")).faviconUrl).toBe(
+			"http://cdn.example.net/deep/path/i.png?v=2",
+		);
+	});
+
+	it("drops a data: favicon rather than inlining it into every feed row", async () => {
+		stubScrape({
+			metadata: { favicon: "data:image/png;base64,iVBORw0KGgo=" },
+		});
 		expect(
-			resolveFaviconUrl("data:image/png;base64,iVBORw0KGgo=", base),
+			(await scrapePageMetadata("https://example.com")).faviconUrl,
 		).toBeNull();
-		expect(resolveFaviconUrl(`/${"x".repeat(3000)}.ico`, base)).toBeNull();
+	});
+
+	it("drops a non-http(s) favicon", async () => {
+		stubScrape({ metadata: { favicon: "ftp://example.com/i.ico" } });
+		expect(
+			(await scrapePageMetadata("https://example.com")).faviconUrl,
+		).toBeNull();
+	});
+
+	it("drops an oversized favicon URL", async () => {
+		stubScrape({
+			metadata: { favicon: `https://example.com/${"x".repeat(3000)}.ico` },
+		});
+		expect(
+			(await scrapePageMetadata("https://example.com")).faviconUrl,
+		).toBeNull();
+	});
+
+	it("drops an unparseable or relative favicon instead of resolving it", async () => {
+		// Firecrawl is supposed to hand back an absolute URL; if it doesn't, we
+		// have no base here — and a stored URL that 404s is worse than none.
+		stubScrape({ metadata: { favicon: "/favicon.ico" } });
+		expect(
+			(await scrapePageMetadata("https://example.com")).faviconUrl,
+		).toBeNull();
+
+		stubScrape({ metadata: { favicon: "http://" } });
+		expect(
+			(await scrapePageMetadata("https://example.com")).faviconUrl,
+		).toBeNull();
+	});
+
+	it("never guesses /favicon.ico when the page declared none", async () => {
+		stubScrape({ metadata: { title: "No icon here" } });
+		expect(
+			(await scrapePageMetadata("https://example.com")).faviconUrl,
+		).toBeNull();
+	});
+
+	it("returns a null summary when it is absent or blank", async () => {
+		stubScrape({ metadata: { title: "T" } });
+		expect(
+			(await scrapePageMetadata("https://example.com")).summary,
+		).toBeNull();
+
+		stubScrape({ summary: "  \n  ", metadata: { title: "T" } });
+		expect(
+			(await scrapePageMetadata("https://example.com")).summary,
+		).toBeNull();
+	});
+
+	it("trims the summary but keeps its own line breaks", async () => {
+		stubScrape({ summary: "\nFirst line.\n\nSecond line.\n" });
+		expect((await scrapePageMetadata("https://example.com")).summary).toBe(
+			"First line.\n\nSecond line.",
+		);
+	});
+
+	it("survives a missing or malformed metadata object", async () => {
+		const empty = { title: null, faviconUrl: null, summary: null };
+
+		stubScrape({});
+		expect(await scrapePageMetadata("https://example.com")).toEqual(empty);
+
+		stubScrape({ metadata: null });
+		expect(await scrapePageMetadata("https://example.com")).toEqual(empty);
+
+		stubScrape(null);
+		expect(await scrapePageMetadata("https://example.com")).toEqual(empty);
+	});
+
+	it("still maps Firecrawl failures onto PipelineError", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("nope", { status: 401 })),
+		);
+		await expect(scrapePageMetadata("https://example.com")).rejects.toThrow(
+			PipelineError,
+		);
+
+		// A 2xx envelope around a 404 page is a failure too.
+		stubScrape({ metadata: { statusCode: 404 } });
+		await expect(
+			scrapePageMetadata("https://example.com"),
+		).rejects.toMatchObject({ code: "page_404" });
 	});
 });

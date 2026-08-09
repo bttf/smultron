@@ -1,10 +1,11 @@
-// Web-add metadata fill (m17, SPEC §5) — the page title and favicon that a
-// manually added bookmark can't know at insert time.
+// Web-add metadata fill (m17, SPEC §5) — the page title, favicon and note
+// seed that a manually added bookmark can't know at insert time.
 //
 // A Chrome capture arrives with the tab's real title; a URL typed into the Add
 // composer (or shared from Android) arrives with nothing but the hostname. So
 // after the row lands, we ask Firecrawl what the page actually is and write
-// the title + favicon onto the bookmark.
+// the title + favicon onto the bookmark, seeding its note with the scrape's
+// summary so a web add is immediately findable by content (m10 note search).
 //
 // Three invariants this module exists to hold:
 //
@@ -12,10 +13,11 @@
 //      site-side fill, not a live capture — the same reasoning that keeps the
 //      article pipeline (SPEC §10) off that column. The bump belongs to the
 //      add itself, which already happened.
-//   2. It NEVER clobbers a title the user owns. Only a row still carrying the
-//      hostname placeholder (or an empty title) is eligible; the guard is
-//      re-checked IN the UPDATE, so an edit made while the fetch was in
-//      flight wins.
+//   2. It NEVER clobbers text the user owns — neither a title they (or Chrome)
+//      set nor a note they wrote. Only a row still carrying the hostname
+//      placeholder (or an empty title) is title-eligible, and only a NULL note
+//      is seeded; both guards are re-checked IN the UPDATE, so an edit made
+//      while the fetch was in flight wins.
 //   3. It NEVER rejects. It runs both inside a request the user is waiting on
 //      and fire-and-forget in `after()`, where a rejection would be swallowed.
 //      A failed fetch simply leaves the bookmark with its hostname title.
@@ -37,6 +39,9 @@ export type MetadataFetcher = (url: string) => Promise<PageMetadata>;
 
 /** Titles land in a feed row; anything longer than this is page junk. */
 const MAX_TITLE_CHARS = 500;
+
+/** The note's own ceiling, matching what the PATCH routes accept (SPEC §8). */
+const MAX_NOTE_CHARS = 10_000;
 
 /**
  * How long POST /api/bookmarks holds the add request open waiting for the
@@ -79,6 +84,10 @@ export function settleWithin<T>(
  * bookmark that already has a real title and a favicon — a re-add of an
  * enriched URL must not spend a scrape (or make the user wait) to learn what
  * we already know.
+ *
+ * A missing NOTE deliberately does not count (SPEC §5): note seeding is
+ * opportunistic on scrapes that happen anyway, which is what keeps a seeded
+ * note the user DELETED from reappearing when the URL is re-added.
  */
 function needsMetadata(row: BookmarkRow): {
 	title: boolean;
@@ -93,7 +102,8 @@ function needsMetadata(row: BookmarkRow): {
 }
 
 /**
- * Fills `title` and `favicon_url` on one bookmark from the page itself.
+ * Fills `title`, `favicon_url` and a seeded `note` on one bookmark from the
+ * page itself.
  *
  * Returns the row as it now stands — enriched, or unchanged when there was
  * nothing to fill, the fetch failed, or the page offered nothing. Returns null
@@ -138,21 +148,28 @@ export async function enrichBookmarkMetadata(
 		}
 
 		const title = metadata.title?.trim().slice(0, MAX_TITLE_CHARS) || null;
+		const summary = metadata.summary?.trim().slice(0, MAX_NOTE_CHARS) || null;
 		const nextTitle = wanted.title ? title : null;
 		const nextFavicon = wanted.favicon ? metadata.faviconUrl : null;
-		if (nextTitle === null && nextFavicon === null) {
+		// Seeded only into an empty note — anything already there is the user's.
+		const nextNote = row.note === null ? summary : null;
+		if (nextTitle === null && nextFavicon === null && nextNote === null) {
 			return row;
 		}
 
 		// CRITICAL: `updated_at` is absent from this SET and must stay absent
 		// (Hard rule #1). The CASE guards re-check, at write time, that nobody
-		// edited the title or resolved a favicon while the fetch was in flight.
+		// edited the title, wrote a note, or resolved a favicon while the fetch
+		// was in flight.
 		const set: Record<string, unknown> = {};
 		if (nextTitle !== null) {
 			set.title = sql`case when ${bookmarks.title} = ${row.title} then ${nextTitle} else ${bookmarks.title} end`;
 		}
 		if (nextFavicon !== null) {
 			set.faviconUrl = sql`coalesce(${bookmarks.faviconUrl}, ${nextFavicon})`;
+		}
+		if (nextNote !== null) {
+			set.note = sql`case when ${bookmarks.note} is null then ${nextNote} else ${bookmarks.note} end`;
 		}
 
 		const updated = await db

@@ -5,9 +5,11 @@
 //
 // What must hold, in order of how much a regression would cost:
 //   1. the fill NEVER bumps bookmarks.updated_at (Hard rule #1)
-//   2. it never overwrites a title the user (or Chrome) owns
+//   2. it never overwrites a title the user (or Chrome) owns, and never a note
+//      they wrote — the summary only ever seeds a NULL note
 //   3. it never throws, whatever the fetch does
-//   4. it doesn't scrape when there is nothing left to fill
+//   4. it doesn't scrape when there is nothing left to fill — and a missing
+//      note alone is never a reason to scrape (a deleted seed stays deleted)
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,7 +75,7 @@ beforeEach(async () => {
 const PAGE: PageMetadata = {
 	title: "The Real Page Title",
 	faviconUrl: "https://example.com/icon.png",
-	sourceUrl: "https://example.com/post",
+	summary: "What the page is about, in a sentence.",
 };
 
 /** A fetcher returning `metadata`, recording how often it was called. */
@@ -100,10 +102,11 @@ async function webAdd(url = "https://example.com/post") {
 }
 
 describe("enrichBookmarkMetadata", () => {
-	it("fills title + favicon on a web-added row", async () => {
+	it("fills title + favicon and seeds the note on a web-added row", async () => {
 		const bookmark = await webAdd();
 		expect(bookmark.title).toBe("example.com");
 		expect(bookmark.faviconUrl).toBeNull();
+		expect(bookmark.note).toBeNull();
 
 		const fetcher = stubFetcher();
 		const filled = await enrichBookmarkMetadata(db, fetcher.fetch, {
@@ -114,10 +117,12 @@ describe("enrichBookmarkMetadata", () => {
 		expect(fetcher.calls).toEqual(["https://example.com/post"]);
 		expect(filled?.title).toBe("The Real Page Title");
 		expect(filled?.faviconUrl).toBe("https://example.com/icon.png");
+		expect(filled?.note).toBe("What the page is about, in a sentence.");
 
 		const stored = await rawRow(bookmark.id);
 		expect(stored?.title).toBe("The Real Page Title");
 		expect(stored?.faviconUrl).toBe("https://example.com/icon.png");
+		expect(stored?.note).toBe("What the page is about, in a sentence.");
 	});
 
 	it("NEVER bumps updated_at (Hard rule #1) — or any other column", async () => {
@@ -131,6 +136,9 @@ describe("enrichBookmarkMetadata", () => {
 		});
 
 		const after = await rawRow(bookmark.id);
+		// The write definitely happened — title, favicon AND the note seed.
+		expect(after?.title).toBe("The Real Page Title");
+		expect(after?.note).toBe("What the page is about, in a sentence.");
 		expect(after?.updatedAt).toEqual(before?.updatedAt);
 		expect(after?.createdAt).toEqual(before?.createdAt);
 		expect(after?.url).toBe(before?.url);
@@ -187,10 +195,14 @@ describe("enrichBookmarkMetadata", () => {
 			bookmarkId: bookmark.id,
 		});
 
-		// Re-adding an already-filled URL must not cost a scrape (or a wait).
+		// Re-adding an already-filled URL must not cost a scrape (or a wait) —
+		// and a NULL note is not a reason to spend one, so nothing is seeded:
+		// a seeded note the user deleted must stay deleted on re-add (SPEC §5).
 		expect(fetcher.calls).toEqual([]);
 		expect(filled?.title).toBe("Already known");
 		expect(filled?.faviconUrl).toBe("https://example.com/i.ico");
+		expect(filled?.note).toBeNull();
+		expect((await rawRow(bookmark.id))?.note).toBeNull();
 	});
 
 	it("keeps the existing favicon when only the title is missing", async () => {
@@ -228,17 +240,18 @@ describe("enrichBookmarkMetadata", () => {
 		expect(stored?.title).toBe("example.com");
 	});
 
-	it("returns the row unchanged when the page offers no title or favicon", async () => {
+	it("returns the row unchanged when the page offers nothing at all", async () => {
 		const bookmark = await webAdd();
 
 		const filled = await enrichBookmarkMetadata(
 			db,
-			stubFetcher({ title: null, faviconUrl: null, sourceUrl: null }).fetch,
+			stubFetcher({ title: null, faviconUrl: null, summary: null }).fetch,
 			{ userId: USER_A, bookmarkId: bookmark.id },
 		);
 
 		expect(filled?.title).toBe("example.com");
 		expect(filled?.faviconUrl).toBeNull();
+		expect(filled?.note).toBeNull();
 	});
 
 	it("is user-scoped: another user's bookmark is neither read nor written", async () => {
@@ -285,6 +298,90 @@ describe("enrichBookmarkMetadata", () => {
 		expect(filled?.title).toBe("Renamed mid-flight");
 		// The favicon had no competing write, so it still lands.
 		expect(filled?.faviconUrl).toBe("https://example.com/icon.png");
+	});
+
+	it("never overwrites a note the user already wrote", async () => {
+		const bookmark = await webAdd();
+		await db
+			.update(bookmarks)
+			.set({ note: "My own thoughts" })
+			.where(eq(bookmarks.id, bookmark.id));
+
+		const filled = await enrichBookmarkMetadata(db, stubFetcher().fetch, {
+			userId: USER_A,
+			bookmarkId: bookmark.id,
+		});
+
+		// The scrape still happened (title + favicon were missing) and still
+		// filled those — the note is simply left alone.
+		expect(filled?.note).toBe("My own thoughts");
+		expect(filled?.title).toBe("The Real Page Title");
+		expect((await rawRow(bookmark.id))?.note).toBe("My own thoughts");
+	});
+
+	it("loses the race to a note written while the fetch was in flight", async () => {
+		const bookmark = await webAdd();
+
+		// Same shape as the title race: the write-time guard must see the note
+		// that appeared mid-flight and leave it standing.
+		const filled = await enrichBookmarkMetadata(
+			db,
+			async () => {
+				await db
+					.update(bookmarks)
+					.set({ note: "Typed while it was loading" })
+					.where(eq(bookmarks.id, bookmark.id));
+				return PAGE;
+			},
+			{ userId: USER_A, bookmarkId: bookmark.id },
+		);
+
+		expect(filled?.note).toBe("Typed while it was loading");
+		// Nothing raced the title or the favicon, so those still land.
+		expect(filled?.title).toBe("The Real Page Title");
+		expect(filled?.faviconUrl).toBe("https://example.com/icon.png");
+	});
+
+	it("seeds nothing from an empty or whitespace-only summary", async () => {
+		const bookmark = await webAdd();
+
+		const filled = await enrichBookmarkMetadata(
+			db,
+			stubFetcher({ ...PAGE, summary: "   \n  " }).fetch,
+			{ userId: USER_A, bookmarkId: bookmark.id },
+		);
+
+		expect(filled?.note).toBeNull();
+		expect(filled?.title).toBe("The Real Page Title");
+	});
+
+	it("seeds the note even when the title is the only other thing missing", async () => {
+		const bookmark = await webAdd();
+		await db
+			.update(bookmarks)
+			.set({ title: "My own words" })
+			.where(eq(bookmarks.id, bookmark.id));
+
+		const filled = await enrichBookmarkMetadata(db, stubFetcher().fetch, {
+			userId: USER_A,
+			bookmarkId: bookmark.id,
+		});
+
+		expect(filled?.title).toBe("My own words");
+		expect(filled?.note).toBe("What the page is about, in a sentence.");
+	});
+
+	it("truncates a summary past the note's 10 000-char limit", async () => {
+		const bookmark = await webAdd();
+
+		const filled = await enrichBookmarkMetadata(
+			db,
+			stubFetcher({ ...PAGE, summary: "s".repeat(10_500) }).fetch,
+			{ userId: USER_A, bookmarkId: bookmark.id },
+		);
+
+		expect(filled?.note).toBe("s".repeat(10_000));
+		expect((await rawRow(bookmark.id))?.note).toHaveLength(10_000);
 	});
 
 	it("fills a re-added bookmark that predates the metadata fill", async () => {
