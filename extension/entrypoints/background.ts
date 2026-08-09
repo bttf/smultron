@@ -135,125 +135,98 @@ const trackedCache = createTrackedCache({
 	now: Date.now,
 });
 
-/** Sizes Chrome asks for on the toolbar; 48 only exists on the default path. */
-const GLOW_SIZES = [16, 32] as const;
+/** Sizes Chrome asks for on the toolbar; 48 only exists on the color path. */
+const GREY_SIZES = [16, 32] as const;
 
-/** Default (no-glow) icon — also the fallback for every failure path. */
-const DEFAULT_ICON_PATH = {
+/**
+ * The packaged full-color icon — the TRACKED state, and the fallback for
+ * every failure path (rare, and equivalent to the pre-m15 toolbar).
+ */
+const COLOR_ICON_PATH = {
 	16: "icon/16.png",
 	32: "icon/32.png",
 	48: "icon/48.png",
 };
 
 /**
- * Rendered icons for BOTH states, cached for the worker's life (re-derived
- * lazily after worker death). `null` = rendering failed in this worker;
- * don't retry it on every tab switch, just use the packaged default icon.
+ * Grey (untracked) icons, cached for the worker's life (re-derived lazily
+ * after worker death). `null` = rendering failed in this worker; don't retry
+ * it on every tab switch, just use the packaged color icon.
  */
-let stateIcons:
-	| {
-			base: Record<number, ImageData>;
-			glow: Record<number, ImageData>;
-	  }
-	| null
-	| undefined;
+let greyIcons: Record<number, ImageData> | null | undefined;
 
 /**
- * Render both icon states from the base PNGs. The artwork is drawn inset by
- * exactly the outline thickness in BOTH states — the strawberry is the same
- * size tracked or not, and the tracked state's thick gold outline is purely
- * additive (a hard silhouette dilation, not a blur: a ring of gold stamps
- * under the artwork, so there is no washed-out halo and no edge clipping).
- * No glow asset files (SPEC §6).
+ * Render the grey state from the base PNGs at FULL size — the strawberry is
+ * always full size; tracked-ness only changes color. Per-pixel luma
+ * desaturation (alpha untouched), no filter API dependency, no separate
+ * icon-state asset files (SPEC §6).
  */
-async function renderStateIcons(): Promise<typeof stateIcons> {
-	if (stateIcons !== undefined) return stateIcons;
+async function renderGreyIcons(): Promise<Record<number, ImageData> | null> {
+	if (greyIcons !== undefined) return greyIcons;
 	try {
-		const base: Record<number, ImageData> = {};
-		const glow: Record<number, ImageData> = {};
-		for (const size of GLOW_SIZES) {
+		const rendered: Record<number, ImageData> = {};
+		for (const size of GREY_SIZES) {
 			const response = await fetch(browser.runtime.getURL(`/icon/${size}.png`));
 			if (!response.ok)
 				throw new Error(`icon ${size} fetch ${response.status}`);
 			const bitmap = await createImageBitmap(await response.blob());
 			try {
-				const outline = Math.max(2, Math.round(size * 0.11));
-				const drawn = size - outline * 2;
-				const context = (): OffscreenCanvasRenderingContext2D => {
-					const ctx = new OffscreenCanvas(size, size).getContext("2d");
-					if (ctx === null) throw new Error("no 2d context");
-					return ctx;
-				};
-				const drawArt = (ctx: OffscreenCanvasRenderingContext2D): void => {
-					ctx.drawImage(bitmap, outline, outline, drawn, drawn);
-				};
-
-				const baseCtx = context();
-				drawArt(baseCtx);
-				base[size] = baseCtx.getImageData(0, 0, size, size);
-
-				// Gold silhouette of the inset artwork: art shape, gold fill.
-				const silhouetteCtx = context();
-				drawArt(silhouetteCtx);
-				silhouetteCtx.globalCompositeOperation = "source-in";
-				silhouetteCtx.fillStyle = "#f5b301";
-				silhouetteCtx.fillRect(0, 0, size, size);
-
-				const glowCtx = context();
-				const STAMPS = 16;
-				for (let i = 0; i < STAMPS; i += 1) {
-					const angle = (2 * Math.PI * i) / STAMPS;
-					glowCtx.drawImage(
-						silhouetteCtx.canvas,
-						Math.cos(angle) * outline,
-						Math.sin(angle) * outline,
-					);
+				const ctx = new OffscreenCanvas(size, size).getContext("2d");
+				if (ctx === null) throw new Error("no 2d context");
+				ctx.drawImage(bitmap, 0, 0, size, size);
+				const image = ctx.getImageData(0, 0, size, size);
+				const px = image.data;
+				for (let i = 0; i < px.length; i += 4) {
+					// Rec. 601 luma.
+					const luma = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+					px[i] = luma;
+					px[i + 1] = luma;
+					px[i + 2] = luma;
 				}
-				drawArt(glowCtx);
-				glow[size] = glowCtx.getImageData(0, 0, size, size);
+				rendered[size] = image;
 			} finally {
 				bitmap.close();
 			}
 		}
-		stateIcons = { base, glow };
+		greyIcons = rendered;
 	} catch {
 		// OffscreenCanvas unavailable, fetch failed, decode failed — the icon
-		// silently stays the packaged default for this worker's life.
-		stateIcons = null;
+		// silently stays the packaged color one for this worker's life.
+		greyIcons = null;
 	}
-	return stateIcons;
+	return greyIcons;
 }
 
 /**
  * `stillCurrent` is re-checked immediately before EACH setIcon: the first
- * glow render of a worker's life awaits fetch + decode, and without the
+ * grey render of a worker's life awaits fetch + decode, and without the
  * re-check an older refresh could out-paint a newer one that already
- * finished (e.g. glow landing on a page archived mid-render).
+ * finished (e.g. grey landing on a page bookmarked mid-render).
+ *
+ * State mapping: "glow" (definitely tracked — the pure resolver's positive
+ * verdict, src/trackedCache.ts) paints the packaged FULL-COLOR icon;
+ * everything else paints the grey render.
  */
 async function applyIcon(
 	tabId: number,
 	state: IconState,
 	stillCurrent: () => boolean,
 ): Promise<void> {
-	// BOTH states paint from the rendered set — the base state uses the same
-	// inset artwork as the glow state, so toggling tracked-ness only ever
-	// adds/removes the outline, never resizes the strawberry.
-	const icons = await renderStateIcons();
-	if (icons !== null && icons !== undefined) {
-		if (!stillCurrent()) return;
-		try {
-			await browser.action.setIcon({
-				tabId,
-				imageData: state === "glow" ? icons.glow : icons.base,
-			});
-			return;
-		} catch {
-			// Tab gone, or setIcon rejected the data — fall through.
+	if (state !== "glow") {
+		const imageData = await renderGreyIcons();
+		if (imageData !== null) {
+			if (!stillCurrent()) return;
+			try {
+				await browser.action.setIcon({ tabId, imageData });
+				return;
+			} catch {
+				// Tab gone, or setIcon rejected the data — fall through.
+			}
 		}
 	}
 	if (!stillCurrent()) return;
 	try {
-		await browser.action.setIcon({ tabId, path: DEFAULT_ICON_PATH });
+		await browser.action.setIcon({ tabId, path: COLOR_ICON_PATH });
 	} catch {
 		// The tab closed mid-update; nothing to paint and nothing to report.
 	}
