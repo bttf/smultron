@@ -611,6 +611,14 @@ function renderEditor(
 		saveButton.disabled = busy;
 		archiveButton.disabled = busy;
 		pinButton.disabled = busy;
+		// m15: tag mutations PATCH on their own coalesced channel, so they
+		// must be locked out while Save/Archive/Pin are in flight — otherwise
+		// a tag send issued mid-flight can land first and the older full
+		// PATCH overwrites it with a stale array under "Saved ✓".
+		tagInput.disabled = busy;
+		for (const remove of chips.querySelectorAll<HTMLButtonElement>("button")) {
+			remove.disabled = busy;
+		}
 	}
 
 	pinButton.addEventListener("click", () => {
@@ -628,8 +636,11 @@ function renderEditor(
 			}
 			if (archived && result.value.archivedAt === null) {
 				// Pinning unarchives (SPEC §8) — full re-render so the header
-				// status and the Restore/Archive label follow.
-				renderEditor(config, tabUrl, result.value);
+				// status and the Restore/Archive label follow. Local tags are
+				// carried into the new card: mutations save on their own
+				// channel (m15), so the local array is the freshest intent and
+				// a failed/pending tag send must survive for Save to retry.
+				renderEditor(config, tabUrl, { ...result.value, tags: [...tags] });
 				return;
 			}
 			// Repaint the toggle in place so unsaved title/tags/note edits
@@ -678,8 +689,9 @@ function renderEditor(
 				return;
 			}
 			// Re-render from the server's updated bookmark: header flips
-			// Bookmarked/Archived and the button label follows.
-			renderEditor(config, tabUrl, result.value);
+			// Bookmarked/Archived and the button label follows. Local tags are
+			// carried into the new card (m15) — see the pin-unarchive path.
+			renderEditor(config, tabUrl, { ...result.value, tags: [...tags] });
 		})();
 	});
 
