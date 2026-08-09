@@ -170,15 +170,16 @@ async function renderGlowIcons(): Promise<Record<number, ImageData> | null> {
 				const canvas = new OffscreenCanvas(size, size);
 				const ctx = canvas.getContext("2d");
 				if (ctx === null) throw new Error("no 2d context");
-				// Inset leaves room for the glow to spill without clipping.
-				const inset = Math.max(1, Math.round(size * 0.125));
-				const drawn = size - inset * 2;
+				// Purely additive: the artwork keeps its full size and the
+				// glow spills into the icon's own transparent margin (glow
+				// clipping at the canvas edge is acceptable; shrinking the
+				// strawberry is not).
 				ctx.shadowColor = "#f5b301";
 				ctx.shadowBlur = Math.max(3, Math.round(size * 0.28));
 				// Three passes: the shadow accumulates into a visible halo at
 				// 16px, where a single pass is nearly invisible.
 				for (let pass = 0; pass < 3; pass += 1) {
-					ctx.drawImage(bitmap, inset, inset, drawn, drawn);
+					ctx.drawImage(bitmap, 0, 0, size, size);
 				}
 				rendered[size] = ctx.getImageData(0, 0, size, size);
 			} finally {
