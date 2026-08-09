@@ -9,6 +9,7 @@
 import { createCoalescedSender } from "@/src/coalesce";
 import { relativeTime } from "@/src/relativeTime";
 import { filterTagSuggestions } from "@/src/tagSuggestions";
+import { trackedChangedMessage } from "@/src/trackedCache";
 import {
 	CONFIG_KEY,
 	DEFAULT_BASE_URL,
@@ -226,6 +227,18 @@ function getTags(config: PopupConfig): Promise<ApiResult<string[]>> {
 	);
 }
 
+/**
+ * m15: tell the background the page's tracked state changed, so the toolbar
+ * icon's glow is truthful ahead of the cache TTL (SPEC §6). Fire-and-forget:
+ * with no listener (worker asleep mid-teardown) sendMessage REJECTS, and the
+ * popup must neither block nor change behavior because of it.
+ */
+function pingTrackedChanged(rawUrl: string, tracked: boolean): void {
+	void browser.runtime
+		.sendMessage(trackedChangedMessage(rawUrl, tracked))
+		.catch(() => {});
+}
+
 function failureText(result: {
 	status: number | null;
 	message?: string;
@@ -342,6 +355,7 @@ function renderNotBookmarked(
 			setHeaderStatus("syncing");
 			const result = await createAndWaitForSync(config, tabUrl, tabTitle);
 			if (result.ok) {
+				pingTrackedChanged(tabUrl.href, true);
 				renderEditor(config, tabUrl, result.bookmark);
 				return;
 			}
@@ -640,6 +654,7 @@ function renderEditor(
 				// carried into the new card: mutations save on their own
 				// channel (m15), so the local array is the freshest intent and
 				// a failed/pending tag send must survive for Save to retry.
+				pingTrackedChanged(tabUrl.href, true);
 				renderEditor(config, tabUrl, { ...result.value, tags: [...tags] });
 				return;
 			}
@@ -688,6 +703,7 @@ function renderEditor(
 				);
 				return;
 			}
+			pingTrackedChanged(tabUrl.href, result.value.archivedAt === null);
 			// Re-render from the server's updated bookmark: header flips
 			// Bookmarked/Archived and the button label follows. Local tags are
 			// carried into the new card (m15) — see the pin-unarchive path.
