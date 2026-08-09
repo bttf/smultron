@@ -13,14 +13,20 @@ export default defineConfig({
 				48: "icon/48.png",
 			},
 		},
-		// activeTab (not broad "tabs"): the popup reads the active tab's
-		// url/title, which the action click grants access to.
+		// Broad "tabs" (m15): the background icon watcher reads the ACTIVE
+		// tab's URL passively — on tabs.onActivated/onUpdated and window
+		// focus changes, with no action click to lean on — so activeTab is
+		// not enough. This deliberately supersedes the earlier activeTab-only
+		// stance and accepts Chrome's "read your browsing history" install
+		// warning (SPEC §6 records the trade-off). activeTab stays for the
+		// popup's own url/title read.
 		permissions: [
 			"bookmarks",
 			"storage",
 			"alarms",
 			"contextMenus",
 			"activeTab",
+			"tabs",
 		],
 		host_permissions: [
 			"http://localhost:3000/*",

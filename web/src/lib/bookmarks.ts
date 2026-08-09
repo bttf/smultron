@@ -101,7 +101,7 @@ export type BookmarkRow = Omit<Bookmark, "highlights">;
 
 /**
  * The title a web add (SPEC §5) fills in when it has nothing better: the
- * hostname without `www.`. Also the marker the m15 metadata fill looks for —
+ * hostname without `www.`. Also the marker the m17 metadata fill looks for —
  * a row still carrying it has never had a real title, so Firecrawl's may
  * replace it (`bookmarkMetadata.ts`). Keep the two in one place so they
  * cannot drift apart.

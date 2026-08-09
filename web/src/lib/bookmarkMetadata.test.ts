@@ -1,4 +1,4 @@
-// enrichBookmarkMetadata semantics (m15, SPEC §5) against REAL Postgres:
+// enrichBookmarkMetadata semantics (m17, SPEC §5) against REAL Postgres:
 // PGlite with the production migrations from web/drizzle/ applied in journal
 // order (same harness as bookmarks.test.ts / sync.test.ts). The Firecrawl call
 // is injected, so nothing here touches the network.
@@ -93,7 +93,7 @@ async function rawRow(id: number) {
 	return rows[0];
 }
 
-/** A web-added row: hostname title, no favicon — exactly what m15 fills. */
+/** A web-added row: hostname title, no favicon — exactly what m17 fills. */
 async function webAdd(url = "https://example.com/post") {
 	const { bookmark } = await addBookmark(db, USER_A, url);
 	return bookmark;
@@ -288,7 +288,7 @@ describe("enrichBookmarkMetadata", () => {
 	});
 
 	it("fills a re-added bookmark that predates the metadata fill", async () => {
-		// A row saved before m15: hostname title, no favicon. Re-adding it (the
+		// A row saved before m17: hostname title, no favicon. Re-adding it (the
 		// §5 bump+unarchive path) gets it filled in.
 		const first = await webAdd();
 		const { bookmark: again, created } = await addBookmark(

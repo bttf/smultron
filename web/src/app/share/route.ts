@@ -1,4 +1,4 @@
-// GET /share — the manifest's Web Share Target action (m14, SPEC §8 web add).
+// GET /share — the manifest's Web Share Target action (m16, SPEC §8 web add).
 // Android hands us `?title=&text=&url=`; we pull one URL out of whatever
 // arrived (extractSharedUrl) and run the SAME `addBookmark` upsert as
 // POST /api/bookmarks. A share IS a live capture, so bumping `updated_at` on
@@ -68,7 +68,7 @@ export async function GET(request: Request) {
 	// bare 500 — this is a browser navigation, never an API call.
 	try {
 		const { bookmark, created } = await addBookmark(db, user.id, sharedUrl);
-		// m15 metadata fill (SPEC §5), same as the Add composer's — but never
+		// m17 metadata fill (SPEC §5), same as the Add composer's — but never
 		// waited on: this response is a redirect the share sheet is holding the
 		// user on. The title/favicon land on the feed's next poll.
 		after(

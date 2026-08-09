@@ -13,5 +13,5 @@ This version has breaking changes — APIs, conventions, and file structure may 
 -   `ALLOWED_EMAIL` is optional: unset/empty = gate disabled, any Google account may sign in (per-user data isolation still applies); set = only that account.
 -   DB client (`src/db/index.ts`) is a lazy `server-only` singleton; API routes that use it declare `runtime = "nodejs"`.
 -   DB-touching tests: PGlite applying the real `drizzle/` migrations in journal order with `auth.users` stubbed — copy the `src/lib/sync.test.ts` harness. Never mock SQL semantics.
--   `/api/sync`, `/api/hello` + `/api/bookmarks/by-url` are Bearer-token endpoints and are excluded from the proxy matcher — keep them out of session logic. (`POST /api/highlights` is Bearer-authed too but stays matched: it shares its path prefix with the session-authed `DELETE /api/highlights/:id`, and matched `/api/*` is never redirected.)
+-   `/api/sync`, `/api/hello`, `/api/bookmarks/by-url` + `/api/tags` are Bearer-token endpoints and are excluded from the proxy matcher — keep them out of session logic. (`POST /api/highlights` is Bearer-authed too but stays matched: it shares its path prefix with the session-authed `DELETE /api/highlights/:id`, and matched `/api/*` is never redirected.)
 <!-- END:nextjs-agent-rules -->

@@ -9,7 +9,7 @@
 // POST /api/bookmarks — SPEC §8 (m11 web add). Session-authed; body
 // `{ url }`, unknown fields rejected. Applies the §5 web-add upsert
 // (insert with hostname-autofilled title, or bump+unarchive on conflict),
-// then WAITS (bounded) on the m15 Firecrawl metadata fill so the row it
+// then WAITS (bounded) on the m17 Firecrawl metadata fill so the row it
 // returns already carries the page's real title and favicon.
 import { after } from "next/server";
 import { z } from "zod";
@@ -128,7 +128,7 @@ export async function POST(request: Request) {
 
 	const { bookmark, created } = await addBookmark(db, user.id, raw);
 
-	// m15 (SPEC §5): a typed-in URL has no title beyond its hostname and no
+	// m17 (SPEC §5): a typed-in URL has no title beyond its hostname and no
 	// favicon, so ask the page. The add itself is already committed — this only
 	// ever fills columns in, never fails the request, and never bumps
 	// `updated_at`. We wait on it (bounded) rather than firing it into the

@@ -31,7 +31,7 @@ export const bookmarks = smultron
 			urlNormalized: text("url_normalized").notNull(),
 			title: text().notNull().default(""),
 			// Absolute URL of the page's favicon, populated by the Firecrawl
-			// metadata fetch that follows a web add (m15, SPEC §5). null = never
+			// metadata fetch that follows a web add (m17, SPEC §5). null = never
 			// resolved; the UI falls back to Google's s2 service by hostname.
 			// Enrichment is NOT a live capture — writing it never bumps
 			// updated_at (Hard rule #1).

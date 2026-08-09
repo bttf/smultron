@@ -1,12 +1,15 @@
 // Browser-action popup: look up the active tab's bookmark via
 // GET /api/bookmarks/by-url, edit title/tags/note locally, save with one
-// PATCH, archive/restore. Pages that aren't bookmarked yet are bookmarked
-// AUTOMATICALLY on open (default folder — the background's onCreated
-// listener live-syncs it); a manual retry CTA only appears if that fails.
-// All popup traffic is DIRECT fetch with truthful user-visible outcomes —
-// never the outbox.
+// PATCH, archive/restore, or create the bookmark from the "Bookmark this
+// page" CTA (default folder — the background's onCreated listener live-syncs
+// it). Opening the popup mutates NOTHING — no Chrome bookmark, no DB row;
+// every write is user-initiated. All popup traffic is DIRECT fetch with
+// truthful user-visible outcomes — never the outbox.
 
+import { createCoalescedSender } from "@/src/coalesce";
 import { relativeTime } from "@/src/relativeTime";
+import { filterTagSuggestions } from "@/src/tagSuggestions";
+import { trackedChangedMessage } from "@/src/trackedCache";
 import {
 	CONFIG_KEY,
 	DEFAULT_BASE_URL,
@@ -41,6 +44,8 @@ type ApiResult<T> =
 const SYNC_POLL_INTERVAL_MS = 800;
 const SYNC_POLL_TIMEOUT_MS = 12_000;
 const SAVED_FLASH_MS = 1_600;
+/** Listbox id + option-id prefix for the m14 tag-suggestion combobox. */
+const SUGGESTIONS_ID = "tag-suggestions";
 
 // ---------------------------------------------------------------------------
 // DOM helpers — user/tab-derived strings only ever go through textContent.
@@ -51,6 +56,7 @@ function mustGet<T extends Element>(selector: string): T {
 	return found;
 }
 
+const brandEl = mustGet<HTMLButtonElement>("#brand");
 const statusEl = mustGet<HTMLSpanElement>("#status");
 const statusLabelEl = mustGet<HTMLSpanElement>("#status-label");
 const viewEl = mustGet<HTMLDivElement>("#view");
@@ -211,6 +217,28 @@ function patchBookmarkByUrl(
 	);
 }
 
+/** m14: the caller's distinct tags, ordered count desc / tag asc (SPEC §8). */
+function getTags(config: PopupConfig): Promise<ApiResult<string[]>> {
+	return apiFetch(
+		config,
+		"/api/tags",
+		{ method: "GET" },
+		(body) => (body as { tags: string[] }).tags ?? [],
+	);
+}
+
+/**
+ * m15: tell the background the page's tracked state changed, so the toolbar
+ * icon's glow is truthful ahead of the cache TTL (SPEC §6). Fire-and-forget:
+ * with no listener (worker asleep mid-teardown) sendMessage REJECTS, and the
+ * popup must neither block nor change behavior because of it.
+ */
+function pingTrackedChanged(rawUrl: string, tracked: boolean): void {
+	void browser.runtime
+		.sendMessage(trackedChangedMessage(rawUrl, tracked))
+		.catch(() => {});
+}
+
 function failureText(result: {
 	status: number | null;
 	message?: string;
@@ -266,10 +294,10 @@ async function createAndWaitForSync(
 	try {
 		// A Chrome bookmark may already exist even though the server row
 		// hasn't landed (sync lagging, or a retry after a poll timeout) —
-		// skip the create and just poll, so reopening the popup never mints
-		// duplicate Chrome rows. A URL-variant miss here is acceptable: the
-		// server dedupes by normalized URL (same rule as highlight capture,
-		// SPEC §6).
+		// skip the create and just poll, so repeat CTA clicks and popup
+		// reopens never mint duplicate Chrome rows. A URL-variant miss here
+		// is acceptable: the server dedupes by normalized URL (same rule as
+		// highlight capture, SPEC §6).
 		const existing = await browser.bookmarks.search({ url: tabUrl.href });
 		if (existing.length === 0) {
 			// Default folder (no parentId): the background onCreated listener
@@ -303,20 +331,20 @@ async function createAndWaitForSync(
 }
 
 /**
- * Fallback view when the automatic bookmark failed: page row + retry CTA
- * with the failure message visible.
+ * Not-bookmarked view: page row + the CTA that creates the bookmark. The
+ * create only ever runs on click — opening the popup mutates nothing. On
+ * failure the CTA stays put with the message so the click can be retried.
  */
 function renderNotBookmarked(
 	config: PopupConfig,
 	tabUrl: URL,
 	tabTitle: string,
-	initialError: string,
 ): void {
 	setHeaderStatus("not-bookmarked");
 	const { row } = pageRow(tabUrl, tabTitle, { editable: false });
 	const button = el("button", "btn-accent", "Bookmark this page");
 	button.type = "button";
-	const errorLine = el("div", "error-line", initialError);
+	const errorLine = el("div", "error-line hidden");
 	const actions = el("div", "footer-actions");
 	actions.append(button);
 
@@ -327,6 +355,7 @@ function renderNotBookmarked(
 			setHeaderStatus("syncing");
 			const result = await createAndWaitForSync(config, tabUrl, tabTitle);
 			if (result.ok) {
+				pingTrackedChanged(tabUrl.href, true);
 				renderEditor(config, tabUrl, result.bookmark);
 				return;
 			}
@@ -340,27 +369,6 @@ function renderNotBookmarked(
 	render(row, actions, errorLine);
 }
 
-/**
- * Auto-bookmark on open: show the page row in a syncing state, create the
- * bookmark immediately, then swap to the editor. On failure, fall back to
- * the manual CTA so the user can retry.
- */
-async function autoBookmark(
-	config: PopupConfig,
-	tabUrl: URL,
-	tabTitle: string,
-): Promise<void> {
-	setHeaderStatus("syncing");
-	const { row } = pageRow(tabUrl, tabTitle, { editable: false });
-	render(row);
-	const result = await createAndWaitForSync(config, tabUrl, tabTitle);
-	if (result.ok) {
-		renderEditor(config, tabUrl, result.bookmark);
-	} else {
-		renderNotBookmarked(config, tabUrl, tabTitle, result.message);
-	}
-}
-
 function renderEditor(
 	config: PopupConfig,
 	tabUrl: URL,
@@ -369,8 +377,41 @@ function renderEditor(
 	const archived = bookmark.archivedAt !== null;
 	setHeaderStatus(archived ? "archived" : "bookmarked");
 
-	// Edits accumulate locally; Save sends one PATCH.
+	// Title and note edits accumulate locally; Save sends one PATCH.
 	const tags = [...bookmark.tags];
+
+	// m15: tag mutations are a state toggle like pin/archive — each one PATCHes
+	// the full array immediately (PATCH by-url never bumps updated_at). Sends
+	// coalesce: ≤1 in flight, a mutation mid-flight becomes one trailing send
+	// carrying the latest array. On failure the local chips stand and Save —
+	// which still sends `tags` — is the retry path (SPEC §6).
+	let tagErrorText: string | undefined;
+	const saveTags = createCoalescedSender<string[]>(async (next) => {
+		const result = await patchBookmarkByUrl(config, {
+			url: tabUrl.href,
+			tags: next,
+		});
+		if (!result.ok) {
+			tagErrorText = `tag save failed: ${failureText(result)} — use Save to retry`;
+			showError(tagErrorText);
+			return false;
+		}
+		if (tagErrorText !== undefined) {
+			// Retract our own message only; Save/Archive/Pin own the line
+			// whenever theirs is the one on screen.
+			if (errorLine.textContent === tagErrorText) {
+				errorLine.classList.add("hidden");
+			}
+			tagErrorText = undefined;
+		}
+		return true;
+	});
+
+	/** Every tag mutation: repaint at once (the feedback), then push the state. */
+	function commitTags(): void {
+		renderChips();
+		saveTags([...tags]);
+	}
 
 	const { row, titleInput } = pageRow(tabUrl, bookmark.title, {
 		editable: true,
@@ -379,11 +420,37 @@ function renderEditor(
 	// TAGS block.
 	const tagsBlock = el("div", "block");
 	tagsBlock.append(el("div", "block-label", "TAGS"));
+	// Relative wrapper so the suggestion dropdown overlays the NOTE block
+	// instead of pushing it down.
+	const tagField = el("div", "tag-field");
 	const chips = el("div", "chips");
 	const tagInput = el("input", "tag-input");
 	tagInput.type = "text";
 	tagInput.placeholder = "add tag ⏎";
 	tagInput.spellcheck = false;
+	tagInput.setAttribute("role", "combobox");
+	tagInput.setAttribute("aria-autocomplete", "list");
+	tagInput.setAttribute("aria-expanded", "false");
+	tagInput.setAttribute("aria-controls", SUGGESTIONS_ID);
+	const suggestionList = el("div", "suggestions hidden");
+	suggestionList.id = SUGGESTIONS_ID;
+	suggestionList.setAttribute("role", "listbox");
+
+	// m14 autocomplete source: ONE direct GET /api/tags per card render,
+	// non-blocking — the card never waits on it, and on failure suggestions
+	// are silently absent (SPEC §6).
+	let availableTags: string[] = [];
+	void getTags(config).then((result) => {
+		if (!result.ok) return;
+		availableTags = result.value;
+		// The user may already be typing when the list lands — only then does
+		// a late arrival open the dropdown.
+		if (document.activeElement === tagInput) refreshSuggestions();
+	});
+
+	// Dropdown state: `suggestions` non-empty ⇔ the dropdown is open.
+	let suggestions: string[] = [];
+	let highlighted = -1;
 
 	function renderChips(): void {
 		const nodes: HTMLElement[] = tags.map((tag, index) => {
@@ -393,7 +460,7 @@ function renderEditor(
 			remove.type = "button";
 			remove.addEventListener("click", () => {
 				tags.splice(index, 1);
-				renderChips();
+				commitTags();
 			});
 			chip.append(remove);
 			return chip;
@@ -401,26 +468,115 @@ function renderEditor(
 		chips.replaceChildren(...nodes, tagInput);
 	}
 
-	tagInput.addEventListener("keydown", (event) => {
-		if (event.key === "Enter") {
-			event.preventDefault();
-			const tag = tagInput.value.trim();
-			tagInput.value = "";
-			if (tag === "" || tags.includes(tag)) return;
+	function closeSuggestions(): void {
+		suggestions = [];
+		highlighted = -1;
+		suggestionList.replaceChildren();
+		suggestionList.classList.add("hidden");
+		tagInput.setAttribute("aria-expanded", "false");
+		tagInput.removeAttribute("aria-activedescendant");
+	}
+
+	function paintHighlight(): void {
+		const options = Array.from(suggestionList.children);
+		options.forEach((option, index) => {
+			const active = index === highlighted;
+			option.classList.toggle("active", active);
+			option.setAttribute("aria-selected", active ? "true" : "false");
+		});
+		const active = highlighted === -1 ? undefined : options[highlighted];
+		if (active === undefined) tagInput.removeAttribute("aria-activedescendant");
+		else tagInput.setAttribute("aria-activedescendant", active.id);
+	}
+
+	/**
+	 * Recompute from the live draft and the local `tags` array (so a tag just
+	 * added disappears from the list); open only with ≥1 match, highlight reset.
+	 */
+	function refreshSuggestions(): void {
+		suggestions = filterTagSuggestions(availableTags, tags, tagInput.value);
+		if (suggestions.length === 0) {
+			closeSuggestions();
+			return;
+		}
+		highlighted = -1;
+		suggestionList.replaceChildren(
+			...suggestions.map((tag, index) => {
+				const option = el("div", "suggestion", tag);
+				option.id = `${SUGGESTIONS_ID}-${index}`;
+				option.setAttribute("role", "option");
+				option.setAttribute("aria-selected", "false");
+				// Commit on pointerdown/mousedown, before the input blurs;
+				// preventDefault keeps focus (and suppresses the compat
+				// mousedown for pointer-aware browsers). `addTag` is
+				// idempotent, so a duplicate compat event is harmless.
+				const commit = (event: Event): void => {
+					event.preventDefault();
+					addTag(tag);
+				};
+				option.addEventListener("pointerdown", commit);
+				option.addEventListener("mousedown", commit);
+				return option;
+			}),
+		);
+		suggestionList.classList.remove("hidden");
+		tagInput.setAttribute("aria-expanded", "true");
+		paintHighlight();
+	}
+
+	/** Single add path: draft cleared, dropdown closed, focus back in input. */
+	function addTag(raw: string): void {
+		const tag = raw.trim();
+		tagInput.value = "";
+		closeSuggestions();
+		if (tag !== "" && !tags.includes(tag)) {
 			tags.push(tag);
-			renderChips();
-			tagInput.focus();
+			commitTags();
+		}
+		tagInput.focus();
+	}
+
+	tagInput.addEventListener("input", () => {
+		refreshSuggestions();
+	});
+	tagInput.addEventListener("blur", () => {
+		closeSuggestions();
+	});
+
+	tagInput.addEventListener("keydown", (event) => {
+		const open = suggestions.length > 0;
+		if (open && event.key === "ArrowDown") {
+			// From no highlight → first; wraps.
+			event.preventDefault();
+			highlighted = (highlighted + 1) % suggestions.length;
+			paintHighlight();
+		} else if (open && event.key === "ArrowUp") {
+			// From no highlight → last; wraps.
+			event.preventDefault();
+			highlighted = highlighted <= 0 ? suggestions.length - 1 : highlighted - 1;
+			paintHighlight();
+		} else if (open && event.key === "Escape") {
+			// Closes the dropdown only, keeping the draft; with no dropdown
+			// open Escape keeps its default popup behavior.
+			event.preventDefault();
+			event.stopPropagation();
+			closeSuggestions();
+		} else if (event.key === "Enter") {
+			event.preventDefault();
+			const picked = highlighted === -1 ? undefined : suggestions[highlighted];
+			addTag(picked ?? tagInput.value);
 		} else if (event.key === "Backspace" && tagInput.value === "") {
 			if (tags.length > 0) {
 				tags.pop();
-				renderChips();
+				commitTags();
 				tagInput.focus();
 			}
 		}
 	});
 
 	renderChips();
-	tagsBlock.append(chips);
+	tagField.append(chips, suggestionList);
+	tagsBlock.append(tagField);
 
 	// NOTE block.
 	const noteBlock = el("div", "block");
@@ -469,6 +625,14 @@ function renderEditor(
 		saveButton.disabled = busy;
 		archiveButton.disabled = busy;
 		pinButton.disabled = busy;
+		// m15: tag mutations PATCH on their own coalesced channel, so they
+		// must be locked out while Save/Archive/Pin are in flight — otherwise
+		// a tag send issued mid-flight can land first and the older full
+		// PATCH overwrites it with a stale array under "Saved ✓".
+		tagInput.disabled = busy;
+		for (const remove of chips.querySelectorAll<HTMLButtonElement>("button")) {
+			remove.disabled = busy;
+		}
 	}
 
 	pinButton.addEventListener("click", () => {
@@ -486,8 +650,12 @@ function renderEditor(
 			}
 			if (archived && result.value.archivedAt === null) {
 				// Pinning unarchives (SPEC §8) — full re-render so the header
-				// status and the Restore/Archive label follow.
-				renderEditor(config, tabUrl, result.value);
+				// status and the Restore/Archive label follow. Local tags are
+				// carried into the new card: mutations save on their own
+				// channel (m15), so the local array is the freshest intent and
+				// a failed/pending tag send must survive for Save to retry.
+				pingTrackedChanged(tabUrl.href, true);
+				renderEditor(config, tabUrl, { ...result.value, tags: [...tags] });
 				return;
 			}
 			// Repaint the toggle in place so unsaved title/tags/note edits
@@ -535,9 +703,11 @@ function renderEditor(
 				);
 				return;
 			}
+			pingTrackedChanged(tabUrl.href, result.value.archivedAt === null);
 			// Re-render from the server's updated bookmark: header flips
-			// Bookmarked/Archived and the button label follows.
-			renderEditor(config, tabUrl, result.value);
+			// Bookmarked/Archived and the button label follows. Local tags are
+			// carried into the new card (m15) — see the pin-unarchive path.
+			renderEditor(config, tabUrl, { ...result.value, tags: [...tags] });
 		})();
 	});
 
@@ -546,6 +716,16 @@ function renderEditor(
 
 // ---------------------------------------------------------------------------
 // Entry.
+
+// Header brand → the site in a new tab. Wired at module scope, so it works in
+// EVERY popup state (unpaired, non-http tab, not-bookmarked, editor); the
+// target resolves per click — the configured base URL, else the default.
+brandEl.addEventListener("click", () => {
+	void (async () => {
+		const config = await loadPopupConfig();
+		await browser.tabs.create({ url: config?.baseUrl ?? DEFAULT_BASE_URL });
+	})();
+});
 
 async function init(): Promise<void> {
 	renderLoading();
@@ -578,7 +758,7 @@ async function init(): Promise<void> {
 	}
 
 	if (result.value === null) {
-		await autoBookmark(config, tabUrl, tab?.title ?? rawUrl);
+		renderNotBookmarked(config, tabUrl, tab?.title ?? rawUrl);
 	} else {
 		renderEditor(config, tabUrl, result.value);
 	}

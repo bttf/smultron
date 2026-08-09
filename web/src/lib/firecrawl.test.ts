@@ -1,4 +1,4 @@
-// The HTML-parsing half of the m15 metadata fetch (SPEC §5). Firecrawl's
+// The HTML-parsing half of the m17 metadata fetch (SPEC §5). Firecrawl's
 // metadata carries the title but not the favicon, so `scrapePageMetadata`
 // asks for rawHtml and reads the icon link out of the markup — these are the
 // pure functions that do it. The network half is exercised through the

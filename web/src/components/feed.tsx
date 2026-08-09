@@ -11,6 +11,7 @@ import { relativeTime } from "../lib/relativeTime";
 import { textFragmentUrl } from "../lib/textFragment";
 import { cn } from "../lib/utils";
 import { ArticleSection } from "./article";
+import { TagChips } from "./tag-chips";
 
 type ApiHighlight = {
 	id: number;
@@ -24,7 +25,7 @@ type ApiBookmark = {
 	urlNormalized: string;
 	title: string;
 	// m15: the page's own favicon, filled in from Firecrawl after a web add.
-	// Optional (and nullable) — rows saved before m15, or pages that declare
+	// Optional (and nullable) — rows saved before m17, or pages that declare
 	// no icon, fall back to the hostname-derived favicon service.
 	faviconUrl?: string | null;
 	tags: string[];
@@ -581,6 +582,13 @@ export function Feed() {
 	const total = data?.total ?? 0;
 	const matching = data?.matching ?? 0;
 
+	// m14 tag autocomplete source: the current response's facet tags, already
+	// ordered count desc / tag asc by the server. No extra fetch, no new SWR key.
+	const tagSuggestions = useMemo(
+		() => (data?.facets ?? []).map((f) => f.tag),
+		[data],
+	);
+
 	// Shelf = server's pinned list + rows pinned since the last revalidation
 	// (front — most recent first), minus rows unpinned/archived since. Once
 	// the revalidated page lands the overlays dedupe into no-ops.
@@ -792,6 +800,7 @@ export function Feed() {
 									flash={flashId === b.id}
 									autoFocusTags={justAddedId === b.id}
 									activeTags={activeTags}
+									tagSuggestions={tagSuggestions}
 									onToggleExpand={() => {
 										// A manual toggle ends the just-added
 										// affordance — re-expanding later must
@@ -999,6 +1008,7 @@ function LogRow({
 	flash,
 	autoFocusTags,
 	activeTags,
+	tagSuggestions,
 	onToggleExpand,
 	onToggleTag,
 	onPatch,
@@ -1012,6 +1022,8 @@ function LogRow({
 	/** Focus the expanded panel's add-tag input (newly created via the composer). */
 	autoFocusTags: boolean;
 	activeTags: string[];
+	/** m14: existing tags in usage order, fed to the panel's add-tag input. */
+	tagSuggestions: string[];
 	onToggleExpand: () => void;
 	onToggleTag: (tag: string) => void;
 	onPatch: PatchFn;
@@ -1114,6 +1126,7 @@ function LogRow({
 					bookmark={bookmark}
 					archivedView={archivedView}
 					autoFocusTags={autoFocusTags}
+					tagSuggestions={tagSuggestions}
 					onPatch={onPatch}
 					onDeleteHighlight={onDeleteHighlight}
 				/>
@@ -1126,12 +1139,14 @@ function ExpandedPanel({
 	bookmark,
 	archivedView,
 	autoFocusTags,
+	tagSuggestions,
 	onPatch,
 	onDeleteHighlight,
 }: {
 	bookmark: ApiBookmark;
 	archivedView: boolean;
 	autoFocusTags: boolean;
+	tagSuggestions: string[];
 	onPatch: PatchFn;
 	onDeleteHighlight: (bookmarkId: number, highlightId: number) => Promise<void>;
 }) {
@@ -1139,14 +1154,17 @@ function ExpandedPanel({
 		// The row above already draws the 1px rule (its border-b), so the panel
 		// only draws its own bottom rule — a border-t here would double up.
 		<div className="flex flex-col gap-2 border-b border-[var(--log-rule)] bg-[var(--log-panel)] pt-2.5 pr-4 pb-3.5 pl-11">
-			<a
-				href={bookmark.url}
-				target="_blank"
-				rel="noreferrer"
-				className="max-w-[720px] truncate font-mono text-[11.5px] text-[var(--log-accent)] hover:underline"
-			>
-				{bookmark.url}
-			</a>
+			<div className="flex max-w-[720px] items-center gap-1.5">
+				<a
+					href={bookmark.url}
+					target="_blank"
+					rel="noreferrer"
+					className="min-w-0 truncate font-mono text-[11.5px] text-[var(--log-accent)] hover:underline"
+				>
+					{bookmark.url}
+				</a>
+				<CopyUrlButton url={bookmark.url} />
+			</div>
 			<span className="font-mono text-[11px] text-muted-foreground">
 				saved {formatTimestamp(new Date(bookmark.createdAt))} ·{" "}
 				{relativeTime(new Date(bookmark.createdAt))}
@@ -1167,6 +1185,7 @@ function ExpandedPanel({
 				<TagChips
 					tags={bookmark.tags}
 					autoFocusInput={autoFocusTags}
+					suggestions={tagSuggestions}
 					onSave={(tags) => onPatch(bookmark.id, { tags })}
 				/>
 			</div>
@@ -1220,6 +1239,62 @@ function ExpandedPanel({
 				</button>
 			</div>
 		</div>
+	);
+}
+
+function CopyUrlButton({ url }: { url: string }) {
+	const [copied, setCopied] = useState(false);
+	const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const unmountedRef = useRef(false);
+
+	useEffect(() => {
+		unmountedRef.current = false;
+		return () => {
+			unmountedRef.current = true;
+			if (resetRef.current) {
+				clearTimeout(resetRef.current);
+			}
+		};
+	}, []);
+
+	async function copy() {
+		try {
+			await navigator.clipboard.writeText(url);
+		} catch {
+			// Clipboard unavailable (permissions/insecure context) — leave the
+			// button in its idle state rather than lie with a checkmark.
+			return;
+		}
+		if (unmountedRef.current) {
+			// Panel collapsed while the clipboard promise was in flight — don't
+			// schedule a reset timer nothing will clear.
+			return;
+		}
+		setCopied(true);
+		if (resetRef.current) {
+			clearTimeout(resetRef.current);
+		}
+		resetRef.current = setTimeout(() => setCopied(false), 1500);
+	}
+
+	return (
+		<button
+			type="button"
+			onClick={copy}
+			// State-dependent label: a static one would mask the visible text
+			// change in the accessible name, leaving screen readers with no
+			// success confirmation.
+			aria-label={copied ? "Copied" : "Copy URL to clipboard"}
+			title="Copy URL"
+			className={cn(
+				"shrink-0 font-mono text-[11px] leading-none",
+				copied
+					? "text-[var(--log-accent)]"
+					: "text-[var(--log-faint)] hover:text-[var(--log-accent)]",
+			)}
+		>
+			{copied ? "✓ copied" : "⧉"}
+		</button>
 	);
 }
 
@@ -1309,76 +1384,6 @@ function EditableTitle({
 		>
 			{title || "(untitled)"}
 		</button>
-	);
-}
-
-// m10 chip editor: every mutation (✕ remove, ⏎ add) is ONE PATCH of the full
-// tags array — the returned row lands in `overrides` like any other edit, so
-// there is no local tags state to drift; only the add-input draft is local.
-function TagChips({
-	tags,
-	autoFocusInput,
-	onSave,
-}: {
-	tags: string[];
-	/** m11: a bookmark just created via the composer opens ready to tag. */
-	autoFocusInput: boolean;
-	onSave: (next: string[]) => void;
-}) {
-	const [draft, setDraft] = useState("");
-
-	function addTag() {
-		const next = draft.trim();
-		if (!next) {
-			return;
-		}
-		if (tags.includes(next)) {
-			// Duplicate — nothing to add, but clear the input so the rejected
-			// text doesn't linger looking un-submitted.
-			setDraft("");
-			return;
-		}
-		onSave([...tags, next]);
-		setDraft("");
-	}
-
-	return (
-		<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-			{tags.map((tag) => (
-				<span
-					key={tag}
-					className="flex items-center gap-1 rounded bg-[var(--log-chip-bg)] px-[7px] py-[2px] font-mono text-[10.5px] text-[var(--log-chip-fg)]"
-				>
-					{tag}
-					<button
-						type="button"
-						aria-label={`Remove tag ${tag}`}
-						onClick={() => onSave(tags.filter((t) => t !== tag))}
-						className="text-[10px] text-[var(--log-faint)] hover:text-[var(--log-note-fg)]"
-					>
-						✕
-					</button>
-				</span>
-			))}
-			<input
-				// biome-ignore lint/a11y/noAutofocus: only set right after the user added a bookmark via the composer — tagging is the expected next action.
-				autoFocus={autoFocusInput}
-				value={draft}
-				onChange={(e) => setDraft(e.target.value)}
-				onKeyDown={(e) => {
-					if (e.key === "Enter") {
-						e.preventDefault();
-						addTag();
-					} else if (e.key === "Escape") {
-						e.preventDefault();
-						setDraft("");
-						e.currentTarget.blur();
-					}
-				}}
-				placeholder="add tag ⏎"
-				className="w-[84px] rounded border border-dashed border-[var(--log-dash)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-fg)] outline-none focus:border-solid focus:border-[var(--log-accent)]"
-			/>
-		</div>
 	);
 }
 

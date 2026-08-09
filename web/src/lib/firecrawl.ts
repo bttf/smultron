@@ -1,4 +1,4 @@
-// Firecrawl scrape client — SPEC §10 (article pipeline, step 1) and the m15
+// Firecrawl scrape client — SPEC §10 (article pipeline, step 1) and the m17
 // web-add metadata fetch (SPEC §5).
 //
 // One page in, readable markdown out. Deliberately a thin `fetch` wrapper
@@ -20,7 +20,7 @@ const SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
 const SCRAPE_TIMEOUT_MS = 90_000;
 
 /**
- * The metadata fetch (m15) blocks the user's add request, so it gets a much
+ * The metadata fetch (m17) blocks the user's add request, so it gets a much
  * tighter budget than the article scrape: a page that hasn't answered in this
  * long isn't worth making someone watch a spinner for. The add still succeeds
  * — the bookmark keeps its hostname title (SPEC §5).
@@ -135,7 +135,7 @@ function httpFailure(status: number, body: string): PipelineError {
  * Runs one `/v2/scrape` request and returns the parsed payload, mapping every
  * failure — transport, HTTP, malformed JSON, Firecrawl's own `success: false`,
  * and a non-2xx TARGET page — onto `PipelineError`. Shared by the article
- * scrape and the m15 metadata fetch so both report failures identically.
+ * scrape and the m17 metadata fetch so both report failures identically.
  */
 async function requestScrape(
 	body: Record<string, unknown>,
@@ -379,7 +379,7 @@ export function resolveFaviconUrl(
 }
 
 /**
- * Fetches just what a bookmark row needs after a web add (m15, SPEC §5): the
+ * Fetches just what a bookmark row needs after a web add (m17, SPEC §5): the
  * page's real title and its favicon.
  *
  * Asks for `rawHtml` rather than `markdown` — the title comes back in the
