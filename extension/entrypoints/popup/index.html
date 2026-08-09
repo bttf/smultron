@@ -51,10 +51,23 @@
         padding: 10px 14px;
         border-bottom: 1px solid var(--border-soft);
       }
+      /* Button, not a label: it opens the site. Negative margin cancels the
+         hover padding so the header keeps its original metrics. */
       .brand {
+        margin: -3px -6px;
+        padding: 3px 6px;
+        border: none;
+        border-radius: 5px;
+        background: none;
+        color: inherit;
+        font: inherit;
         font-size: 13px;
         font-weight: 600;
         letter-spacing: -0.025em;
+        cursor: pointer;
+      }
+      .brand:hover {
+        background: var(--soft);
       }
       .status {
         display: inline-flex;
@@ -373,7 +386,9 @@
   <body>
     <div class="card">
       <header class="header">
-        <span class="brand"><span aria-hidden="true">🍓</span> Smultronstället</span>
+        <button class="brand" id="brand" type="button" title="Open Smultronstället">
+          <span aria-hidden="true">🍓</span> Smultronstället
+        </button>
         <span class="status" id="status">
           <span class="dot"></span>
           <span id="status-label">…</span>
