@@ -1,4 +1,5 @@
-// Firecrawl scrape client — SPEC §10 (article pipeline, step 1).
+// Firecrawl scrape client — SPEC §10 (article pipeline, step 1) and the m17
+// web-add metadata fetch (SPEC §5).
 //
 // One page in, readable markdown out. Deliberately a thin `fetch` wrapper
 // rather than the `@mendable/firecrawl-js` SDK: we use exactly one endpoint,
@@ -6,7 +7,8 @@
 // while letting us map failures onto PipelineError precisely.
 //
 // API: POST https://api.firecrawl.dev/v2/scrape, Bearer auth. Response is
-// `{ success, data: { markdown, metadata: { title, sourceURL, statusCode } } }`.
+// `{ success, data: { markdown, summary,
+//                     metadata: { title, favicon, sourceURL, statusCode } } }`.
 import { PipelineError } from "./pipelineError";
 
 const SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
@@ -18,8 +20,16 @@ const SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
  */
 const SCRAPE_TIMEOUT_MS = 90_000;
 
+/**
+ * The metadata fetch (m17) blocks the user's add request, so it gets a much
+ * tighter budget than the article scrape: a page that hasn't answered in this
+ * long isn't worth making someone watch a spinner for. The add still succeeds
+ * — the bookmark keeps its hostname title (SPEC §5).
+ */
+const METADATA_TIMEOUT_MS = 20_000;
+
 /** Our own abort, slightly above Firecrawl's, so its error wins when it can. */
-const REQUEST_TIMEOUT_MS = SCRAPE_TIMEOUT_MS + 15_000;
+const requestTimeoutFor = (scrapeTimeoutMs: number) => scrapeTimeoutMs + 15_000;
 
 /**
  * Below this, whatever came back is a cookie wall, a JS-only shell, or a 404
@@ -37,14 +47,28 @@ export type ScrapedArticle = {
 	sourceUrl: string | null;
 };
 
+/** What a bookmark's metadata fill needs off a page (m17, SPEC §5). */
+export type PageMetadata = {
+	/** `<title>`/og title as Firecrawl parsed it; null when the page had none. */
+	title: string | null;
+	/** Absolute, storable favicon URL; null when there was none we'd accept. */
+	faviconUrl: string | null;
+	/** Firecrawl's LLM summary of the page; null when it returned none. */
+	summary: string | null;
+};
+
 /** Shape of the bits of Firecrawl's response we actually read. */
 type ScrapeResponse = {
 	success?: boolean;
 	error?: string;
 	data?: {
 		markdown?: string | null;
+		/** The `summary` format's output — a short prose digest of the page. */
+		summary?: string | null;
 		metadata?: {
 			title?: string | string[] | null;
+			/** Already resolved to an absolute URL by Firecrawl. */
+			favicon?: string | string[] | null;
 			sourceURL?: string | null;
 			statusCode?: number | null;
 			error?: string | null;
@@ -54,17 +78,23 @@ type ScrapeResponse = {
 
 /**
  * Firecrawl types several metadata fields as `string | string[]` (a page can
- * carry repeated `<meta>` tags). Take the first non-empty string.
+ * carry repeated `<meta>` tags). Take the first non-empty string, with the
+ * whitespace of a multi-line `<title>` collapsed the way a browser tab shows
+ * it — these land verbatim in a feed row.
  */
-function firstString(
-	value: string | string[] | null | undefined,
-): string | null {
-	if (Array.isArray(value)) {
-		const found = value.find((entry) => entry.trim() !== "");
-		return found?.trim() ?? null;
-	}
-	const trimmed = value?.trim();
-	return trimmed ? trimmed : null;
+function firstString(value: unknown): string | null {
+	// The JSON is runtime-unvalidated, so guard the TYPE, not just nullish —
+	// a number/object here must degrade to null, never throw (the fill's
+	// per-field independence depends on it).
+	const raw = Array.isArray(value)
+		? value.find(
+				(entry): entry is string =>
+					typeof entry === "string" && entry.trim() !== "",
+			)
+		: value;
+	if (typeof raw !== "string") return null;
+	const normalized = raw.replace(/\s+/g, " ").trim();
+	return normalized ? normalized : null;
 }
 
 /** Maps a non-2xx Firecrawl response onto a PipelineError. */
@@ -109,17 +139,15 @@ function httpFailure(status: number, body: string): PipelineError {
 }
 
 /**
- * Scrapes `url` into markdown.
- *
- * `onlyMainContent` strips nav/header/footer server-side — the LLM clean pass
- * (SPEC §10) still has plenty to do, but this removes the bulk cheaply.
- * `maxAge` lets Firecrawl serve a recent cached crawl: re-scraping the same
- * bookmark within the day shouldn't re-bill or re-fetch.
- *
- * Throws `PipelineError` on every failure path, including a page that
- * scraped "successfully" but yielded no usable text.
+ * Runs one `/v2/scrape` request and returns the parsed payload, mapping every
+ * failure — transport, HTTP, malformed JSON, Firecrawl's own `success: false`,
+ * and a non-2xx TARGET page — onto `PipelineError`. Shared by the article
+ * scrape and the m17 metadata fetch so both report failures identically.
  */
-export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
+async function requestScrape(
+	body: Record<string, unknown>,
+	scrapeTimeoutMs: number,
+): Promise<ScrapeResponse> {
 	const apiKey = process.env.FIRECRAWL_API_KEY;
 	if (!apiKey) {
 		throw new PipelineError(
@@ -138,15 +166,12 @@ export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({
-				url,
-				formats: ["markdown"],
-				onlyMainContent: true,
-				blockAds: true,
-				timeout: SCRAPE_TIMEOUT_MS,
+				...body,
+				timeout: scrapeTimeoutMs,
 				// 24h: a re-scrape the same day reuses Firecrawl's cached crawl.
 				maxAge: 86_400_000,
 			}),
-			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+			signal: AbortSignal.timeout(requestTimeoutFor(scrapeTimeoutMs)),
 		});
 	} catch (cause) {
 		const timedOut =
@@ -199,6 +224,30 @@ export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
 		);
 	}
 
+	return payload;
+}
+
+/**
+ * Scrapes `url` into markdown.
+ *
+ * `onlyMainContent` strips nav/header/footer server-side — the LLM clean pass
+ * (SPEC §10) still has plenty to do, but this removes the bulk cheaply.
+ *
+ * Throws `PipelineError` on every failure path, including a page that
+ * scraped "successfully" but yielded no usable text.
+ */
+export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
+	const payload = await requestScrape(
+		{
+			url,
+			formats: ["markdown"],
+			onlyMainContent: true,
+			blockAds: true,
+		},
+		SCRAPE_TIMEOUT_MS,
+	);
+
+	const metadata = payload.data?.metadata ?? null;
 	const markdown = payload.data?.markdown?.trim() ?? "";
 	if (markdown.length < MIN_USEFUL_MARKDOWN) {
 		throw new PipelineError(
@@ -214,5 +263,73 @@ export async function scrapeArticle(url: string): Promise<ScrapedArticle> {
 		markdown,
 		title: firstString(metadata?.title),
 		sourceUrl: firstString(metadata?.sourceURL),
+	};
+}
+
+/** Favicon URLs go in a text column and an <img src> — keep them sane. */
+const MAX_FAVICON_URL_CHARS = 2048;
+
+/**
+ * Keeps only a favicon URL that is safe to store and render: absolute http(s),
+ * within the column's sanity bound. Firecrawl resolves the page's declared
+ * icon to an absolute URL for us, but it hands back whatever the page said —
+ * a `data:` icon (kilobytes inlined into every feed response) or a
+ * `chrome-extension:`/`ftp:` href both have to be dropped here.
+ *
+ * Null in, null out, and null on anything rejected — callers must NOT fall
+ * back to guessing `/favicon.ico`: a stored URL that 404s is worse than no URL
+ * at all, since the UI's hostname-based fallback always renders something.
+ */
+function validFaviconUrl(value: string | null): string | null {
+	if (!value) {
+		return null;
+	}
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		// Relative or malformed: we have no base to resolve it against, and
+		// Firecrawl was supposed to have done that already.
+		return null;
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+		return null;
+	}
+	return parsed.href.length <= MAX_FAVICON_URL_CHARS ? parsed.href : null;
+}
+
+/**
+ * Fetches what a bookmark row wants after a web add (m17, SPEC §5): the page's
+ * real title, its favicon, and a summary to seed the note with.
+ *
+ * Asks for the `summary` format. Title and favicon ride along in every
+ * response's `metadata` — Firecrawl parses the document and resolves the icon
+ * href to an absolute URL itself, so no HTML ever reaches us. The summary
+ * costs no extra credit over a plain scrape, but it is LLM-generated, so a
+ * cache miss can take a while — hence the deadline the caller holds it to.
+ *
+ * Throws `PipelineError` like `scrapeArticle` — the caller (which is holding a
+ * user's add request open) decides that a failure just means no metadata.
+ */
+export async function scrapePageMetadata(url: string): Promise<PageMetadata> {
+	const payload = await requestScrape(
+		{
+			url,
+			formats: ["summary"],
+			blockAds: true,
+		},
+		METADATA_TIMEOUT_MS,
+	);
+
+	const metadata = payload.data?.metadata ?? null;
+	// Same type-guarded degradation as firstString, but WITHOUT the
+	// whitespace collapse — a summary is prose and keeps its newlines.
+	const rawSummary = payload.data?.summary;
+	const summary = typeof rawSummary === "string" ? rawSummary.trim() : "";
+
+	return {
+		title: firstString(metadata?.title),
+		faviconUrl: validFaviconUrl(firstString(metadata?.favicon)),
+		summary: summary ? summary : null,
 	};
 }

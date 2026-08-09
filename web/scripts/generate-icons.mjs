@@ -1,4 +1,4 @@
-// One-shot icon generator (m14, PWA). Run with `node scripts/generate-icons.mjs`
+// One-shot icon generator (m16, PWA). Run with `node scripts/generate-icons.mjs`
 // from web/. Rasterises an inline SVG strawberry into the PNG sizes the web
 // manifest and iOS home screen need. The art is drawn with SVG shapes rather
 // than the 🍓 emoji glyph: emoji fonts are not guaranteed to exist on the

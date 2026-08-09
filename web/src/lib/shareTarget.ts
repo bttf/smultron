@@ -1,4 +1,4 @@
-// Web Share Target parameter handling (m14). Android share sheets are sloppy:
+// Web Share Target parameter handling (m16). Android share sheets are sloppy:
 // some apps fill `url`, many put the link inside `text` (often wrapped in
 // prose — "Check this out https://… via X"), and a few only populate `title`.
 // This module turns whatever arrived into one http(s) URL, or null.

@@ -105,7 +105,7 @@ export const config = {
 	// (/api/sync, /api/hello, /api/bookmarks/by-url, /api/tags), which must stay
 	// out of session logic entirely.
 	//
-	// `webmanifest` is in the extension list so /manifest.webmanifest (m14) is
+	// `webmanifest` is in the extension list so /manifest.webmanifest (m16) is
 	// served as-is: browsers fetch it before/without a session and a redirect
 	// to /login would break installability. `/share` — the manifest's share
 	// target — stays matched, so an unauthenticated share still lands on

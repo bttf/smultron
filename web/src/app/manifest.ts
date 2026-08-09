@@ -1,4 +1,4 @@
-// Web app manifest (m14, PWA). Next serves this route at
+// Web app manifest (m16, PWA). Next serves this route at
 // /manifest.webmanifest (see node_modules/next/dist/docs/01-app/
 // 03-api-reference/03-file-conventions/01-metadata/manifest.md) and injects
 // the <link rel="manifest"> tag for us — the proxy matcher excludes

@@ -1,4 +1,4 @@
-// GET /share — the manifest's Web Share Target action (m14, SPEC §8 web add).
+// GET /share — the manifest's Web Share Target action (m16, SPEC §8 web add).
 // Android hands us `?title=&text=&url=`; we pull one URL out of whatever
 // arrived (extractSharedUrl) and run the SAME `addBookmark` upsert as
 // POST /api/bookmarks. A share IS a live capture, so bumping `updated_at` on
@@ -6,14 +6,20 @@
 //
 // Always answers with a 303 back to the feed carrying a `shared` status, since
 // the browser navigates the user here — never JSON.
+import { after } from "next/server";
 import { z } from "zod";
 import { db } from "../../db";
 import { getAuthedUser } from "../../lib/auth";
+import { enrichBookmarkMetadata } from "../../lib/bookmarkMetadata";
 import { addBookmark } from "../../lib/bookmarks";
+import { scrapePageMetadata } from "../../lib/firecrawl";
 import { extractSharedUrl } from "../../lib/shareTarget";
 
 // Node runtime: the postgres driver needs it.
 export const runtime = "nodejs";
+
+// The metadata fill (below) runs in `after()`, inside this invocation.
+export const maxDuration = 60;
 
 // Share sheets append junk params; we read by name and ignore the rest.
 const shareSchema = z.object({
@@ -61,7 +67,16 @@ export async function GET(request: Request) {
 	// A transient DB failure should land the user back on the feed, not on a
 	// bare 500 — this is a browser navigation, never an API call.
 	try {
-		const { created } = await addBookmark(db, user.id, sharedUrl);
+		const { bookmark, created } = await addBookmark(db, user.id, sharedUrl);
+		// m17 metadata fill (SPEC §5), same as the Add composer's — but never
+		// waited on: this response is a redirect the share sheet is holding the
+		// user on. The title/favicon land on the feed's next poll.
+		after(
+			enrichBookmarkMetadata(db, scrapePageMetadata, {
+				userId: user.id,
+				bookmarkId: bookmark.id,
+			}),
+		);
 		return seeOther(request, created ? "/?shared=added" : "/?shared=exists");
 	} catch {
 		return seeOther(request, "/?shared=error");

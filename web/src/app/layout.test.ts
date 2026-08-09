@@ -3,14 +3,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// Regression guard for the m14 favicon regression.
+// Regression guard for the m16 favicon regression.
 //
 // Next collects `app/icon.*` / `app/apple-icon.*` into `leafSegmentStaticIcons`
 // and merges them into the resolved metadata behind an `if (!resolvedMetadata
 // .icons)` check (next/dist/lib/metadata/resolve-metadata.js). So declaring an
 // `icons` field in `metadata` — even a partial one that only sets `apple` —
 // makes Next drop BOTH file-convention icons and emit no `<link rel="icon">`
-// at all. That is exactly how the favicon vanished when m14 added
+// at all. That is exactly how the favicon vanished when m16 added
 // `icons: { apple: "/apple-touch-icon.png" }`.
 //
 // layout.tsx can't be imported here (it pulls in globals.css and next/font at
