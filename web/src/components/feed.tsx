@@ -103,6 +103,21 @@ function buildUrl(
 
 const DEBOUNCE_MS = 150;
 
+// m18 enriching state (SPEC §9): the fields whose change means the §5 fill
+// landed. Compared against every later render of the row; `faviconUrl`/`note`
+// are normalized to null so an absent key can't read as a change.
+type EnrichSnapshot = {
+	id: number;
+	title: string;
+	faviconUrl: string | null;
+	note: string | null;
+};
+
+// Hard ceiling on the shimmer (SPEC §9). A fill that fails leaves the hostname
+// title forever — nothing would ever differ from the snapshot — so the
+// affordance must expire on its own, comfortably past the fill's own timeout.
+const ENRICH_DEADLINE_MS = 30_000;
+
 const MONTHS = [
 	"Jan",
 	"Feb",
@@ -160,10 +175,13 @@ export function Feed() {
 	const [composerOpen, setComposerOpen] = useState(false);
 	const [urlDraft, setUrlDraft] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
-	// m17: the add request waits on the Firecrawl title/favicon fill, so it can
-	// take a few seconds — the composer stays open and says what it's doing
-	// instead of appearing to have swallowed the URL.
-	const [adding, setAdding] = useState(false);
+	// m18 (SPEC §9): the add returns immediately, before the §5 metadata fill
+	// has run, so a NEWLY created row shows its title/favicon as a shimmer.
+	// This is the snapshot of the row as POST returned it — the state clears
+	// when a later response differs from it (the fill landed), at
+	// ENRICH_DEADLINE_MS, or when the user edits the row's title/note.
+	const [enriching, setEnriching] = useState<EnrichSnapshot | null>(null);
+	const enrichingId = enriching?.id ?? null;
 	// Row to flash after an add (new or resurfaced duplicate)…
 	const [flashId, setFlashId] = useState<number | null>(null);
 	// …and, for a NEWLY created bookmark only, the row whose expanded panel
@@ -318,6 +336,54 @@ export function Feed() {
 			});
 	}, [data, morePages, overrides, removed]);
 
+	// m18 clear #1 (SPEC §9): the fill has landed once ANY of the three
+	// snapshotted fields differs on the row we now hold — whether it arrived on
+	// a poll or in a PATCH response (`overrides`). A tag edit alone leaves all
+	// three equal, so it can't end the shimmer early.
+	useEffect(() => {
+		if (!enriching) {
+			return;
+		}
+		const row = items.find((b) => b.id === enriching.id);
+		if (!row) {
+			return;
+		}
+		if (
+			row.title !== enriching.title ||
+			(row.faviconUrl ?? null) !== enriching.faviconUrl ||
+			(row.note ?? null) !== enriching.note
+		) {
+			setEnriching(null);
+		}
+	}, [items, enriching]);
+
+	// m18 clear #2: the deadline. Re-armed per enriching row; cleared on unmount
+	// and whenever the state clears some other way.
+	useEffect(() => {
+		if (enrichingId === null) {
+			return;
+		}
+		const timer = setTimeout(
+			() => setEnriching((prev) => (prev?.id === enrichingId ? null : prev)),
+			ENRICH_DEADLINE_MS,
+		);
+		return () => clearTimeout(timer);
+	}, [enrichingId]);
+
+	// m18 (SPEC §9): while enriching, revalidate page 1 on a short interval so
+	// the fill shows up in seconds rather than on the next 10s poll. Runs
+	// alongside `refreshInterval` — an occasional duplicate fetch is harmless;
+	// a leaked interval is not, hence the id-scoped effect.
+	useEffect(() => {
+		if (enrichingId === null) {
+			return;
+		}
+		const timer = setInterval(() => {
+			mutate();
+		}, 2000);
+		return () => clearInterval(timer);
+	}, [enrichingId, mutate]);
+
 	async function loadMore() {
 		// Ref (not state) guards double-fires: the observer can call again
 		// before the setLoadingMore re-render lands.
@@ -400,6 +466,15 @@ export function Feed() {
 			throw new Error(`request failed (${res.status})`);
 		}
 		const updated = (await res.json()) as ApiBookmark;
+
+		// m18 clear #3 (SPEC §9): the user just wrote the row's title or note,
+		// so the field is theirs — stop shimmering over it regardless of what
+		// the fill does next (§5's mid-flight guard protects the write side).
+		// Deliberately not other patches: tagging/pinning an enriching row is
+		// expected and must leave the affordance alone.
+		if (patch.title !== undefined || patch.note !== undefined) {
+			setEnriching((prev) => (prev?.id === id ? null : prev));
+		}
 
 		if (patch.archived !== undefined) {
 			// Archiving/restoring always moves the row out of whichever view
@@ -507,16 +582,6 @@ export function Feed() {
 		setComposerOpen(false);
 	}
 
-	/**
-	 * Esc while the metadata fill is in flight: the save is already committed
-	 * server-side, so just get out of the way — the row still arrives on the
-	 * next poll. Only the flash/expand affordance is lost.
-	 */
-	function dismissComposer() {
-		closeComposer();
-		setAdding(false);
-	}
-
 	async function submitAdd() {
 		let raw = urlDraft.trim();
 		if (!raw || submittingRef.current) {
@@ -538,8 +603,9 @@ export function Feed() {
 			return;
 		}
 
+		// Ref-only guard (no pending UI): m18's add returns in one round trip,
+		// but Enter and the Save button can still both fire inside it.
 		submittingRef.current = true;
-		setAdding(true);
 		try {
 			const res = await fetch("/api/bookmarks", {
 				method: "POST",
@@ -551,7 +617,7 @@ export function Feed() {
 				return;
 			}
 			const { bookmark, created } = (await res.json()) as {
-				bookmark: { id: number };
+				bookmark: Pick<ApiBookmark, "id" | "title" | "faviconUrl" | "note">;
 				created: boolean;
 			};
 
@@ -562,6 +628,18 @@ export function Feed() {
 			setArchived(false);
 			setExpanded(bookmark.id);
 			setJustAddedId(created ? bookmark.id : null);
+			// m18 (SPEC §9): only a fresh insert is waiting on a fill — a
+			// resurfaced duplicate already carries whatever metadata it has.
+			setEnriching(
+				created
+					? {
+							id: bookmark.id,
+							title: bookmark.title,
+							faviconUrl: bookmark.faviconUrl ?? null,
+							note: bookmark.note ?? null,
+						}
+					: null,
+			);
 			setFlashId(bookmark.id);
 			setTimeout(
 				() => setFlashId((prev) => (prev === bookmark.id ? null : prev)),
@@ -574,7 +652,6 @@ export function Feed() {
 			setAddError("save failed");
 		} finally {
 			submittingRef.current = false;
-			setAdding(false);
 		}
 	}
 
@@ -719,23 +796,16 @@ export function Feed() {
 										submitAdd();
 									} else if (e.key === "Escape") {
 										e.preventDefault();
-										dismissComposer();
+										closeComposer();
 									}
 								}}
-								readOnly={adding}
 								placeholder="Paste a URL and press ⏎"
 								spellCheck={false}
-								className={cn(
-									"min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-[5px] font-mono text-[12.5px] outline-none focus:border-[var(--log-accent)]",
-									adding && "text-muted-foreground",
-								)}
+								className="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-[5px] font-mono text-[12.5px] outline-none focus:border-[var(--log-accent)]"
 							/>
-							{/* m17: saved, now waiting on the page's title + favicon. */}
-							{adding ? (
-								<span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-									fetching page details…
-								</span>
-							) : addError ? (
+							{/* m18: no pending state — the add is one fast round trip and
+							    the composer closes on success. Errors keep it open. */}
+							{addError ? (
 								<span className="shrink-0 font-mono text-[11px] text-destructive">
 									{addError}
 								</span>
@@ -743,14 +813,13 @@ export function Feed() {
 							<button
 								type="button"
 								onClick={submitAdd}
-								disabled={adding}
-								className="shrink-0 rounded-md bg-[var(--log-accent-solid)] px-3 py-[5px] text-[11.5px] font-medium text-white hover:bg-[var(--log-accent-solid-hover)] disabled:opacity-60"
+								className="shrink-0 rounded-md bg-[var(--log-accent-solid)] px-3 py-[5px] text-[11.5px] font-medium text-white hover:bg-[var(--log-accent-solid-hover)]"
 							>
-								{adding ? "Saving…" : "Save"}
+								Save
 							</button>
 							<button
 								type="button"
-								onClick={dismissComposer}
+								onClick={closeComposer}
 								className="shrink-0 px-1 py-0.5 text-[11px] text-[var(--log-faint)] hover:text-foreground"
 							>
 								esc
@@ -798,6 +867,7 @@ export function Feed() {
 									archivedView={archived}
 									expanded={expanded === b.id}
 									flash={flashId === b.id}
+									enriching={enrichingId === b.id}
 									autoFocusTags={justAddedId === b.id}
 									activeTags={activeTags}
 									tagSuggestions={tagSuggestions}
@@ -1006,6 +1076,7 @@ function LogRow({
 	archivedView,
 	expanded,
 	flash,
+	enriching,
 	autoFocusTags,
 	activeTags,
 	tagSuggestions,
@@ -1019,6 +1090,13 @@ function LogRow({
 	expanded: boolean;
 	/** Play the rowflash animation (just added / resurfaced via the composer). */
 	flash: boolean;
+	/**
+	 * m18 (SPEC §9): the §5 metadata fill is still running for this freshly
+	 * added row, so its title/favicon are placeholders — shimmer them and drop
+	 * the note preview. The row stays fully interactive; the expanded panel
+	 * shows no shimmer at all (this row IS the affordance).
+	 */
+	enriching: boolean;
 	/** Focus the expanded panel's add-tag input (newly created via the composer). */
 	autoFocusTags: boolean;
 	activeTags: string[];
@@ -1070,7 +1148,16 @@ function LogRow({
 				<span className="hidden w-[88px] shrink-0 whitespace-nowrap font-mono text-[11px] text-muted-foreground md:inline">
 					{formatTimestamp(new Date(bookmark.updatedAt))}
 				</span>
-				{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
+				{host ? (
+					enriching ? (
+						<span
+							aria-hidden
+							className="h-[14px] w-[14px] shrink-0 animate-[logshimmer_1.4s_ease-in-out_infinite] rounded-[2px] bg-[var(--log-chip-bg)]"
+						/>
+					) : (
+						<Favicon host={host} src={bookmark.faviconUrl} />
+					)
+				) : null}
 				{host ? (
 					<span className="hidden w-[148px] shrink-0 truncate font-mono text-[11px] text-muted-foreground md:block">
 						{host}
@@ -1081,14 +1168,30 @@ function LogRow({
 				    truncates first. `?? null` guards the window where page 1
 				    predates the m10 backend and rows arrive without a `note` key. */}
 				<span className="flex min-w-0 flex-1 items-baseline gap-1.5">
-					<span className="min-w-0 shrink truncate text-[13px] font-medium">
-						{bookmark.title || "(untitled)"}
-					</span>
-					{(bookmark.note ?? null) !== null ? (
-						<span className="min-w-0 flex-1 basis-0 truncate text-[12.5px] text-muted-foreground">
-							— {(bookmark.note as string).replace(/\s+/g, " ")}
-						</span>
-					) : null}
+					{/* Enriching (m18): the hostname placeholder isn't worth reading,
+					    so the title becomes a shimmer block and the note preview is
+					    suppressed — but the text stays in the accessibility tree so
+					    the row never goes nameless. */}
+					{enriching ? (
+						<Fragment>
+							<span className="sr-only">{bookmark.title}</span>
+							<span
+								aria-hidden
+								className="h-[11px] w-[180px] max-w-full shrink animate-[logshimmer_1.4s_ease-in-out_infinite] rounded-[3px] bg-[var(--log-soft)]"
+							/>
+						</Fragment>
+					) : (
+						<Fragment>
+							<span className="min-w-0 shrink truncate text-[13px] font-medium">
+								{bookmark.title || "(untitled)"}
+							</span>
+							{(bookmark.note ?? null) !== null ? (
+								<span className="min-w-0 flex-1 basis-0 truncate text-[12.5px] text-muted-foreground">
+									— {(bookmark.note as string).replace(/\s+/g, " ")}
+								</span>
+							) : null}
+						</Fragment>
+					)}
 				</span>
 				{bookmark.highlights.length > 0 ? (
 					<span className="shrink-0 rounded-full bg-[var(--log-soft)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-accent)]">
@@ -1346,8 +1449,15 @@ function EditableTitle({
 	const [value, setValue] = useState(title);
 
 	useEffect(() => {
-		setValue(title);
-	}, [title]);
+		// Sync the draft to a fresher server title ONLY while not editing —
+		// since m18 the metadata fill routinely lands seconds after the panel
+		// auto-expands, and it must never replace keystrokes in progress (the
+		// server-side mid-flight guard protects the save; this protects the
+		// draft).
+		if (!editing) {
+			setValue(title);
+		}
+	}, [title, editing]);
 
 	if (editing) {
 		return (
