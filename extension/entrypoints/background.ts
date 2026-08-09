@@ -146,53 +146,79 @@ const DEFAULT_ICON_PATH = {
 };
 
 /**
- * Rendered glow icons, cached for the worker's life (re-derived lazily after
- * worker death). `null` = rendering failed in this worker; don't retry it on
- * every tab switch, just use the default icon.
+ * Rendered icons for BOTH states, cached for the worker's life (re-derived
+ * lazily after worker death). `null` = rendering failed in this worker;
+ * don't retry it on every tab switch, just use the packaged default icon.
  */
-let glowIcons: Record<number, ImageData> | null | undefined;
+let stateIcons: {
+	base: Record<number, ImageData>;
+	glow: Record<number, ImageData>;
+} | null | undefined;
 
 /**
- * Draw the base PNGs into an OffscreenCanvas slightly inset, with a warm
- * golden shadow painted repeatedly so it still reads at 16px, and keep the
- * resulting ImageData. No glow asset files (SPEC §6).
+ * Render both icon states from the base PNGs. The artwork is drawn inset by
+ * exactly the outline thickness in BOTH states — the strawberry is the same
+ * size tracked or not, and the tracked state's thick gold outline is purely
+ * additive (a hard silhouette dilation, not a blur: a ring of gold stamps
+ * under the artwork, so there is no washed-out halo and no edge clipping).
+ * No glow asset files (SPEC §6).
  */
-async function renderGlowIcons(): Promise<Record<number, ImageData> | null> {
-	if (glowIcons !== undefined) return glowIcons;
+async function renderStateIcons(): Promise<typeof stateIcons> {
+	if (stateIcons !== undefined) return stateIcons;
 	try {
-		const rendered: Record<number, ImageData> = {};
+		const base: Record<number, ImageData> = {};
+		const glow: Record<number, ImageData> = {};
 		for (const size of GLOW_SIZES) {
 			const response = await fetch(browser.runtime.getURL(`/icon/${size}.png`));
 			if (!response.ok)
 				throw new Error(`icon ${size} fetch ${response.status}`);
 			const bitmap = await createImageBitmap(await response.blob());
 			try {
-				const canvas = new OffscreenCanvas(size, size);
-				const ctx = canvas.getContext("2d");
-				if (ctx === null) throw new Error("no 2d context");
-				// Purely additive: the artwork keeps its full size and the
-				// glow spills into the icon's own transparent margin (glow
-				// clipping at the canvas edge is acceptable; shrinking the
-				// strawberry is not).
-				ctx.shadowColor = "#f5b301";
-				ctx.shadowBlur = Math.max(3, Math.round(size * 0.28));
-				// Three passes: the shadow accumulates into a visible halo at
-				// 16px, where a single pass is nearly invisible.
-				for (let pass = 0; pass < 3; pass += 1) {
-					ctx.drawImage(bitmap, 0, 0, size, size);
+				const outline = Math.max(2, Math.round(size * 0.11));
+				const drawn = size - outline * 2;
+				const context = (): OffscreenCanvasRenderingContext2D => {
+					const ctx = new OffscreenCanvas(size, size).getContext("2d");
+					if (ctx === null) throw new Error("no 2d context");
+					return ctx;
+				};
+				const drawArt = (ctx: OffscreenCanvasRenderingContext2D): void => {
+					ctx.drawImage(bitmap, outline, outline, drawn, drawn);
+				};
+
+				const baseCtx = context();
+				drawArt(baseCtx);
+				base[size] = baseCtx.getImageData(0, 0, size, size);
+
+				// Gold silhouette of the inset artwork: art shape, gold fill.
+				const silhouetteCtx = context();
+				drawArt(silhouetteCtx);
+				silhouetteCtx.globalCompositeOperation = "source-in";
+				silhouetteCtx.fillStyle = "#f5b301";
+				silhouetteCtx.fillRect(0, 0, size, size);
+
+				const glowCtx = context();
+				const STAMPS = 16;
+				for (let i = 0; i < STAMPS; i += 1) {
+					const angle = (2 * Math.PI * i) / STAMPS;
+					glowCtx.drawImage(
+						silhouetteCtx.canvas,
+						Math.cos(angle) * outline,
+						Math.sin(angle) * outline,
+					);
 				}
-				rendered[size] = ctx.getImageData(0, 0, size, size);
+				drawArt(glowCtx);
+				glow[size] = glowCtx.getImageData(0, 0, size, size);
 			} finally {
 				bitmap.close();
 			}
 		}
-		glowIcons = rendered;
+		stateIcons = { base, glow };
 	} catch {
 		// OffscreenCanvas unavailable, fetch failed, decode failed — the icon
-		// silently stays default for this worker's life.
-		glowIcons = null;
+		// silently stays the packaged default for this worker's life.
+		stateIcons = null;
 	}
-	return glowIcons;
+	return stateIcons;
 }
 
 /**
@@ -206,16 +232,20 @@ async function applyIcon(
 	state: IconState,
 	stillCurrent: () => boolean,
 ): Promise<void> {
-	if (state === "glow") {
-		const imageData = await renderGlowIcons();
-		if (imageData !== null) {
-			if (!stillCurrent()) return;
-			try {
-				await browser.action.setIcon({ tabId, imageData });
-				return;
-			} catch {
-				// Tab gone, or setIcon rejected the data — fall through.
-			}
+	// BOTH states paint from the rendered set — the base state uses the same
+	// inset artwork as the glow state, so toggling tracked-ness only ever
+	// adds/removes the outline, never resizes the strawberry.
+	const icons = await renderStateIcons();
+	if (icons !== null && icons !== undefined) {
+		if (!stillCurrent()) return;
+		try {
+			await browser.action.setIcon({
+				tabId,
+				imageData: state === "glow" ? icons.glow : icons.base,
+			});
+			return;
+		} catch {
+			// Tab gone, or setIcon rejected the data — fall through.
 		}
 	}
 	if (!stillCurrent()) return;
