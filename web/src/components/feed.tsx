@@ -63,18 +63,28 @@ const DEBOUNCE_MS = 150;
 
 // m18 enriching state (SPEC §9): the fields whose change means the §5 fill
 // landed. Compared against every later render of the row; `faviconUrl`/`note`
-// are normalized to null so an absent key can't read as a change.
+// are normalized to null so an absent key can't read as a change. `phase`
+// drives the row's status chip: "loading" (spinner + fetching page info…)
+// until the deadline, then "failed" (explicit fail notice) until its own
+// timed clear.
 type EnrichSnapshot = {
 	id: number;
 	title: string;
 	faviconUrl: string | null;
 	note: string | null;
+	phase: "loading" | "failed";
 };
 
-// Hard ceiling on the shimmer (SPEC §9). A fill that fails leaves the hostname
-// title forever — nothing would ever differ from the snapshot — so the
-// affordance must expire on its own, comfortably past the fill's own timeout.
+// Hard ceiling on the loading phase (SPEC §9). A fill that fails leaves the
+// hostname title forever — nothing would ever differ from the snapshot — so
+// the affordance must give up on its own, comfortably past the fill's own
+// timeout. The server keeps no fill status (deliberate, SPEC §5/§8), so this
+// deadline is the only failure signal the client has.
 const ENRICH_DEADLINE_MS = 30_000;
+// How long the "couldn't fetch page info" notice stays on the row before the
+// state clears entirely. The bookmark itself is fine — the notice is
+// informative, not a call to action, so it must not squat in the log forever.
+const ENRICH_FAIL_NOTICE_MS = 10_000;
 
 export function Feed() {
 	const [rawQuery, setRawQuery] = useState("");
@@ -95,13 +105,15 @@ export function Feed() {
 	const [urlDraft, setUrlDraft] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
 	// m18 (SPEC §9): an add renders before the §5 metadata fill has run, so a
-	// NEWLY added row shows its title/favicon as a shimmer. This snapshot
-	// starts from the optimistic temp row at submit and is re-snapshotted from
-	// the POST's row at reconcile — the state clears when a later response
-	// differs from it (the fill landed), at ENRICH_DEADLINE_MS, when the user
-	// edits the row's title/note, or when the POST reports a duplicate.
+	// NEWLY added row carries an explicit status chip while the fill is out.
+	// This snapshot starts from the optimistic temp row at submit and is
+	// re-snapshotted from the POST's row at reconcile — the state clears when
+	// a later response differs from it (the fill landed), when the user edits
+	// the row's title/note, when the POST reports a duplicate, or (after the
+	// deadline flips it to "failed") on the fail notice's own timer.
 	const [enriching, setEnriching] = useState<EnrichSnapshot | null>(null);
 	const enrichingId = enriching?.id ?? null;
+	const enrichPhase = enriching?.phase ?? null;
 	// Row to flash after an add (new or resurfaced duplicate)…
 	const [flashId, setFlashId] = useState<number | null>(null);
 	// …and, for a NEWLY created bookmark only, the row whose expanded panel
@@ -316,8 +328,10 @@ export function Feed() {
 	// m18 clear #1 (SPEC §9): the fill has landed once ANY of the three
 	// snapshotted fields differs on the row we now hold — whether it arrived on
 	// a poll or in a PATCH response (`overrides`). A tag edit alone leaves all
-	// three equal, so it can't end the shimmer early. Scans `rows` (not
-	// `items`) so an overlay row is compared against what's actually rendered.
+	// three equal, so it can't end the chip early. Scans `rows` (not `items`)
+	// so an overlay row is compared against what's actually rendered. Also
+	// live in the "failed" phase: a fill landing late replaces the fail notice
+	// with the metadata it announced was missing.
 	useEffect(() => {
 		if (!enriching) {
 			return;
@@ -335,32 +349,53 @@ export function Feed() {
 		}
 	}, [rows, enriching]);
 
-	// m18 clear #2: the deadline. Re-armed per enriching row; cleared on unmount
-	// and whenever the state clears some other way.
+	// m18 clear #2, stage one: the deadline flips a still-loading chip to the
+	// explicit fail notice (SPEC §9). Re-armed per enriching row; cleared on
+	// unmount and whenever the state clears some other way.
 	useEffect(() => {
 		if (enrichingId === null) {
 			return;
 		}
 		const timer = setTimeout(
-			() => setEnriching((prev) => (prev?.id === enrichingId ? null : prev)),
+			() =>
+				setEnriching((prev) =>
+					prev?.id === enrichingId && prev.phase === "loading"
+						? { ...prev, phase: "failed" }
+						: prev,
+				),
 			ENRICH_DEADLINE_MS,
 		);
 		return () => clearTimeout(timer);
 	}, [enrichingId]);
 
-	// m18 (SPEC §9): while enriching, revalidate page 1 on a short interval so
-	// the fill shows up in seconds rather than on the next 10s poll. Runs
-	// alongside `refreshInterval` — an occasional duplicate fetch is harmless;
-	// a leaked interval is not, hence the id-scoped effect.
+	// …stage two: the fail notice retires itself. The bookmark is saved and
+	// usable — the notice only explains why the title is still a hostname.
 	useEffect(() => {
-		if (enrichingId === null) {
+		if (enrichPhase !== "failed" || enrichingId === null) {
+			return;
+		}
+		const timer = setTimeout(
+			() => setEnriching((prev) => (prev?.id === enrichingId ? null : prev)),
+			ENRICH_FAIL_NOTICE_MS,
+		);
+		return () => clearTimeout(timer);
+	}, [enrichPhase, enrichingId]);
+
+	// m18 (SPEC §9): while the fill is still expected, revalidate page 1 on a
+	// short interval so it shows up in seconds rather than on the next 10s
+	// poll. Runs alongside `refreshInterval` — an occasional duplicate fetch
+	// is harmless; a leaked interval is not, hence the scoped effect. Stops in
+	// the "failed" phase: past the deadline the 10s poll is plenty for the
+	// rare late fill.
+	useEffect(() => {
+		if (enrichingId === null || enrichPhase !== "loading") {
 			return;
 		}
 		const timer = setInterval(() => {
 			mutate();
 		}, 2000);
 		return () => clearInterval(timer);
-	}, [enrichingId, mutate]);
+	}, [enrichingId, enrichPhase, mutate]);
 
 	async function loadMore() {
 		// Ref (not state) guards double-fires: the observer can call again
@@ -458,7 +493,7 @@ export function Feed() {
 		const updated = (await res.json()) as ApiBookmark;
 
 		// m18 clear #3 (SPEC §9): the user just wrote the row's title or note,
-		// so the field is theirs — stop shimmering over it regardless of what
+		// so the field is theirs — drop the chip over it regardless of what
 		// the fill does next (§5's mid-flight guard protects the write side).
 		// Deliberately not other patches: tagging/pinning an enriching row is
 		// expected and must leave the affordance alone.
@@ -610,7 +645,7 @@ export function Feed() {
 
 		// m18 optimistic add (SPEC §9): the row renders NOW — a temp row with a
 		// negative id, the same hostname title the server autofills (§5), and
-		// the enriching shimmer already on, at the top of the live view (search
+		// the enriching status chip already on, at the top of the live view (search
 		// and tag filters are kept), flashed. Nothing the user sees waits on
 		// the network. Expansion + tag-input focus wait for the reconcile
 		// below: the panel's editors and article section need a PATCHable id,
@@ -646,6 +681,7 @@ export function Feed() {
 			title: tempRow.title,
 			faviconUrl: null,
 			note: null,
+			phase: "loading",
 		});
 		setFlashId(tempId);
 		setTimeout(
@@ -704,7 +740,7 @@ export function Feed() {
 				);
 				// m18 (SPEC §9): only a fresh insert is waiting on a fill — a
 				// resurfaced duplicate already carries whatever metadata it has,
-				// so its shimmer ends here. Re-snapshot from the server's row
+				// so its chip ends here. Re-snapshot from the server's row
 				// (identical to the temp row today, but the snapshot must match
 				// what the row now shows).
 				setEnriching((prev) =>
@@ -716,6 +752,7 @@ export function Feed() {
 									title: bookmark.title,
 									faviconUrl: bookmark.faviconUrl ?? null,
 									note: bookmark.note ?? null,
+									phase: "loading",
 								}
 							: null,
 				);
@@ -948,7 +985,11 @@ export function Feed() {
 									archivedView={archived}
 									expanded={expanded === b.id}
 									flash={flashId === b.id}
-									enriching={enrichingId === b.id}
+									enriching={
+										enrichingId === b.id && enrichPhase !== null
+											? enrichPhase
+											: false
+									}
 									autoFocusTags={justAddedId === b.id}
 									activeTags={activeTags}
 									tagSuggestions={tagSuggestions}

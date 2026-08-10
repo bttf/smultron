@@ -158,12 +158,15 @@ export function LogRow({
 	/** Play the rowflash animation (just added / resurfaced via the composer). */
 	flash: boolean;
 	/**
-	 * m18 (SPEC §9): the §5 metadata fill is still running for this freshly
-	 * added row, so its title/favicon are placeholders — shimmer them and drop
-	 * the note preview. The row stays fully interactive; the expanded panel
-	 * shows no shimmer at all (this row IS the affordance).
+	 * m18 (SPEC §9): the §5 metadata fill status for this freshly added row.
+	 * "loading" shows an explicit spinner chip ("fetching page info…") in the
+	 * note-preview slot; "failed" (the fill's deadline passed) shows a timed
+	 * destructive notice instead. Title and favicon render normally either
+	 * way — the hostname title and fallback icon are honest content, the chip
+	 * is the affordance. The row stays fully interactive; the expanded panel
+	 * shows no chip at all.
 	 */
-	enriching: boolean;
+	enriching: "loading" | "failed" | false;
 	/** Focus the expanded panel's add-tag input (newly created via the composer). */
 	autoFocusTags: boolean;
 	activeTags: string[];
@@ -215,16 +218,7 @@ export function LogRow({
 				<span className="hidden w-[88px] shrink-0 whitespace-nowrap font-mono text-[11px] text-muted-foreground md:inline">
 					{formatTimestamp(new Date(bookmark.updatedAt))}
 				</span>
-				{host ? (
-					enriching ? (
-						<span
-							aria-hidden
-							className="h-[14px] w-[14px] shrink-0 animate-[logshimmer_1.4s_ease-in-out_infinite] rounded-[2px] bg-[var(--log-chip-bg)]"
-						/>
-					) : (
-						<Favicon host={host} src={bookmark.faviconUrl} />
-					)
-				) : null}
+				{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
 				{host ? (
 					<span className="hidden w-[148px] shrink-0 truncate font-mono text-[11px] text-muted-foreground md:block">
 						{host}
@@ -235,30 +229,44 @@ export function LogRow({
 				    truncates first. `?? null` guards the window where page 1
 				    predates the m10 backend and rows arrive without a `note` key. */}
 				<span className="flex min-w-0 flex-1 items-baseline gap-1.5">
-					{/* Enriching (m18): the hostname placeholder isn't worth reading,
-					    so the title becomes a shimmer block and the note preview is
-					    suppressed — but the text stays in the accessibility tree so
-					    the row never goes nameless. */}
+					<span className="min-w-0 shrink truncate text-[13px] font-medium">
+						{bookmark.title || "(untitled)"}
+					</span>
+					{/* Enriching (m18): an explicit status chip takes the note
+					    preview's slot while the §5 fill is out — a spinner while
+					    loading, a timed destructive notice once the deadline
+					    decides the fill isn't coming. `role="status"` so screen
+					    readers hear the transition too. */}
 					{enriching ? (
-						<Fragment>
-							<span className="sr-only">{bookmark.title}</span>
-							<span
-								aria-hidden
-								className="h-[11px] w-[180px] max-w-full shrink animate-[logshimmer_1.4s_ease-in-out_infinite] rounded-[3px] bg-[var(--log-soft)]"
-							/>
-						</Fragment>
-					) : (
-						<Fragment>
-							<span className="min-w-0 shrink truncate text-[13px] font-medium">
-								{bookmark.title || "(untitled)"}
-							</span>
-							{(bookmark.note ?? null) !== null ? (
-								<span className="min-w-0 flex-1 basis-0 truncate text-[12.5px] text-muted-foreground">
-									— {(bookmark.note as string).replace(/\s+/g, " ")}
-								</span>
-							) : null}
-						</Fragment>
-					)}
+						<span
+							role="status"
+							className={cn(
+								"flex shrink-0 items-center gap-1.5 font-mono text-[11px]",
+								enriching === "loading"
+									? "text-[var(--log-accent)]"
+									: "text-destructive",
+							)}
+						>
+							{enriching === "loading" ? (
+								<Fragment>
+									<span
+										aria-hidden
+										className="h-[10px] w-[10px] animate-spin rounded-full border border-[var(--log-accent)] border-t-transparent"
+									/>
+									fetching page info…
+								</Fragment>
+							) : (
+								<Fragment>
+									<span aria-hidden>✗</span>
+									couldn&apos;t fetch page info
+								</Fragment>
+							)}
+						</span>
+					) : (bookmark.note ?? null) !== null ? (
+						<span className="min-w-0 flex-1 basis-0 truncate text-[12.5px] text-muted-foreground">
+							— {(bookmark.note as string).replace(/\s+/g, " ")}
+						</span>
+					) : null}
 				</span>
 				{bookmark.highlights.length > 0 ? (
 					<span className="shrink-0 rounded-full bg-[var(--log-soft)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-accent)]">
