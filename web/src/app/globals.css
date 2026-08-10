@@ -184,19 +184,6 @@
 	}
 }
 
-/* Enriching placeholders on a just-added row (m18, SPEC §9 — feed.tsx,
-   animate-[logshimmer_…]): the blocks carry a --log-* fill, so the pulse only
-   has to breathe their opacity to read in both schemes. */
-@keyframes logshimmer {
-	0%,
-	100% {
-		opacity: 1;
-	}
-	50% {
-		opacity: 0.4;
-	}
-}
-
 @layer base {
 	* {
 		@apply border-border outline-ring/50;
