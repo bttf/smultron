@@ -186,6 +186,88 @@ export const articleAudio = smultron
 	)
 	.enableRLS();
 
+/**
+ * Browse-event kinds (m19, SPEC §13) — the raw attention EDGES the extension
+ * captures. Stored as plain `text`, not a pg enum, for the same reason as
+ * ARTICLE_STATUSES: the set is expected to evolve and a text column keeps
+ * that a code change instead of an ALTER TYPE migration. This TS union is
+ * the authority (the API's Zod enum is built from it).
+ */
+export const BROWSE_EVENT_KINDS = [
+	"nav",
+	"tab_activated",
+	"window_focus",
+	"window_blur",
+	"idle",
+	"capture_start",
+	"capture_stop",
+] as const;
+
+export type BrowseEventKind = (typeof BROWSE_EVENT_KINDS)[number];
+
+/** `idle` events only (SPEC §13). */
+export const IDLE_STATES = ["active", "idle", "locked"] as const;
+
+export type IdleState = (typeof IDLE_STATES)[number];
+
+// Attention-tracking telemetry (m19, SPEC §13). APPEND-ONLY: rows are never
+// updated or deleted. COMPLETELY separate from bookmarks — nothing here
+// references or touches the bookmarks table, which is why no part of this
+// feature can bump `bookmarks.updated_at` (Hard rule #1).
+export const browseEvents = smultron
+	.table(
+		"browse_events",
+		{
+			id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+			userId: uuid("user_id").notNull(),
+			// Extension-minted uuid; the idempotency key that makes at-least-once
+			// outbox delivery safe (unique with user_id below, DO NOTHING insert).
+			clientEventId: text("client_event_id").notNull(),
+			// Capture-session uuid (SPEC §13): dwell intervals are only valid
+			// BETWEEN events sharing a boot_id.
+			bootId: text("boot_id").notNull(),
+			// One of BROWSE_EVENT_KINDS.
+			kind: text().notNull(),
+			// Client clock at capture — the timeline key.
+			occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+			// Raw URL as captured (kind-dependent, SPEC §13); null when the kind
+			// carries none or the tab lookup failed.
+			url: text(),
+			// Server-derived (SPEC §4, single implementation); null when url is null.
+			urlNormalized: text("url_normalized"),
+			// Tab title where known (never on `nav` — at commit time the tab still
+			// holds the previous page's title).
+			title: text(),
+			tabId: integer("tab_id"),
+			windowId: integer("window_id"),
+			// One of IDLE_STATES; only for kind='idle'.
+			idleState: text("idle_state"),
+			// nav only: `[transitionType, ...qualifiers].join("|")`.
+			transition: text(),
+			// nav only: webNavigation documentLifecycle verbatim when present
+			// ('prerender' commits are recorded + flagged, filtered retroactively).
+			documentLifecycle: text("document_lifecycle"),
+			// Server receipt time — kept alongside occurred_at for clock-skew
+			// diagnosis.
+			createdAt: timestamp("created_at", { withTimezone: true })
+				.notNull()
+				.default(sql`now()`),
+		},
+		(table) => [
+			// Idempotent batch inserts: a redelivered batch conflicts here and
+			// DOes NOTHING.
+			unique().on(table.userId, table.clientEventId),
+			// The log view's keyset (occurred_at desc, id desc) + retroactive
+			// per-user timeline scans.
+			index("browse_events_user_id_occurred_at_idx").on(
+				table.userId,
+				table.occurredAt.desc(),
+				table.id.desc(),
+			),
+		],
+	)
+	.enableRLS();
+
 export const highlights = smultron
 	.table(
 		"highlights",
