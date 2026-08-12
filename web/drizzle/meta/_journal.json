@@ -71,6 +71,20 @@
       "when": 1785852055936,
       "tag": "0009_unique_moira_mactaggert",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786500118515,
+      "tag": "0010_spicy_sally_floyd",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786500118516,
+      "tag": "0011_browse-events-auth-fk",
+      "breakpoints": true
     }
   ]
 }
