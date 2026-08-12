@@ -1,3 +1,16 @@
+import {
+	createBrowseBuffer,
+	createCaptureSession,
+	createEventFactory,
+	formatTransition,
+	isCaptureEnabled,
+	isMainFrameNavigation,
+} from "@/src/attention";
+import {
+	type BaselineTarget,
+	createAttentionCapture,
+	type TabInfo,
+} from "@/src/attentionCapture";
 import { captureHighlight, type HighlightCaptureDeps } from "@/src/capture";
 import {
 	createEntry,
@@ -21,10 +34,13 @@ import {
 	type TreeNode,
 } from "@/src/tree";
 import {
+	ATTENTION_KEY,
+	BROWSE_DRAIN_ALARM,
 	CONFIG_KEY,
 	DEFAULT_BASE_URL,
 	type ExtensionConfig,
 	FLUSH_ALARM,
+	type IdleState,
 	SYNC_BATCH_LIMIT,
 	type SyncBookmark,
 } from "@/src/types";
@@ -33,6 +49,29 @@ const storage: KeyValueStorage = {
 	get: async (key) => (await browser.storage.local.get(key))[key],
 	set: async (key, value) => {
 		await browser.storage.local.set({ [key]: value });
+	},
+};
+
+/**
+ * `chrome.storage.session`: in-memory, survives service-worker death, cleared
+ * on browser restart — exactly the `bootId` lifetime SPEC §13 wants. Failures
+ * degrade to "no stored session" (a fresh bootId per worker, i.e. extra
+ * capture-session boundaries) rather than throwing into a listener.
+ */
+const sessionStorage: KeyValueStorage = {
+	get: async (key) => {
+		try {
+			return (await browser.storage.session.get(key))[key];
+		} catch {
+			return undefined;
+		}
+	},
+	set: async (key, value) => {
+		try {
+			await browser.storage.session.set({ [key]: value });
+		} catch {
+			// Session storage unavailable — see above.
+		}
 	},
 };
 
@@ -98,6 +137,11 @@ async function reconcile(): Promise<void> {
 
 function scheduleRetryAlarm(): void {
 	browser.alarms.create(FLUSH_ALARM, { periodInMinutes: 5 });
+}
+
+/** m19: the periodic browse-buffer drain (SPEC §13). */
+function scheduleDrainAlarm(): void {
+	browser.alarms.create(BROWSE_DRAIN_ALARM, { periodInMinutes: 1 });
 }
 
 /** Idempotent (removeAll + create) registration of the highlight menu item. */
@@ -357,6 +401,129 @@ function refreshActiveTabIcon(
 	})();
 }
 
+// ---------------------------------------------------------------------------
+// Attention tracking: browse-event capture (SPEC §13, m19).
+//
+// Chrome glue only: the gate, capture-session boundaries, buffer discipline
+// and drain triggers all live in `src/attention.ts` + `src/attentionCapture.ts`,
+// where they are unit-tested. Nothing here touches bookmarks (hard rule #1).
+
+const browseBuffer = createBrowseBuffer({
+	storage,
+	enqueueBrowse: (entries) => outbox.enqueueBrowse(entries),
+	uuid: () => crypto.randomUUID(),
+});
+
+/** The `attention` toggle; ANY failure reads as disabled — off means off. */
+async function attentionEnabled(): Promise<boolean> {
+	try {
+		return isCaptureEnabled(
+			(await browser.storage.local.get(ATTENTION_KEY))[ATTENTION_KEY],
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** `tabs.get` enrichment; undefined when the tab is gone. */
+async function getTabInfo(tabId: number): Promise<TabInfo | undefined> {
+	try {
+		const tab = await browser.tabs.get(tabId);
+		return { tabId: tab.id, url: tab.url, title: tab.title };
+	} catch {
+		return undefined;
+	}
+}
+
+/** The active tab of a specific window (window_focus enrichment). */
+async function getActiveTabInWindow(
+	windowId: number,
+): Promise<TabInfo | undefined> {
+	try {
+		const [tab] = await browser.tabs.query({ active: true, windowId });
+		if (tab === undefined) return undefined;
+		return { tabId: tab.id, url: tab.url, title: tab.title };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Baseline target: the active tab of the LAST-FOCUSED window — undefined
+ * (baseline skipped, §13) when no Chrome window currently has focus.
+ */
+async function getBaselineTarget(): Promise<BaselineTarget | undefined> {
+	try {
+		const lastFocused = await browser.windows.getLastFocused();
+		const windowId = lastFocused.id;
+		if (lastFocused.focused !== true || windowId === undefined)
+			return undefined;
+		const tab = await getActiveTabInWindow(windowId);
+		if (tab?.tabId === undefined) return undefined;
+		const target: BaselineTarget = { tabId: tab.tabId, windowId };
+		if (tab.url !== undefined) target.url = tab.url;
+		if (tab.title !== undefined) target.title = tab.title;
+		return target;
+	} catch {
+		return undefined;
+	}
+}
+
+const attention = createAttentionCapture({
+	buffer: browseBuffer,
+	session: createCaptureSession({
+		sessionStorage,
+		uuid: () => crypto.randomUUID(),
+	}),
+	events: createEventFactory({
+		uuid: () => crypto.randomUUID(),
+		now: Date.now,
+	}),
+	isEnabled: attentionEnabled,
+	getBaselineTarget,
+	getTab: getTabInfo,
+	getActiveTabInWindow,
+	flush: () => outbox.flush(),
+});
+
+/** A capture listener must never throw or block Chrome's dispatch. */
+function capture(work: Promise<void>): void {
+	void work.catch(() => {});
+}
+
+/** The shape both webNavigation events provide (main-frame commits, §13). */
+interface NavDetails {
+	frameId: number;
+	frameType?: string;
+	tabId: number;
+	url: string;
+	timeStamp: number;
+	transitionType?: string;
+	transitionQualifiers?: string[];
+	documentLifecycle?: string;
+}
+
+function handleNavigation(details: NavDetails): void {
+	// Main frame only (subframe commits aren't the user's attention target) —
+	// by frameType, since prerendered main frames have a nonzero frameId (§13).
+	if (!isMainFrameNavigation(details)) return;
+	capture(
+		attention.recordNav({
+			tabId: details.tabId,
+			// Raw URL (hard rule #3) and the event's OWN timestamp (§13).
+			url: details.url,
+			occurredAtMs: details.timeStamp,
+			transition: formatTransition(
+				details.transitionType,
+				details.transitionQualifiers,
+			),
+			// Verbatim when present: prerendered commits are captured WITH the
+			// flag, never dropped (§13).
+			documentLifecycle: details.documentLifecycle,
+		}),
+	);
+}
+
 export default defineBackground(() => {
 	// MV3: all listeners must be registered synchronously at the top level of
 	// the service worker so Chrome can re-deliver events after worker death.
@@ -387,16 +554,24 @@ export default defineBackground(() => {
 	browser.runtime.onInstalled.addListener(() => {
 		void registerHighlightMenu();
 		scheduleRetryAlarm();
+		scheduleDrainAlarm();
 		void reconcile();
+		// Toggle on: treat like a startup (mint a bootId only if absent, §13).
+		capture(attention.start());
 	});
 
 	browser.runtime.onStartup.addListener(() => {
 		scheduleRetryAlarm();
+		scheduleDrainAlarm();
 		void reconcile();
+		// storage.session is empty at browser startup, so this mints a fresh
+		// capture session (capture_start + baseline) when the toggle is on.
+		capture(attention.start());
 	});
 
 	browser.alarms.onAlarm.addListener((alarm) => {
 		if (alarm.name === FLUSH_ALARM) void outbox.flush();
+		if (alarm.name === BROWSE_DRAIN_ALARM) capture(attention.drainAndFlush());
 	});
 
 	// --- m15 action-icon watcher (SPEC §6) --------------------------------
@@ -433,11 +608,63 @@ export default defineBackground(() => {
 	});
 
 	browser.storage.onChanged.addListener((changes, area) => {
+		if (area !== "local") return;
+
+		// m19: the opt-in toggle flipped — capture_start + baseline on enable,
+		// capture_stop on disable, then a drain so the edge ships promptly.
+		const attentionChange = changes[ATTENTION_KEY];
+		if (attentionChange !== undefined) {
+			capture(
+				attention.handleToggleChange(
+					attentionChange.oldValue,
+					attentionChange.newValue,
+				),
+			);
+		}
+
 		// Re-pairing (the options page rewrote the config) makes every cached
 		// tracked verdict meaningless — different account or server. Drop the
 		// cache and repaint from scratch.
-		if (area !== "local" || changes[CONFIG_KEY] === undefined) return;
+		if (changes[CONFIG_KEY] === undefined) return;
 		trackedCache.clear();
 		refreshActiveTabIcon();
 	});
+
+	// --- m19 browse-event capture (SPEC §13) ------------------------------
+	//
+	// Registered unconditionally (MV3 needs synchronous top-level listeners);
+	// each handler gates on the toggle INSIDE, so off = zero capture.
+
+	browser.webNavigation.onCommitted.addListener(handleNavigation);
+	// SPA navigations (YouTube, Twitter) only surface here.
+	browser.webNavigation.onHistoryStateUpdated.addListener(handleNavigation);
+
+	browser.tabs.onActivated.addListener((info) => {
+		capture(
+			attention.recordTabActivated({
+				tabId: info.tabId,
+				windowId: info.windowId,
+			}),
+		);
+	});
+
+	browser.windows.onFocusChanged.addListener((windowId) => {
+		if (windowId === browser.windows.WINDOW_ID_NONE) {
+			// Focus left Chrome entirely — dwell stops here.
+			capture(attention.recordWindowBlur());
+			return;
+		}
+		capture(attention.recordWindowFocus(windowId));
+	});
+
+	browser.idle.onStateChanged.addListener((state) => {
+		capture(attention.recordIdle(state as IdleState));
+	});
+
+	// 60s is the floor for retroactive idle thresholds (§13).
+	try {
+		browser.idle.setDetectionInterval(60);
+	} catch {
+		// Nothing to do: the default 60s interval already applies.
+	}
 });

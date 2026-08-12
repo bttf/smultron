@@ -1,18 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
+import { createEventFactory } from "./attention";
 import {
+	createBrowseEntry,
 	createEntry,
 	createHighlightEntry,
 	createOutbox,
 	type FetchLike,
 	type KeyValueStorage,
 	type MinimalResponse,
+	toBrowseEventInput,
 } from "./outbox";
 import type {
+	BrowseEvent,
+	BrowseOutboxEntry,
 	HighlightOutboxEntry,
 	OutboxEntry,
 	SyncOutboxEntry,
 } from "./types";
-import { CONFIG_KEY, OUTBOX_KEY } from "./types";
+import { BROWSE_OUTBOX_ENTRY_CAP, CONFIG_KEY, OUTBOX_KEY } from "./types";
 
 const OK: MinimalResponse = { ok: true, status: 200 };
 
@@ -59,6 +64,30 @@ function highlight(id: string): HighlightOutboxEntry {
 		url: `https://example.com/${id}`,
 		text: `Highlight ${id}`,
 	};
+}
+
+/** Deterministic uuids for factory-built wire assertions. */
+function counterUuid(prefix: string): () => string {
+	let n = 0;
+	return () => `${prefix}-${++n}`;
+}
+
+function browseEvent(
+	id: string,
+	overrides: Partial<BrowseEvent> = {},
+): BrowseEvent {
+	return {
+		id,
+		bootId: "boot-1",
+		kind: "window_blur",
+		occurredAtMs: 1_700_000_000_000,
+		...overrides,
+	};
+}
+
+function browse(id: string, events: BrowseEvent[] = [browseEvent(`e-${id}`)]) {
+	const entry: BrowseOutboxEntry = { id, kind: "browse", events };
+	return entry;
 }
 
 const configured = {
@@ -420,5 +449,291 @@ describe("flush failure handling per kind (SPEC §6 poison rule)", () => {
 		const queue = storage.data[OUTBOX_KEY] as OutboxEntry[];
 		expect(queue).toHaveLength(2);
 		expect(queue[1]?.kind).toBe("highlight");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// m19 browse entries (SPEC §8/§13).
+
+describe("browse wire shape", () => {
+	it("renames the buffered id to clientEventId and omits absent fields", () => {
+		expect(
+			toBrowseEventInput(
+				browseEvent("evt-1", { kind: "capture_start", bootId: "boot-9" }),
+			),
+		).toEqual({
+			clientEventId: "evt-1",
+			bootId: "boot-9",
+			kind: "capture_start",
+			occurredAtMs: 1_700_000_000_000,
+		});
+	});
+
+	it("carries every field a kind DOES declare", () => {
+		expect(
+			toBrowseEventInput(
+				browseEvent("evt-2", {
+					kind: "nav",
+					tabId: 4,
+					windowId: 2,
+					url: "https://example.com/a",
+					transition: "typed|from_address_bar",
+					documentLifecycle: "prerender",
+				}),
+			),
+		).toEqual({
+			clientEventId: "evt-2",
+			bootId: "boot-1",
+			kind: "nav",
+			occurredAtMs: 1_700_000_000_000,
+			tabId: 4,
+			windowId: 2,
+			url: "https://example.com/a",
+			transition: "typed|from_address_bar",
+			documentLifecycle: "prerender",
+		});
+		expect(
+			toBrowseEventInput(
+				browseEvent("evt-3", { kind: "idle", idleState: "locked" }),
+			),
+		).toEqual({
+			clientEventId: "evt-3",
+			bootId: "boot-1",
+			kind: "idle",
+			occurredAtMs: 1_700_000_000_000,
+			idleState: "locked",
+		});
+		expect(
+			toBrowseEventInput(
+				browseEvent("evt-4", {
+					kind: "tab_activated",
+					tabId: 1,
+					windowId: 3,
+					title: "Example",
+				}),
+			).title,
+		).toBe("Example");
+	});
+
+	it("createBrowseEntry assigns unique ids and keeps kind/events", () => {
+		const events = [browseEvent("e-1")];
+		const one = createBrowseEntry(events);
+		const two = createBrowseEntry(events);
+		expect(one.kind).toBe("browse");
+		expect(one.events).toEqual(events);
+		expect(one.id).not.toBe(two.id);
+	});
+});
+
+describe("enqueueBrowse backlog cap (SPEC §13)", () => {
+	it("appends browse entries to the tail of the queue", async () => {
+		const storage = fakeStorage({ [OUTBOX_KEY]: [entry("sync-a")] });
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueBrowse([browse("b1"), browse("b2")]);
+		expect(queueIds(storage)).toEqual(["sync-a", "b1", "b2"]);
+	});
+
+	it("is a no-op for an empty batch", async () => {
+		const storage = fakeStorage({ [OUTBOX_KEY]: [entry("sync-a")] });
+		await createOutbox({ storage, fetchFn: vi.fn<FetchLike>() }).enqueueBrowse(
+			[],
+		);
+		expect(queueIds(storage)).toEqual(["sync-a"]);
+	});
+
+	it("drops the OLDEST browse entries past the cap, never touching sync/highlight", async () => {
+		const existing: OutboxEntry[] = [
+			entry("sync-first"),
+			...Array.from({ length: BROWSE_OUTBOX_ENTRY_CAP }, (_, i) =>
+				browse(`old-${i}`),
+			),
+			highlight("hl"),
+			entry("sync-last"),
+		];
+		const storage = fakeStorage({ [OUTBOX_KEY]: existing });
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueBrowse([browse("new-1"), browse("new-2")]);
+
+		const queue = storage.data[OUTBOX_KEY] as OutboxEntry[];
+		const browseIds = queue.filter((e) => e.kind === "browse").map((e) => e.id);
+		expect(browseIds).toHaveLength(BROWSE_OUTBOX_ENTRY_CAP);
+		// The two oldest browse entries made room for the two new ones.
+		expect(browseIds).not.toContain("old-0");
+		expect(browseIds).not.toContain("old-1");
+		expect(browseIds[0]).toBe("old-2");
+		expect(browseIds.slice(-2)).toEqual(["new-1", "new-2"]);
+		// Bookmark traffic is untouched, in its original relative order.
+		expect(queue.filter((e) => e.kind !== "browse").map((e) => e.id)).toEqual([
+			"sync-first",
+			"hl",
+			"sync-last",
+		]);
+	});
+
+	it("keeps only the newest cap entries when a single batch overflows it", async () => {
+		const storage = fakeStorage({ [OUTBOX_KEY]: [entry("sync-a")] });
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueBrowse(
+			Array.from({ length: BROWSE_OUTBOX_ENTRY_CAP + 5 }, (_, i) =>
+				browse(`b-${i}`),
+			),
+		);
+		const queue = storage.data[OUTBOX_KEY] as OutboxEntry[];
+		expect(queue[0]?.id).toBe("sync-a");
+		const browseIds = queue.filter((e) => e.kind === "browse").map((e) => e.id);
+		expect(browseIds).toHaveLength(BROWSE_OUTBOX_ENTRY_CAP);
+		expect(browseIds[0]).toBe("b-5");
+		expect(browseIds.at(-1)).toBe(`b-${BROWSE_OUTBOX_ENTRY_CAP + 4}`);
+	});
+});
+
+describe("browse flush routing + poison rule (SPEC §13)", () => {
+	it("posts browse entries to /api/browse-events with the §8 body", async () => {
+		const events = [
+			browseEvent("e-1", { kind: "capture_start" }),
+			browseEvent("e-2", {
+				kind: "nav",
+				tabId: 7,
+				url: "https://example.com/x",
+				transition: "link",
+			}),
+		];
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [
+				createEntry("live", entry("a").bookmarks),
+				browse("b", events),
+			],
+		});
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		const [url, init] = fetchFn.mock.calls[1] ?? [];
+		expect(url).toBe("https://api.test/api/browse-events");
+		expect(init?.headers).toEqual({
+			"Content-Type": "application/json",
+			Authorization: "Bearer tok-123",
+		});
+		// Exactly SPEC §8/§13: {events} with clientEventId keys, no outbox id,
+		// no `kind` wrapper, and no undefined-valued keys anywhere.
+		const body = JSON.parse(init?.body ?? "") as Record<string, unknown>;
+		expect(body).toEqual({
+			events: [
+				{
+					clientEventId: "e-1",
+					bootId: "boot-1",
+					kind: "capture_start",
+					occurredAtMs: 1_700_000_000_000,
+				},
+				{
+					clientEventId: "e-2",
+					bootId: "boot-1",
+					kind: "nav",
+					occurredAtMs: 1_700_000_000_000,
+					tabId: 7,
+					url: "https://example.com/x",
+					transition: "link",
+				},
+			],
+		});
+		expect(init?.body).not.toContain('"id"');
+		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("never puts an empty pre-commit url/title on the wire", async () => {
+		// End to end: factory-built events from a tab Chrome hasn't committed
+		// yet must not carry `url`/`title` keys (server bound is min(1) — one
+		// empty string 400s, and poison-drops, the whole batch).
+		const factory = createEventFactory({
+			uuid: counterUuid("evt"),
+			now: () => 1_700_000_000_000,
+		});
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [
+				browse("b", [
+					factory.tabActivated({
+						bootId: "boot-1",
+						tabId: 1,
+						windowId: 2,
+						url: "",
+						title: "",
+					}),
+				]),
+			],
+		});
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+
+		const body = fetchFn.mock.calls[0]?.[1].body ?? "";
+		expect(body).not.toContain('"url"');
+		expect(body).not.toContain('"title"');
+		expect(JSON.parse(body)).toEqual({
+			events: [
+				{
+					clientEventId: "evt-1",
+					bootId: "boot-1",
+					kind: "tab_activated",
+					occurredAtMs: 1_700_000_000_000,
+					tabId: 1,
+					windowId: 2,
+				},
+			],
+		});
+	});
+
+	it("drops a browse entry on a definitive 4xx and CONTINUES the flush", async () => {
+		for (const status of [400, 409, 413, 422]) {
+			const storage = fakeStorage({
+				...configured,
+				[OUTBOX_KEY]: [browse("bad"), entry("after")],
+			});
+			const fetchFn = vi
+				.fn<FetchLike>()
+				.mockResolvedValueOnce({ ok: false, status })
+				.mockResolvedValue(OK);
+			await createOutbox({ storage, fetchFn }).flush();
+			expect(fetchFn).toHaveBeenCalledTimes(2);
+			expect(queueIds(storage)).toEqual([]);
+		}
+	});
+
+	it("halts on browse 401 / 5xx / network error, keeping the entry queued", async () => {
+		const failures: FetchLike[] = [
+			async () => ({ ok: false, status: 401 }),
+			async () => ({ ok: false, status: 500 }),
+			async () => {
+				throw new Error("offline");
+			},
+		];
+		for (const failing of failures) {
+			const storage = fakeStorage({
+				...configured,
+				[OUTBOX_KEY]: [browse("b"), entry("after")],
+			});
+			const fetchFn = vi.fn<FetchLike>(failing);
+			await createOutbox({ storage, fetchFn }).flush();
+			expect(fetchFn).toHaveBeenCalledTimes(1);
+			expect(queueIds(storage)).toEqual(["b", "after"]);
+		}
+	});
+
+	it("a poisoned browse entry never blocks the bookmark sync behind it", async () => {
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [browse("poison"), entry("sync-after"), highlight("hl")],
+		});
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValueOnce({ ok: false, status: 400 })
+			.mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn.mock.calls.map(([url]) => url)).toEqual([
+			"https://api.test/api/browse-events",
+			"https://api.test/api/sync",
+			"https://api.test/api/highlights",
+		]);
+		expect(queueIds(storage)).toEqual([]);
 	});
 });

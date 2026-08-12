@@ -33,25 +33,35 @@
  *     entry. 401 (token problem — applies to every entry behind it), 5xx,
  *     and network errors halt the flush with the entry retained, exactly
  *     like sync entries.
+ *   - Browse entries (m19, SPEC §13) → `/api/browse-events`, with EXACTLY
+ *     the highlight rule: telemetry must never wedge the queue ahead of
+ *     bookmark syncs. They also carry a drop-oldest cap (20 entries) applied
+ *     at enqueue time, which never touches sync/highlight entries.
  */
 
 import type {
+	BrowseEvent,
+	BrowseEventInput,
+	BrowseEventsPayload,
+	BrowseOutboxEntry,
 	ExtensionConfig,
 	HighlightOutboxEntry,
 	HighlightPayload,
+	KeyValueStorage,
 	OutboxEntry,
 	SyncBookmark,
 	SyncMode,
 	SyncOutboxEntry,
 	SyncPayload,
 } from "./types";
-import { CONFIG_KEY, DEFAULT_BASE_URL, OUTBOX_KEY } from "./types";
+import {
+	BROWSE_OUTBOX_ENTRY_CAP,
+	CONFIG_KEY,
+	DEFAULT_BASE_URL,
+	OUTBOX_KEY,
+} from "./types";
 
-/** Minimal async key/value storage (chrome.storage.local in production). */
-export interface KeyValueStorage {
-	get(key: string): Promise<unknown>;
-	set(key: string, value: unknown): Promise<void>;
-}
+export type { KeyValueStorage } from "./types";
 
 /** The only bits of a Response the outbox looks at. */
 export interface MinimalResponse {
@@ -77,6 +87,13 @@ export interface Outbox {
 	/** Append an entry to the tail of the queue and persist. */
 	enqueue(entry: OutboxEntry): Promise<void>;
 	/**
+	 * Append `browse` entries (m19) and enforce the telemetry backlog cap:
+	 * beyond BROWSE_OUTBOX_ENTRY_CAP browse entries the OLDEST browse ones
+	 * are dropped. Sync and highlight entries — and their relative order —
+	 * are never touched (SPEC §13).
+	 */
+	enqueueBrowse(entries: BrowseOutboxEntry[]): Promise<void>;
+	/**
 	 * Drain the queue FIFO: POST each entry to its endpoint by kind, deleting
 	 * it from storage on 2xx; stop or drop-and-continue on failure per the
 	 * header comment. No-op when unconfigured (missing token) or when a flush
@@ -99,6 +116,55 @@ export function createHighlightEntry(
 	text: string,
 ): HighlightOutboxEntry {
 	return { id: crypto.randomUUID(), kind: "highlight", url, text };
+}
+
+/** Build a new browse outbox entry with a fresh unique id (m19). */
+export function createBrowseEntry(events: BrowseEvent[]): BrowseOutboxEntry {
+	return { id: crypto.randomUUID(), kind: "browse", events };
+}
+
+/**
+ * Serialize a buffered event to its `/api/browse-events` wire shape
+ * (SPEC §8/§13): the buffer's `id` IS the server's `clientEventId`, the
+ * outbox entry id is never sent, and fields that don't apply to the kind are
+ * OMITTED entirely (the server rejects undeclared fields).
+ */
+export function toBrowseEventInput(event: BrowseEvent): BrowseEventInput {
+	const input: BrowseEventInput = {
+		clientEventId: event.id,
+		bootId: event.bootId,
+		kind: event.kind,
+		occurredAtMs: event.occurredAtMs,
+	};
+	if (event.url !== undefined) input.url = event.url;
+	if (event.title !== undefined) input.title = event.title;
+	if (event.tabId !== undefined) input.tabId = event.tabId;
+	if (event.windowId !== undefined) input.windowId = event.windowId;
+	if (event.idleState !== undefined) input.idleState = event.idleState;
+	if (event.transition !== undefined) input.transition = event.transition;
+	if (event.documentLifecycle !== undefined)
+		input.documentLifecycle = event.documentLifecycle;
+	return input;
+}
+
+/**
+ * Apply the browse backlog cap to a queue: keep the newest
+ * BROWSE_OUTBOX_ENTRY_CAP browse entries, dropping older ones. Every
+ * non-browse entry survives in its original relative position — a halted
+ * flush must degrade telemetry, never bookmark capture (SPEC §13).
+ */
+function capBrowseEntries(queue: OutboxEntry[]): OutboxEntry[] {
+	const browseCount = queue.reduce(
+		(count, entry) => (entry.kind === "browse" ? count + 1 : count),
+		0,
+	);
+	let toDrop = browseCount - BROWSE_OUTBOX_ENTRY_CAP;
+	if (toDrop <= 0) return queue;
+	return queue.filter((entry) => {
+		if (entry.kind !== "browse" || toDrop <= 0) return true;
+		toDrop -= 1;
+		return false;
+	});
 }
 
 export function createOutbox(deps: OutboxDeps): Outbox {
@@ -127,6 +193,13 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 		await storage.set(OUTBOX_KEY, queue);
 	};
 
+	const enqueueBrowse = async (entries: BrowseOutboxEntry[]): Promise<void> => {
+		if (entries.length === 0) return;
+		const queue = await readQueue();
+		queue.push(...entries);
+		await storage.set(OUTBOX_KEY, capBrowseEntries(queue));
+	};
+
 	const flush = async (): Promise<void> => {
 		if (flushing) return;
 		flushing = true;
@@ -147,15 +220,21 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 				const entry = queue[0];
 				if (entry === undefined) return;
 
-				// Route by kind. Anything without `kind: "highlight"` — including
-				// legacy entries persisted before the field existed — is sync.
-				const isHighlight = entry.kind === "highlight";
+				// Route by kind. Anything without `kind: "highlight"` / `"browse"`
+				// — including legacy entries persisted before the field existed —
+				// is sync.
+				const droppable = entry.kind === "highlight" || entry.kind === "browse";
 				let endpoint: string;
-				let payload: SyncPayload | HighlightPayload;
+				let payload: SyncPayload | HighlightPayload | BrowseEventsPayload;
 				if (entry.kind === "highlight") {
 					endpoint = `${baseUrl}/api/highlights`;
 					// Body is exactly SPEC §8 — no outbox id, no kind.
 					payload = { url: entry.url, text: entry.text };
+				} else if (entry.kind === "browse") {
+					endpoint = `${baseUrl}/api/browse-events`;
+					// Body is exactly SPEC §8/§13 — the buffered `id` becomes
+					// `clientEventId`; no outbox id, no kind.
+					payload = { events: entry.events.map(toBrowseEventInput) };
 				} else {
 					endpoint = `${baseUrl}/api/sync`;
 					payload = { mode: entry.mode, bookmarks: entry.bookmarks };
@@ -176,11 +255,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 					return;
 				}
 				if (!response.ok) {
-					// Poison rule (highlight entries ONLY, SPEC §6): a definitive
-					// 4xx other than 401 will never succeed — drop the entry,
-					// persist the drop, and continue with the rest of the queue.
+					// Poison rule (highlight + browse entries ONLY, SPEC §6/§13):
+					// a definitive 4xx other than 401 will never succeed — drop the
+					// entry, persist the drop, and continue with the rest of the
+					// queue.
 					if (
-						isHighlight &&
+						droppable &&
 						response.status !== 401 &&
 						response.status >= 400 &&
 						response.status < 500
@@ -189,7 +269,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 						await storage.set(OUTBOX_KEY, rest);
 						continue;
 					}
-					// Everything else (sync failures, highlight 401/5xx): stop,
+					// Everything else (sync failures, highlight/browse 401/5xx): stop,
 					// keep this entry and everything after it — retry later.
 					return;
 				}
@@ -203,5 +283,5 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 		}
 	};
 
-	return { enqueue, flush };
+	return { enqueue, enqueueBrowse, flush };
 }

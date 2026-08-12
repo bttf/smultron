@@ -20,6 +20,10 @@ export default defineConfig({
 		// stance and accepts Chrome's "read your browsing history" install
 		// warning (SPEC §6 records the trade-off). activeTab stays for the
 		// popup's own url/title read.
+		// m19 adds "idle" + "webNavigation" for browse-event capture (SPEC §13).
+		// Deliberately NOT "history": the backfill that would use it is RED-93,
+		// its install warning escalates over "tabs"', and an unused permission
+		// is contrary to least-privilege (SPEC §6).
 		permissions: [
 			"bookmarks",
 			"storage",
@@ -27,6 +31,8 @@ export default defineConfig({
 			"contextMenus",
 			"activeTab",
 			"tabs",
+			"idle",
+			"webNavigation",
 		],
 		host_permissions: [
 			"http://localhost:3000/*",
