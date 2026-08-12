@@ -180,8 +180,16 @@ export const BROWSE_TITLE_LIMIT = 4_096;
 export const BROWSE_TRANSITION_LIMIT = 256;
 export const BROWSE_DOCUMENT_LIFECYCLE_LIMIT = 64;
 
-/** Max representable JS Date, the server's `occurredAtMs` upper bound (§13). */
-export const MAX_TIMESTAMP_MS = 8_640_000_000_000_000;
+/**
+ * The server's `occurredAtMs` upper bound (SPEC §13): the last millisecond of
+ * year 9999. Deliberately NOT the max representable JS Date
+ * (8_640_000_000_000_000) — from year 10000 on, `toISOString()` emits
+ * expanded-year form Postgres rejects, so the server 400s anything above this
+ * and the outbox poison rule would drop the whole batch. MUST stay equal to
+ * `MAX_OCCURRED_AT_MS` in web's browseEvents.ts (pinned by
+ * web/src/lib/browseEventsWire.test.ts).
+ */
+export const MAX_TIMESTAMP_MS = 253_402_300_799_999;
 
 /** `chrome.storage.local` keys. */
 export const CONFIG_KEY = "config";

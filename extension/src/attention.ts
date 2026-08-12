@@ -81,24 +81,35 @@ export function parseAttentionToggle(
 // rejects unknown/undeclared fields, and `undefined` survives structuredClone
 // into storage where JSON would have dropped it).
 
-/** Clamp a required string field to the server's §13 bound. */
+/**
+ * Clamp a required string field to the server's §13 bounds: length-capped AND
+ * stripped of NUL (U+0000). Postgres `text` cannot store a NUL, so the
+ * server 400s any field containing one — and a page can put U+0000 into
+ * `document.title` via JS, which `tabs.get` enrichment would pass through.
+ * One such byte would poison-drop a whole ≤500-event batch.
+ */
 function truncate(value: string, limit: number): string {
-	return value.length > limit ? value.slice(0, limit) : value;
+	const clean = value.includes("\u0000")
+		? value.replaceAll("\u0000", "")
+		: value;
+	return clean.length > limit ? clean.slice(0, limit) : clean;
 }
 
 /**
- * An OPTIONAL string field: absent when undefined AND when empty. Chrome
- * hands out `""` for `Tab.url`/`Tab.title` before a tab commits (routine on
- * ⌘T and open-in-new-tab-and-switch), and the server's bounds are `min(1)` —
- * one empty string would 400, and therefore poison-drop, a whole 500-event
- * batch. Empty means "not known", which is exactly an omitted field.
+ * An OPTIONAL string field: absent when undefined AND when empty (after NUL
+ * stripping). Chrome hands out `""` for `Tab.url`/`Tab.title` before a tab
+ * commits (routine on ⌘T and open-in-new-tab-and-switch), and the server's
+ * bounds are `min(1)` — one empty string would 400, and therefore
+ * poison-drop, a whole 500-event batch. Empty means "not known", which is
+ * exactly an omitted field.
  */
 function optionalText(
 	value: string | undefined,
 	limit: number,
 ): string | undefined {
-	if (value === undefined || value === "") return undefined;
-	return truncate(value, limit);
+	if (value === undefined) return undefined;
+	const clean = truncate(value, limit);
+	return clean === "" ? undefined : clean;
 }
 
 /**
