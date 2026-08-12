@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createEventFactory } from "./attention";
 import {
 	createBrowseEntry,
 	createEntry,
@@ -63,6 +64,12 @@ function highlight(id: string): HighlightOutboxEntry {
 		url: `https://example.com/${id}`,
 		text: `Highlight ${id}`,
 	};
+}
+
+/** Deterministic uuids for factory-built wire assertions. */
+function counterUuid(prefix: string): () => string {
+	let n = 0;
+	return () => `${prefix}-${++n}`;
 }
 
 function browseEvent(
@@ -632,6 +639,48 @@ describe("browse flush routing + poison rule (SPEC §13)", () => {
 		});
 		expect(init?.body).not.toContain('"id"');
 		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("never puts an empty pre-commit url/title on the wire", async () => {
+		// End to end: factory-built events from a tab Chrome hasn't committed
+		// yet must not carry `url`/`title` keys (server bound is min(1) — one
+		// empty string 400s, and poison-drops, the whole batch).
+		const factory = createEventFactory({
+			uuid: counterUuid("evt"),
+			now: () => 1_700_000_000_000,
+		});
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [
+				browse("b", [
+					factory.tabActivated({
+						bootId: "boot-1",
+						tabId: 1,
+						windowId: 2,
+						url: "",
+						title: "",
+					}),
+				]),
+			],
+		});
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+
+		const body = fetchFn.mock.calls[0]?.[1].body ?? "";
+		expect(body).not.toContain('"url"');
+		expect(body).not.toContain('"title"');
+		expect(JSON.parse(body)).toEqual({
+			events: [
+				{
+					clientEventId: "evt-1",
+					bootId: "boot-1",
+					kind: "tab_activated",
+					occurredAtMs: 1_700_000_000_000,
+					tabId: 1,
+					windowId: 2,
+				},
+			],
+		});
 	});
 
 	it("drops a browse entry on a definitive 4xx and CONTINUES the flush", async () => {

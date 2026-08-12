@@ -265,6 +265,9 @@ function renderUnsupported(): void {
 
 function renderUnpaired(): void {
 	setHeaderStatus("none");
+	// The attention section belongs to PAIRED states only — a 401 mid-session
+	// (revoked token) lands here with the section already mounted (SPEC §13).
+	hideAttention();
 	const message = el("div", "message", "Not paired — open settings to pair.");
 	const button = el("button", "btn-accent", "Open settings");
 	button.type = "button";
@@ -729,6 +732,11 @@ const attentionToggleEl = mustGet<HTMLButtonElement>("#attention-toggle");
 const attentionGradeEl = mustGet<HTMLDivElement>("#attention-grade");
 
 let attentionMounted = false;
+
+/** Unpaired states hide the section (it may already be mounted on a 401). */
+function hideAttention(): void {
+	attentionEl.classList.add("hidden");
+}
 
 async function mountAttention(): Promise<void> {
 	if (attentionMounted) return;

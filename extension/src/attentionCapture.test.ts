@@ -279,11 +279,26 @@ describe("toggle reactions", () => {
 		expect(h.flush).toHaveBeenCalledTimes(1);
 	});
 
-	it("disable with no session records nothing but still drains", async () => {
+	it("disable with no session records nothing and flushes nothing", async () => {
 		const h = harness({ enabled: false });
 		await h.capture.handleToggleChange({ enabled: true }, { enabled: false });
 		expect(h.all()).toEqual([]);
-		expect(h.flush).toHaveBeenCalledTimes(1);
+		// Nothing drained → no flush (the retry cadence stays the outbox's).
+		expect(h.flush).not.toHaveBeenCalled();
+	});
+
+	it("clears the bootId at the disable edge, so a raced event opens a NEW boot", async () => {
+		const h = harness({ enabled: false, bootId: "boot-live" });
+		await h.capture.handleToggleChange({ enabled: true }, { enabled: false });
+		expect(h.sessionStorage.data[BOOT_ID_KEY]).toBe("");
+
+		// A listener that got past the gate before the toggle landed must not
+		// record under the stopped boot, after its own capture_stop.
+		const raced = harness({ enabled: true, bootId: "" });
+		await raced.capture.recordWindowBlur();
+		const kinds = raced.all();
+		expect(kinds.map((e) => e.kind)).toEqual(["capture_start", "window_blur"]);
+		expect(kinds.every((e) => e.bootId === "boot-1")).toBe(true);
 	});
 
 	it("a re-enable after a disable mints ANOTHER fresh bootId", async () => {
@@ -365,6 +380,26 @@ describe("recording", () => {
 		expect(event !== undefined && "title" in event).toBe(false);
 	});
 
+	it("omits Chrome's empty pre-commit url/title from enrichment and the baseline", async () => {
+		const h = harness({ enabled: true, bootId: "boot-live" });
+		// A tab opened with ⌘T reports url "" and title "" until it commits.
+		h.getTab.mockResolvedValue({ tabId: 4, url: "", title: "" });
+		await h.capture.recordTabActivated({ tabId: 4, windowId: 7 });
+		const activated = h.all()[0];
+		expect(activated).toMatchObject({ kind: "tab_activated", tabId: 4 });
+		expect(activated !== undefined && "url" in activated).toBe(false);
+		expect(activated !== undefined && "title" in activated).toBe(false);
+
+		const baseline = harness({
+			enabled: true,
+			baselineTarget: { tabId: 1, windowId: 1, url: "", title: "" },
+		});
+		await baseline.capture.recordWindowBlur();
+		const synthetic = baseline.all()[1];
+		expect(synthetic?.kind).toBe("tab_activated");
+		expect(synthetic !== undefined && "url" in synthetic).toBe(false);
+	});
+
 	it("window_focus enriches with that window's active tab; blur carries nothing", async () => {
 		const h = harness({ enabled: true, bootId: "boot-live" });
 		h.getActiveTabInWindow.mockResolvedValue({
@@ -422,5 +457,13 @@ describe("drain triggers", () => {
 		await h.capture.drainAndFlush();
 		expect(h.enqueued.flatMap((e) => e.events)).toHaveLength(1);
 		expect(h.flush).toHaveBeenCalledTimes(1);
+	});
+
+	it("the drain alarm does NOT flush on an empty buffer", async () => {
+		// Otherwise the 1-minute drain silently becomes a 1-minute retry for a
+		// halted queue, overriding the outbox's designed 5-minute cadence.
+		const h = harness({ enabled: true, bootId: "boot-live" });
+		await h.capture.drainAndFlush();
+		expect(h.flush).not.toHaveBeenCalled();
 	});
 });

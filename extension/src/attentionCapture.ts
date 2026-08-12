@@ -112,7 +112,11 @@ export function createAttentionCapture(
 	let sessionPromise: Promise<string> | undefined;
 
 	const drainAndFlush = async (): Promise<void> => {
-		await buffer.drain();
+		const drained = await buffer.drain();
+		// Nothing to ship: the minute-by-minute drain alarm must NOT double as a
+		// flush alarm, or a halted queue (broken pairing, offline) would retry
+		// every minute instead of the designed 5 (SPEC §6).
+		if (drained === 0) return;
 		await flush();
 	};
 
@@ -219,6 +223,10 @@ export function createAttentionCapture(
 				if (bootId !== undefined) {
 					await push(events.captureStop({ bootId }));
 				}
+				// Drop the session id too: a listener that raced past the gate
+				// before the toggle landed would otherwise record UNDER the
+				// stopped boot, after its own capture_stop.
+				await session.clear();
 				sessionPromise = undefined;
 			}
 			// Ship promptly either way: the start edge shouldn't wait a minute for

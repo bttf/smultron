@@ -81,10 +81,24 @@ export function parseAttentionToggle(
 // rejects unknown/undeclared fields, and `undefined` survives structuredClone
 // into storage where JSON would have dropped it).
 
-/** Clamp a string field to the server's §13 bound (undefined passes through). */
-function clamp(value: string | undefined, limit: number): string | undefined {
-	if (value === undefined) return undefined;
+/** Clamp a required string field to the server's §13 bound. */
+function truncate(value: string, limit: number): string {
 	return value.length > limit ? value.slice(0, limit) : value;
+}
+
+/**
+ * An OPTIONAL string field: absent when undefined AND when empty. Chrome
+ * hands out `""` for `Tab.url`/`Tab.title` before a tab commits (routine on
+ * ⌘T and open-in-new-tab-and-switch), and the server's bounds are `min(1)` —
+ * one empty string would 400, and therefore poison-drop, a whole 500-event
+ * batch. Empty means "not known", which is exactly an omitted field.
+ */
+function optionalText(
+	value: string | undefined,
+	limit: number,
+): string | undefined {
+	if (value === undefined || value === "") return undefined;
+	return truncate(value, limit);
 }
 
 /**
@@ -109,6 +123,25 @@ export function formatTransition(
 ): string | undefined {
 	if (transitionType === undefined || transitionType === "") return undefined;
 	return [transitionType, ...(transitionQualifiers ?? [])].join("|");
+}
+
+/**
+ * Is this `webNavigation` commit the tab's MAIN frame (SPEC §13)?
+ *
+ * `frameId === 0` alone is wrong: a **prerendered** outermost frame commits
+ * with a NONZERO frameId (which is why Chrome 106 added `frameType` /
+ * `documentLifecycle`), and activation fires no second `onCommitted` — so
+ * filtering on frameId drops the prerendered page's ONLY nav edge, the exact
+ * loss §13's documentLifecycle clause exists to prevent. Prefer `frameType`
+ * and fall back to `frameId` only when Chrome didn't supply it.
+ */
+export function isMainFrameNavigation(details: {
+	frameId: number;
+	frameType?: string;
+}): boolean {
+	if (details.frameType !== undefined)
+		return details.frameType === "outermost_frame";
+	return details.frameId === 0;
 }
 
 interface BaseInput {
@@ -174,11 +207,14 @@ export function createEventFactory(deps: EventFactoryDeps): BrowseEventFactory {
 			// Required by §13; no `title` — at commit time the tab still has the
 			// PREVIOUS page's title.
 			event.tabId = input.tabId;
-			event.url = clamp(input.url, BROWSE_URL_LIMIT) ?? input.url;
+			event.url = truncate(input.url, BROWSE_URL_LIMIT);
 			if (input.windowId !== undefined) event.windowId = input.windowId;
-			const transition = clamp(input.transition, BROWSE_TRANSITION_LIMIT);
+			const transition = optionalText(
+				input.transition,
+				BROWSE_TRANSITION_LIMIT,
+			);
 			if (transition !== undefined) event.transition = transition;
-			const lifecycle = clamp(
+			const lifecycle = optionalText(
 				input.documentLifecycle,
 				BROWSE_DOCUMENT_LIFECYCLE_LIMIT,
 			);
@@ -193,9 +229,9 @@ export function createEventFactory(deps: EventFactoryDeps): BrowseEventFactory {
 			// windowId is REQUIRED: without it a slicer can't tell whether the
 			// activation happened in the focused window (§13).
 			event.windowId = input.windowId;
-			const url = clamp(input.url, BROWSE_URL_LIMIT);
+			const url = optionalText(input.url, BROWSE_URL_LIMIT);
 			if (url !== undefined) event.url = url;
-			const title = clamp(input.title, BROWSE_TITLE_LIMIT);
+			const title = optionalText(input.title, BROWSE_TITLE_LIMIT);
 			if (title !== undefined) event.title = title;
 			return event;
 		},
@@ -203,9 +239,9 @@ export function createEventFactory(deps: EventFactoryDeps): BrowseEventFactory {
 			const event = base("window_focus", input);
 			event.windowId = input.windowId;
 			if (input.tabId !== undefined) event.tabId = input.tabId;
-			const url = clamp(input.url, BROWSE_URL_LIMIT);
+			const url = optionalText(input.url, BROWSE_URL_LIMIT);
 			if (url !== undefined) event.url = url;
-			const title = clamp(input.title, BROWSE_TITLE_LIMIT);
+			const title = optionalText(input.title, BROWSE_TITLE_LIMIT);
 			if (title !== undefined) event.title = title;
 			return event;
 		},
@@ -240,6 +276,13 @@ export interface CaptureSession {
 	ensure(): Promise<{ bootId: string; minted: boolean }>;
 	/** Toggle-enable path: ALWAYS a fresh session, replacing any stored id. */
 	restart(): Promise<string>;
+	/**
+	 * End the session (the disable edge, after `capture_stop`). A listener
+	 * that raced past the gate must not then record under the stopped boot's
+	 * id: with the id gone, such an event opens a NEW session instead of
+	 * landing after its own `capture_stop`.
+	 */
+	clear(): Promise<void>;
 }
 
 export interface CaptureSessionDeps {
@@ -269,6 +312,11 @@ export function createCaptureSession(deps: CaptureSessionDeps): CaptureSession {
 			const bootId = uuid();
 			await sessionStorage.set(BOOT_ID_KEY, bootId);
 			return bootId;
+		},
+		// "" rather than a removal: KeyValueStorage is get/set only, and
+		// `current()` already reads an empty value as "no session".
+		clear: async () => {
+			await sessionStorage.set(BOOT_ID_KEY, "");
 		},
 	};
 }

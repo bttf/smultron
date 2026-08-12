@@ -5,6 +5,7 @@ import {
 	createEventFactory,
 	formatTransition,
 	isCaptureEnabled,
+	isMainFrameNavigation,
 	parseAttentionToggle,
 	shouldDrainAfterAppend,
 } from "./attention";
@@ -104,6 +105,40 @@ describe("formatTransition", () => {
 		expect(formatTransition("link", undefined)).toBe("link");
 		expect(formatTransition(undefined, ["forward_back"])).toBeUndefined();
 		expect(formatTransition("", ["forward_back"])).toBeUndefined();
+	});
+});
+
+describe("isMainFrameNavigation", () => {
+	it("keeps the active main frame", () => {
+		expect(
+			isMainFrameNavigation({ frameId: 0, frameType: "outermost_frame" }),
+		).toBe(true);
+	});
+
+	it("KEEPS a prerendered main frame despite its nonzero frameId", () => {
+		// Chrome 106+: prerendered outermost frames don't get frameId 0, and
+		// activation fires no second onCommitted — dropping this loses the
+		// page's only nav edge (SPEC §13).
+		expect(
+			isMainFrameNavigation({ frameId: 42, frameType: "outermost_frame" }),
+		).toBe(true);
+	});
+
+	it("drops subframes and fenced frames", () => {
+		expect(isMainFrameNavigation({ frameId: 7, frameType: "sub_frame" })).toBe(
+			false,
+		);
+		expect(isMainFrameNavigation({ frameId: 0, frameType: "sub_frame" })).toBe(
+			false,
+		);
+		expect(
+			isMainFrameNavigation({ frameId: 9, frameType: "fenced_frame" }),
+		).toBe(false);
+	});
+
+	it("falls back to frameId when the event carries no frameType", () => {
+		expect(isMainFrameNavigation({ frameId: 0 })).toBe(true);
+		expect(isMainFrameNavigation({ frameId: 3 })).toBe(false);
 	});
 });
 
@@ -261,6 +296,40 @@ describe("event constructors", () => {
 		expect(activated.title).toHaveLength(BROWSE_TITLE_LIMIT);
 	});
 
+	it("OMITS empty-string url/title — Chrome's pre-commit tab fields", () => {
+		// `Tab.url`/`Tab.title` are "" on a just-opened tab; the server's bounds
+		// are min(1), so a passed-through "" would 400 the whole batch.
+		const activated = events.tabActivated({
+			bootId: "boot",
+			tabId: 1,
+			windowId: 2,
+			url: "",
+			title: "",
+		});
+		expect("url" in activated).toBe(false);
+		expect("title" in activated).toBe(false);
+
+		const focus = events.windowFocus({
+			bootId: "boot",
+			windowId: 2,
+			tabId: 1,
+			url: "",
+			title: "",
+		});
+		expect("url" in focus).toBe(false);
+		expect("title" in focus).toBe(false);
+
+		const nav = events.nav({
+			bootId: "boot",
+			tabId: 1,
+			url: "https://a.test/",
+			transition: "",
+			documentLifecycle: "",
+		});
+		expect("transition" in nav).toBe(false);
+		expect("documentLifecycle" in nav).toBe(false);
+	});
+
 	it("mints a unique id per event", () => {
 		const a = events.windowBlur({ bootId: "boot" });
 		const b = events.windowBlur({ bootId: "boot" });
@@ -299,6 +368,17 @@ describe("createCaptureSession", () => {
 		expect(await session.restart()).toBe("boot-1");
 		expect(sessionStorage.data[BOOT_ID_KEY]).toBe("boot-1");
 		expect(await session.current()).toBe("boot-1");
+	});
+
+	it("clear() ends the session so the next event opens a new one", async () => {
+		const sessionStorage = fakeStorage({ [BOOT_ID_KEY]: "boot-live" });
+		const session = createCaptureSession({
+			sessionStorage,
+			uuid: counterUuid("boot"),
+		});
+		await session.clear();
+		expect(await session.current()).toBeUndefined();
+		expect(await session.ensure()).toEqual({ bootId: "boot-1", minted: true });
 	});
 
 	it("current() ignores a missing or malformed stored value", async () => {

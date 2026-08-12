@@ -4,6 +4,7 @@ import {
 	createEventFactory,
 	formatTransition,
 	isCaptureEnabled,
+	isMainFrameNavigation,
 } from "@/src/attention";
 import {
 	type BaselineTarget,
@@ -493,6 +494,7 @@ function capture(work: Promise<void>): void {
 /** The shape both webNavigation events provide (main-frame commits, §13). */
 interface NavDetails {
 	frameId: number;
+	frameType?: string;
 	tabId: number;
 	url: string;
 	timeStamp: number;
@@ -502,8 +504,9 @@ interface NavDetails {
 }
 
 function handleNavigation(details: NavDetails): void {
-	// Main frame only: subframe commits aren't the user's attention target.
-	if (details.frameId !== 0) return;
+	// Main frame only (subframe commits aren't the user's attention target) —
+	// by frameType, since prerendered main frames have a nonzero frameId (§13).
+	if (!isMainFrameNavigation(details)) return;
 	capture(
 		attention.recordNav({
 			tabId: details.tabId,
