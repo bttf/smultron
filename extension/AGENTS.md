@@ -13,6 +13,7 @@ Vanilla TS only — no UI framework anywhere (root AGENTS.md). Read `docs/SPEC.m
 -   **Payload** (`src/types.ts`) mirrors SPEC §8 exactly: raw URLs, Chrome `dateAdded` ms as-is — never normalize client-side (Hard rule #3).
 -   MV3: register every listener synchronously at the top level of `defineBackground` — no awaits before `addListener`, or Chrome won't re-deliver events after worker death.
 -   `onChanged`/`onMoved`/`onRemoved` are intentionally not listened to (SPEC §5).
+-   **Browse-event capture (m19, SPEC §13)**: listeners register top-level but gate INSIDE the handler on the `attention` storage key (missing = disabled; off = zero capture). Buffer appends are serialized through an in-worker promise-chain mutex (pure helper in `src/`); drain moves ≤500 events per outbox `browse` entry. `browse` entries route to `/api/browse-events` with the highlight-style poison rule — telemetry must never wedge the queue ahead of bookmark syncs.
 
 ## Build
 
