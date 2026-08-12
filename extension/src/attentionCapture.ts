@@ -164,8 +164,14 @@ export function createAttentionCapture(
 	};
 
 	return {
-		recordNav: (observation) =>
-			record((bootId) =>
+		recordNav: (observation) => {
+			// Defensive: `url` is REQUIRED for nav (§13) with a server bound of
+			// min(1), so an empty url would 400 — and poison-drop — the whole
+			// batch it rides in. webNavigation always supplies a url in practice;
+			// if one ever arrives empty, skipping the event beats certain loss of
+			// up to 500 neighbors.
+			if (observation.url === "") return Promise.resolve();
+			return record((bootId) =>
 				events.nav({
 					bootId,
 					tabId: observation.tabId,
@@ -174,7 +180,8 @@ export function createAttentionCapture(
 					transition: observation.transition,
 					documentLifecycle: observation.documentLifecycle,
 				}),
-			),
+			);
+		},
 
 		recordTabActivated: ({ tabId, windowId }) =>
 			record(async (bootId) => {

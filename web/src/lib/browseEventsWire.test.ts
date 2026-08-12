@@ -32,7 +32,10 @@ import type {
 	BrowseEvent as ExtensionBrowseEvent,
 	KeyValueStorage,
 } from "../../../extension/src/types";
-import { BROWSE_BATCH_LIMIT } from "../../../extension/src/types";
+import {
+	BROWSE_BATCH_LIMIT,
+	MAX_TIMESTAMP_MS,
+} from "../../../extension/src/types";
 import * as schema from "../db/schema";
 import { BROWSE_EVENT_KINDS } from "../db/schema";
 import {
@@ -300,16 +303,14 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 		}
 	});
 
-	// CONFIRMED DEFECT (m19 hardening pass) — poison-drop data loss.
-	// `MAX_TIMESTAMP_MS` in extension/src/types.ts is 8_640_000_000_000_000
-	// (max representable JS Date), but the server's bound is
-	// 253_402_300_799_999 (last ms of year 9999 — SPEC §13 records the
-	// corrected number and WHY the old one was unsound). `normalizeTimestamp`
-	// therefore clamps an absurd clock to a value the server 400s, and the
-	// outbox poison rule then drops the WHOLE ≤500-event batch. Fix: set the
-	// extension constant to the server's 253_402_300_799_999. Skipped so the
-	// suite stays green; unskip once the constant is corrected.
-	it.skip("clamps a far-future occurredAtMs to a value the server accepts", async () => {
+	// Regression (found by this hardening pass): the extension's
+	// MAX_TIMESTAMP_MS used to be 8_640_000_000_000_000 (max representable JS
+	// Date), but the server's bound is 253_402_300_799_999 (last ms of year
+	// 9999 — SPEC §13 records why the JS-max value was unsound), so
+	// `normalizeTimestamp` clamped an absurd clock to a value the server 400s
+	// and the poison rule dropped the whole ≤500-event batch. The constants
+	// must stay equal.
+	it("clamps a far-future occurredAtMs to a value the server accepts", async () => {
 		const uuid = uuidSeq();
 		const factory = createEventFactory({ uuid, now: () => 1_754_900_000_000 });
 		const bootId = uuid();
@@ -324,18 +325,24 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 		const parsed = browseEventsBodySchema.safeParse(body);
 		expect(parsed.error).toBeUndefined();
 		expect(parsed.success).toBe(true);
+		if (!parsed.success) return;
+		// Clamped to the SERVER's bound (last ms of year 9999), and the row
+		// really inserts — the whole point of the corrected bound is that
+		// toISOString() output stays Postgres-parseable.
+		expect(parsed.data.events[0]?.occurredAtMs).toBe(253_402_300_799_999);
+		const result = await applyBrowseEvents(db, USER, parsed.data.events);
+		expect(result).toEqual({ inserted: 1, deduped: 0 });
 	});
 
-	// CONFIRMED DEFECT (m19 hardening pass) — poison-drop data loss.
-	// The server rejects any free-text field containing a NUL byte (Postgres
-	// `text` cannot store one — SPEC §13), but the extension's factory passes
-	// tab titles through verbatim. A page can put U+0000 into `document.title`
-	// via JS, tabs.get returns it, and the resulting batch 400s → the poison
-	// rule drops all ≤500 events in it. (Raw NUL can't reach `url` — Chrome
-	// serializes URLs with percent-encoding — so `title` is the live path.)
-	// Fix: strip NUL in the factory's text handling. Skipped so the suite stays
-	// green; unskip once the factory sanitizes.
-	it.skip("a NUL byte in an enriched tab title cannot poison the batch", async () => {
+	// Regression (found by this hardening pass): the server rejects any
+	// free-text field containing a NUL byte (Postgres `text` cannot store one
+	// — SPEC §13), and the factory used to pass tab titles through verbatim. A
+	// page can put U+0000 into `document.title` via JS, tabs.get returns it,
+	// and an unsanitized title would 400 — and poison-drop — the whole batch.
+	// (Raw NUL can't reach `url` — Chrome serializes URLs with
+	// percent-encoding — so `title` is the live path.) The factory now strips
+	// NUL from every free-text field.
+	it("a NUL byte in an enriched tab title cannot poison the batch", async () => {
 		const uuid = uuidSeq();
 		const factory = createEventFactory({ uuid, now: () => 1_754_900_000_000 });
 		const bootId = uuid();
@@ -351,6 +358,10 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 		const parsed = browseEventsBodySchema.safeParse(body);
 		expect(parsed.error).toBeUndefined();
 		expect(parsed.success).toBe(true);
+		if (!parsed.success) return;
+		expect(parsed.data.events[0]?.title).toBe("beforeafter");
+		const result = await applyBrowseEvents(db, USER, parsed.data.events);
+		expect(result).toEqual({ inserted: 1, deduped: 0 });
 	});
 });
 
@@ -364,5 +375,13 @@ describe("cross-surface constants stay pinned", () => {
 
 	it("the extension's batch limit equals the server's per-request cap", () => {
 		expect(BROWSE_BATCH_LIMIT).toBe(MAX_EVENTS_PER_BATCH);
+	});
+
+	it("the extension's timestamp clamp equals the server's occurredAtMs bound", () => {
+		// SPEC §13's corrected bound: last ms of year 9999. The server's
+		// MAX_OCCURRED_AT_MS is module-private, so pin the literal here; the
+		// clamp regression test above proves the schema accepts exactly this
+		// value.
+		expect(MAX_TIMESTAMP_MS).toBe(253_402_300_799_999);
 	});
 });

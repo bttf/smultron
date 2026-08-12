@@ -349,6 +349,18 @@ describe("recording", () => {
 		});
 	});
 
+	it("skips a nav with an empty url entirely — never on the wire, no session side effects", async () => {
+		// Defensive: `url` is required for nav with a server bound of min(1),
+		// so an empty url would 400 — and poison-drop — its whole batch.
+		// webNavigation always supplies a url in practice; if one ever arrives
+		// empty, the event is skipped before the gate (no session minted, no
+		// capture_start emitted for it).
+		const h = harness({ enabled: true });
+		await h.capture.recordNav({ tabId: 12, url: "" });
+		expect(h.all()).toEqual([]);
+		expect(h.sessionStorage.data).toEqual({});
+	});
+
 	it("tab_activated enriches via tabs.get", async () => {
 		const h = harness({ enabled: true, bootId: "boot-live" });
 		h.getTab.mockResolvedValue({
