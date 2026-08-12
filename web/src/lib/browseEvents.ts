@@ -49,14 +49,46 @@ export type BrowseEventsDb = PgDatabase<PgQueryResultHKT, any, any>;
 /** SPEC §8: max 500 events per batch. */
 export const MAX_EVENTS_PER_BATCH = 500;
 
-/** Max representable JS Date timestamp — same bound as /api/sync's dateAddedMs. */
-const MAX_DATE_MS = 8_640_000_000_000_000;
+/**
+ * Last millisecond of year 9999 — NOT the max representable JS Date. Anything
+ * from year 10000 on serializes via `Date#toISOString()` into ISO expanded-year
+ * form (`+010000-01-01T…`), which Postgres rejects: a value that passed Zod
+ * would then die at INSERT as a 5xx, and the outbox would retry that batch
+ * forever. This is deliberately TIGHTER than /api/sync's `dateAddedMs` bound
+ * (SPEC §13 records the corrected number).
+ */
+const MAX_OCCURRED_AT_MS = 253_402_300_799_999;
+
+/**
+ * Whether a JS epoch-ms value round-trips through `toISOString()` into a
+ * timestamp Postgres can parse — i.e. a real number inside `[0, year 9999]`.
+ * Shared by the write bound and the cursor decoder.
+ */
+function isPgRepresentableMs(ms: number): boolean {
+	return Number.isFinite(ms) && ms >= 0 && ms <= MAX_OCCURRED_AT_MS;
+}
 
 // Postgres `integer` range: anything outside it would be a DB error, not a 400.
 const INT32_MIN = -2_147_483_648;
 const INT32_MAX = 2_147_483_647;
 
 const int32 = z.number().int().min(INT32_MIN).max(INT32_MAX);
+
+/**
+ * A free-text field bound for a Postgres `text` column: length-capped AND free
+ * of NUL (`\u0000`), which `text` cannot store at all. A NUL that slipped past
+ * Zod would raise "unsupported Unicode escape sequence" at INSERT — the same
+ * retry-forever 5xx the rest of these bounds exist to prevent.
+ */
+function pgSafeText(max: number, min = 0) {
+	return z
+		.string()
+		.min(min)
+		.max(max)
+		.refine((value) => !value.includes("\u0000"), {
+			message: "must not contain a null byte",
+		});
+}
 
 /**
  * The kind-dependent fields (SPEC §13 event table). Everything NOT listed for
@@ -105,14 +137,14 @@ const eventShape = z.strictObject({
 	// The capture session (SPEC §13) this event belongs to.
 	bootId: z.uuid(),
 	kind: z.enum(BROWSE_EVENT_KINDS),
-	occurredAtMs: z.number().int().min(0).max(MAX_DATE_MS),
-	url: z.string().min(1).max(8192).optional(),
-	title: z.string().max(4096).optional(),
+	occurredAtMs: z.number().int().min(0).max(MAX_OCCURRED_AT_MS),
+	url: pgSafeText(8192, 1).optional(),
+	title: pgSafeText(4096).optional(),
 	tabId: int32.optional(),
 	windowId: int32.optional(),
 	idleState: z.enum(IDLE_STATES).optional(),
-	transition: z.string().max(256).optional(),
-	documentLifecycle: z.string().max(64).optional(),
+	transition: pgSafeText(256).optional(),
+	documentLifecycle: pgSafeText(64).optional(),
 });
 
 /**
@@ -261,7 +293,13 @@ function decodeCursor(raw: string): CursorPayload {
 		// overflow int8 or serialize as "1e+19" — both Postgres errors that
 		// would escape the InvalidCursorError → 400 mapping.
 		!Number.isSafeInteger((parsed as CursorPayload).id) ||
-		Number.isNaN(new Date((parsed as CursorPayload).o).getTime())
+		// NaN alone isn't enough: JS parses "+275760-09-13T00:00:00.000Z",
+		// "-000001-01-01T00:00:00.000Z" and "0000" happily, then re-serializes
+		// them into expanded-year ISO form that Postgres REJECTS — a forged
+		// cursor would 500 the GET instead of 400ing. Bound it to the same
+		// [0, year 9999] window the write path enforces (nothing outside it can
+		// be in the table anyway).
+		!isPgRepresentableMs(new Date((parsed as CursorPayload).o).getTime())
 	) {
 		throw new InvalidCursorError();
 	}

@@ -541,6 +541,52 @@ describe("listBrowseEvents", () => {
 			).rejects.toBeInstanceOf(InvalidCursorError);
 		}
 	});
+
+	it("rejects forged cursors whose date JS parses but Postgres cannot", async () => {
+		// These all survive `new Date(o).getTime()` without going NaN, but
+		// re-serialize into ISO expanded-year form ("+275760-…", "-000001-…")
+		// that Postgres refuses — a 500 on the GET instead of a 400 if the
+		// decoder only checked for NaN.
+		const forged = [
+			"+275760-09-13T00:00:00.000Z",
+			"-000001-01-01T00:00:00.000Z",
+			"0000",
+		];
+
+		for (const o of forged) {
+			expect(Number.isNaN(new Date(o).getTime())).toBe(false);
+			const cursor = Buffer.from(JSON.stringify({ o, id: 1 }), "utf8").toString(
+				"base64url",
+			);
+			await expect(
+				listBrowseEvents(db, USER_A, { cursor }),
+			).rejects.toBeInstanceOf(InvalidCursorError);
+		}
+	});
+
+	it("round-trips an event at the maximum allowed occurred_at", async () => {
+		// The schema's upper bound must be a value Postgres actually accepts:
+		// insert it, read it back, and page past it on a cursor.
+		const maxMs = 253_402_300_799_999;
+		await applyBrowseEvents(db, USER_A, [
+			nav(1, { occurredAtMs: maxMs }),
+			nav(2, { occurredAtMs: maxMs }),
+		]);
+
+		const first = await listBrowseEvents(db, USER_A);
+		expect(first.total).toBe(2);
+		expect(first.events[0].occurredAt).toBe(new Date(maxMs).toISOString());
+
+		const cursor = Buffer.from(
+			JSON.stringify({
+				o: new Date(maxMs).toISOString(),
+				id: first.events[0].id,
+			}),
+			"utf8",
+		).toString("base64url");
+		const next = await listBrowseEvents(db, USER_A, { cursor });
+		expect(next.events.map((e) => e.id)).toEqual([first.events[1].id]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -691,15 +737,23 @@ describe("browseEventsBodySchema", () => {
 		).toBe(false);
 	});
 
-	it("bounds occurredAtMs to the representable Date range", () => {
+	it("bounds occurredAtMs to what Postgres can store, not to Date's max", () => {
 		const kind = "window_blur";
 		expect(parseOne({ ...base, kind, occurredAtMs: 0 }).success).toBe(true);
+		// Last ms of year 9999 — the last instant whose toISOString() Postgres
+		// parses. One ms later, JS emits expanded-year form (+010000-…) that
+		// Postgres rejects, so the batch must 400 rather than 500-and-retry.
+		expect(
+			parseOne({ ...base, kind, occurredAtMs: 253_402_300_799_999 }).success,
+		).toBe(true);
+		expect(
+			parseOne({ ...base, kind, occurredAtMs: 253_402_300_800_000 }).success,
+		).toBe(false);
+		expect(parseOne({ ...base, kind, occurredAtMs: -1 }).success).toBe(false);
+		// The max representable JS Date used to pass this schema (SPEC's
+		// original bound) and then died at INSERT.
 		expect(
 			parseOne({ ...base, kind, occurredAtMs: 8_640_000_000_000_000 }).success,
-		).toBe(true);
-		expect(parseOne({ ...base, kind, occurredAtMs: -1 }).success).toBe(false);
-		expect(
-			parseOne({ ...base, kind, occurredAtMs: 8_640_000_000_000_001 }).success,
 		).toBe(false);
 		expect(parseOne({ ...base, kind, occurredAtMs: 1.5 }).success).toBe(false);
 		expect(parseOne({ ...base, kind, occurredAtMs: "1" }).success).toBe(false);
@@ -772,5 +826,64 @@ describe("browseEventsBodySchema", () => {
 		expect(parseOne({ ...base, kind: "idle", idleState: "away" }).success).toBe(
 			false,
 		);
+	});
+
+	it("rejects a NUL byte in every free-text field", () => {
+		// Postgres `text` cannot store 0x00 at all: a NUL that passed Zod would
+		// raise at INSERT, and that 5xx is what wedges the outbox.
+		const NUL = "\u0000";
+
+		expect(
+			parseOne({
+				...base,
+				kind: "nav",
+				tabId: 1,
+				url: `https://a.com/${NUL}`,
+			}).success,
+		).toBe(false);
+		expect(
+			parseOne({
+				...base,
+				kind: "tab_activated",
+				tabId: 1,
+				windowId: 2,
+				title: `A${NUL}B`,
+			}).success,
+		).toBe(false);
+		expect(
+			parseOne({
+				...base,
+				kind: "nav",
+				tabId: 1,
+				url: "https://a.com/",
+				transition: `link${NUL}`,
+			}).success,
+		).toBe(false);
+		expect(
+			parseOne({
+				...base,
+				kind: "nav",
+				tabId: 1,
+				url: "https://a.com/",
+				documentLifecycle: `${NUL}active`,
+			}).success,
+		).toBe(false);
+
+		// A bare NUL, and one hidden mid-batch behind valid events.
+		expect(
+			browseEventsBodySchema.safeParse({
+				events: [
+					{ ...base, kind: "window_blur" },
+					{
+						...base,
+						clientEventId: clientId(2),
+						kind: "tab_activated",
+						tabId: 1,
+						windowId: 2,
+						title: NUL,
+					},
+				],
+			}).success,
+		).toBe(false);
 	});
 });
