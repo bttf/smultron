@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { PairingTokenPanel } from "../../components/pairing";
+import { ThemeSelect } from "../../components/theme-select";
 import { db } from "../../db";
 import { getAuthState } from "../../lib/auth";
 import { signOutAction } from "../../lib/authActions";
@@ -42,6 +43,15 @@ export default async function SettingsPage() {
 							: "no token generated yet"}
 				</p>
 				<PairingTokenPanel hasToken={pairing.hasToken} poll="after-generate" />
+			</section>
+
+			<section className="flex flex-col gap-3">
+				<h2 className="font-medium">Appearance</h2>
+				<p className="text-sm text-muted-foreground">
+					System follows your device's light/dark setting. Pick Light or Dark if
+					your browser forces a scheme of its own.
+				</p>
+				<ThemeSelect />
 			</section>
 
 			<section className="flex flex-col gap-3">
