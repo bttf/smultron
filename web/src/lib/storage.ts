@@ -65,17 +65,58 @@ export function audioObjectPath(
 }
 
 /**
+ * Does a failed create-bucket body say the bucket is already there?
+ *
+ * Supabase Storage does NOT reliably put that on the HTTP status: creating a
+ * duplicate bucket comes back as `400` with the real code buried in the JSON
+ * (`{"statusCode":"409","error":"Duplicate","code":"BucketAlreadyExists"}`).
+ * So the body is the source of truth, and every field it might carry the
+ * signal in gets checked.
+ */
+function saysAlreadyExists(body: string): boolean {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(body);
+	} catch {
+		return false;
+	}
+	if (!payload || typeof payload !== "object") {
+		return false;
+	}
+	const { statusCode, error, code } = payload as Record<string, unknown>;
+	return (
+		String(statusCode) === "409" ||
+		code === "BucketAlreadyExists" ||
+		error === "Duplicate"
+	);
+}
+
+/** Does the bucket exist right now? Used only to settle an ambiguous create. */
+async function bucketExists(cfg: StorageConfig): Promise<boolean> {
+	const response = await fetch(
+		`${cfg.baseUrl}/bucket/${encodeURIComponent(cfg.bucket)}`,
+		{ method: "GET", headers: authHeaders(cfg.serviceKey) },
+	).catch(() => null);
+	return response?.ok === true;
+}
+
+/**
  * Creates the audio bucket if it doesn't exist yet.
  *
  * Idempotent, and cheap after the first call — but it IS a network round trip
- * on the upload path, so the result is memoized per process. Doing this in
- * code rather than as a documented manual step means a fresh Supabase project
- * works on first use instead of failing with a confusing 404.
+ * on the upload path, so the result is memoized per process (keyed by bucket
+ * name, so changing `ARTICLE_AUDIO_BUCKET` re-checks). Doing this in code
+ * rather than as a documented manual step means a fresh Supabase project works
+ * on first use instead of failing with a confusing 404.
+ *
+ * "Already exists" is the steady state, not an error — and since Supabase
+ * reports it inconsistently, anything that isn't a recognizable duplicate is
+ * settled by asking whether the bucket is there before failing the job.
  */
-let bucketReady = false;
+let readyBucket: string | null = null;
 
 async function ensureBucket(cfg: StorageConfig): Promise<void> {
-	if (bucketReady) {
+	if (readyBucket === cfg.bucket) {
 		return;
 	}
 
@@ -94,18 +135,21 @@ async function ensureBucket(cfg: StorageConfig): Promise<void> {
 		}),
 	});
 
-	// 409 = already exists, which is the steady state and a success here.
 	if (response.ok || response.status === 409) {
-		bucketReady = true;
+		readyBucket = cfg.bucket;
+		return;
+	}
+
+	const body = await response.text().catch(() => "");
+	if (saysAlreadyExists(body) || (await bucketExists(cfg))) {
+		readyBucket = cfg.bucket;
 		return;
 	}
 
 	throw new PipelineError(
 		"storage",
 		`bucket_http_${response.status}`,
-		`Could not create the "${cfg.bucket}" storage bucket (${response.status}): ${(
-			await response.text().catch(() => "")
-		).slice(0, 200)}`,
+		`Could not create the "${cfg.bucket}" storage bucket (${response.status}): ${body.slice(0, 200)}`,
 		{ retryable: response.status >= 500 },
 	);
 }
