@@ -327,7 +327,7 @@ Two hard limits, one boundary-aware splitter (`lib/chunk.ts`, unit-tested):
 
 ### Audio storage
 
-Private Supabase Storage bucket (`ARTICLE_AUDIO_BUCKET`, default `article-audio`), reached over the **Storage REST API with the service-role key** — not supabase-js, so Hard rule #5 needs no exception. The bucket is created idempotently on first upload. Playback is via signed URLs (6h TTL); the key never reaches a browser. Objects are keyed `{user_id}/{article_id}/{kind}-{voice}.mp3`, so changing the voice writes a new object rather than shadowing the old one.
+Private Supabase Storage bucket (`ARTICLE_AUDIO_BUCKET`, default `article-audio`), reached over the **Storage REST API with the service-role key** — not supabase-js, so Hard rule #5 needs no exception. The bucket is created idempotently on first upload — "already exists" is the steady state, and Supabase reports it inconsistently (a duplicate create comes back as HTTP `400` wrapping `{"statusCode":"409","code":"BucketAlreadyExists"}`), so the create's *body* is inspected and any unrecognized failure is settled by a bucket-existence check before the job is failed. Playback is via signed URLs (6h TTL); the key never reaches a browser. Objects are keyed `{user_id}/{article_id}/{kind}-{voice}.mp3`, so changing the voice writes a new object rather than shadowing the old one.
 
 Audio synthesis is **synchronous** (unlike the article pipeline): a summary is one TTS call, and a transcript's segments are synthesized concurrently. First press shows "preparing…"; every later press hits the `article_audio` cache and re-signs the stored object.
 
