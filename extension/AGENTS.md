@@ -6,6 +6,7 @@ Vanilla TS only — no UI framework anywhere (root AGENTS.md). Read `docs/SPEC.m
 
 -   Pure logic lives in `src/` (`outbox.ts`, `tree.ts`, `types.ts`) with dependencies injected (storage, fetch, node getters) — **no Chrome API imports there**. Chrome wiring happens only in `entrypoints/`. This is what makes the Vitest suite possible; keep it that way.
 -   Vitest picks up `{src,utils}/**/*.test.ts`. Outbox coverage is mandatory (root AGENTS.md).
+-   `entrypoints/newtab/` is the new tab override (m20). WXT maps the reserved `newtab` entrypoint name to `chrome_url_overrides.newtab` — don't hand-write it into `wxt.config.ts`.
 
 ## Contracts
 
@@ -14,6 +15,7 @@ Vanilla TS only — no UI framework anywhere (root AGENTS.md). Read `docs/SPEC.m
 -   MV3: register every listener synchronously at the top level of `defineBackground` — no awaits before `addListener`, or Chrome won't re-deliver events after worker death.
 -   `onChanged`/`onMoved`/`onRemoved` are intentionally not listened to (SPEC §5).
 -   **Browse-event capture (m19, SPEC §13)**: listeners register top-level but gate INSIDE the handler on the `attention` storage key (missing = disabled; off = zero capture). Buffer appends AND drains serialize through ONE in-worker promise-chain mutex (pure helper in `src/`); a drain enqueues the outbox `browse` entry (≤500 events) BEFORE removing the drained events by id — duplicates are safe (server dedupes on `client_event_id`), loss is not. Drop-oldest caps (2000 buffered events, 20 `browse` entries) apply to telemetry only — never to sync/highlight entries. Every event carries the `bootId` from `chrome.storage.session` (fresh per browser boot / toggle-enable). `browse` entries route to `/api/browse-events` with the highlight-style poison rule — telemetry must never wedge the queue ahead of bookmark syncs.
+-   **New tab page (m20, SPEC §6)**: READ-ONLY — one direct `GET /api/bookmarks` with the pairing token, never the outbox, never a write. Chrome gives no runtime switch for a new-tab override, so there is deliberately NO toggle; don't add one without re-reading §6. The `newtab` storage key is a RENDER CACHE (paint before the network, `offline` mark when a refresh fails) — never a sync input, and `readSnapshot` must stay total: any corrupt/legacy/missing value is simply "no cache". Search is latest-wins, and the page NEVER autofocuses its box (Chrome focuses the omnibox on a new tab; `/` focuses ours).
 
 ## Build
 

@@ -199,6 +199,10 @@ export const OUTBOX_KEY = "outbox";
 export const ATTENTION_KEY = "attention";
 /** m19: the browse-event buffer awaiting a drain into the outbox. */
 export const BROWSE_BUFFER_KEY = "browseBuffer";
+/** m20: the new tab page's render snapshot — a paint cache, never a write
+ * path. Its own key, like `attention`: the options-page config object is
+ * rewritten wholesale on save. */
+export const NEWTAB_KEY = "newtab";
 
 /** `chrome.storage.session` key holding the capture session's `bootId`. */
 export const BOOT_ID_KEY = "bootId";
