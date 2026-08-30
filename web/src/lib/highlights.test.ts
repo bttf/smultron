@@ -96,6 +96,8 @@ async function seedBookmark(row: SeedBookmark) {
 			updatedAt: PAST,
 			archivedAt: row.archivedAt ?? null,
 			pinnedAt: row.pinnedAt ?? null,
+			// m21: a pinned row always carries a slot (a CHECK constraint).
+			pinPosition: row.pinnedAt ? 0 : null,
 		})
 		.returning();
 	const bookmark = inserted[0];

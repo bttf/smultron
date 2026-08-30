@@ -8,6 +8,7 @@
 import { sql } from "drizzle-orm";
 import {
 	bigint,
+	check,
 	index,
 	integer,
 	pgSchema,
@@ -50,11 +51,17 @@ export const bookmarks = smultron
 			// null = live; soft delete.
 			archivedAt: timestamp("archived_at", { withTimezone: true }),
 			// Pinned to the feed's quick-access shelf (m13); null = not pinned.
-			// Ordering key for the shelf (most recently pinned first). A site
-			// edit — setting/clearing it NEVER bumps updated_at (Hard rule #1) —
-			// and mutually exclusive with archived_at: archiving unpins,
-			// pinning unarchives.
+			// WHEN the row was pinned — since m21 no longer the shelf's order
+			// key (pin_position is). A site edit — setting/clearing it NEVER
+			// bumps updated_at (Hard rule #1) — and mutually exclusive with
+			// archived_at: archiving unpins, pinning unarchives.
 			pinnedAt: timestamp("pinned_at", { withTimezone: true }),
+			// m21: the row's slot on the hand-arranged shelf, 0 = first; null
+			// iff not pinned (the CHECK below makes that an invariant). A new
+			// pin lands at max+1 (the end); `PUT /api/bookmarks/pinned`
+			// re-densifies every slot to 0..n-1. Writing it NEVER bumps
+			// updated_at (Hard rule #1) and never touches pinned_at.
+			pinPosition: integer("pin_position"),
 		},
 		(table) => [
 			unique().on(table.userId, table.urlNormalized),
@@ -68,10 +75,19 @@ export const bookmarks = smultron
 			index("bookmarks_feed_idx")
 				.on(table.userId, table.updatedAt.desc())
 				.where(sql`${table.archivedAt} is null`),
-			// Pinned shelf: a user's pinned rows, most recently pinned first.
+			// Pinned shelf: a user's pinned rows in their hand-arranged order
+			// (m21 — was `(user_id, pinned_at desc)` in m13). Deliberately NOT
+			// unique: a reorder rewrites every slot in one statement and would
+			// trip a non-deferrable unique index on the transient duplicates a
+			// permutation passes through (SPEC §3).
 			index("bookmarks_pinned_idx")
-				.on(table.userId, table.pinnedAt.desc())
+				.on(table.userId, table.pinPosition)
 				.where(sql`${table.pinnedAt} is not null`),
+			// m21: a pinned row always has a slot; an unpinned one never does.
+			check(
+				"bookmarks_pin_position_check",
+				sql`(${table.pinnedAt} is null) = (${table.pinPosition} is null)`,
+			),
 		],
 	)
 	.enableRLS();

@@ -73,7 +73,11 @@ export type Bookmark = {
 	createdAt: Date;
 	updatedAt: Date;
 	archivedAt: Date | null;
-	/** Pinned to the shelf (m13); null = not pinned. Shelf ordering key. */
+	/**
+	 * Pinned to the shelf (m13); null = not pinned. WHEN it was pinned — the
+	 * shelf's ORDER key is `pin_position` since m21, which is deliberately NOT
+	 * serialized: the `pinned` array's order is the contract (SPEC §8).
+	 */
 	pinnedAt: Date | null;
 	/** Ordered `created_at asc` (SPEC §8); `[]` when none. */
 	highlights: BookmarkHighlight[];
@@ -234,9 +238,10 @@ export type ListBookmarksResult = {
 	bookmarks: Bookmark[];
 	nextCursor: string | null;
 	/**
-	 * The pinned shelf (m13): ALL of the user's pinned rows, ordered
-	 * `pinned_at desc` (most recently pinned first). Independent of the
-	 * current view and of q/tags — the shelf is always fully visible.
+	 * The pinned shelf (m13): ALL of the user's pinned rows, in their
+	 * hand-arranged order — `pin_position asc, id desc` (m21; it was
+	 * `pinned_at desc` until the order became the user's to set). Independent
+	 * of the current view and of q/tags — the shelf is always fully visible.
 	 * Pinned rows are always live (archiving unpins), so the archived view
 	 * gets the same list; the client only renders it on the live feed.
 	 */
@@ -353,8 +358,9 @@ export async function listBookmarks(
 	//   total    — view only; facets — view + q, IGNORING tags (an active tag
 	//   keeps its count); matching — whatever the LOG query below can reach
 	//   (feed: view + tags MINUS pinned; search: view + q + tags incl. pinned).
-	//   pinned   — the shelf: every pinned row, most recently pinned first,
-	//   view/filter-independent (pinned rows are always live — archiving unpins).
+	//   pinned   — the shelf: every pinned row in its hand-arranged order
+	//   (m21: pin_position asc, id desc), view/filter-independent (pinned rows
+	//   are always live — archiving unpins).
 	const [total, matching, facets, pinnedRows] = await Promise.all([
 		countBookmarks(db, viewCond),
 		countBookmarks(
@@ -368,7 +374,7 @@ export async function listBookmarks(
 			.select(BOOKMARK_COLUMNS)
 			.from(bookmarks)
 			.where(and(eq(bookmarks.userId, userId), isNotNull(bookmarks.pinnedAt)))
-			.orderBy(desc(bookmarks.pinnedAt), desc(bookmarks.id)),
+			.orderBy(asc(bookmarks.pinPosition), desc(bookmarks.id)),
 	]);
 	const aggregates = {
 		total,
@@ -481,9 +487,15 @@ export type PatchBookmarkInput = {
 	/** Trimmed server-side; empty-after-trim stores NULL (note removed). */
 	note?: string;
 	archived?: boolean;
-	/** m13: true (re)pins — `pinned_at = now()`, moving the row to the front
-	 *  of the shelf — and false unpins. Mutually exclusive with `archived`:
-	 *  archiving unpins, pinning unarchives (routes reject both-true). */
+	/**
+	 * m13/m21: true pins an UNPINNED row — `pinned_at = now()` and
+	 * `pin_position = max(the caller's positions) + 1`, i.e. the END of the
+	 * shelf — and is a no-op on BOTH columns for an already-pinned row (it
+	 * keeps its slot and its original `pinned_at`; m13 refreshed `pinned_at`
+	 * to jump to the front, retired once the order became hand-arranged).
+	 * false unpins, clearing both. Mutually exclusive with `archived`:
+	 * archiving unpins, pinning unarchives (routes reject both-true).
+	 */
 	pinned?: boolean;
 };
 
@@ -492,7 +504,11 @@ type PatchSet = {
 	tags?: string[];
 	note?: string | null;
 	archivedAt?: Date | null;
-	pinnedAt?: Date | null;
+	// The pin columns are SQL expressions on the pin path (m21): the new slot
+	// is read from the caller's other rows inside the same UPDATE, so a pin
+	// never becomes a read-then-write race.
+	pinnedAt?: Date | SQL | null;
+	pinPosition?: number | SQL | null;
 };
 
 /** Maps the wire-level patch input to column assignments (note trim→null). */
@@ -511,17 +527,28 @@ function buildPatchSet(input: PatchBookmarkInput): PatchSet {
 	if (input.archived !== undefined) {
 		set.archivedAt = input.archived ? new Date() : null;
 		if (input.archived) {
-			// Archiving unpins — the shelf only ever holds live rows.
+			// Archiving unpins — the shelf only ever holds live rows. Both pin
+			// columns go together (the CHECK: a slot exists iff pinned_at does).
 			set.pinnedAt = null;
+			set.pinPosition = null;
 		}
 	}
 	if (input.pinned !== undefined) {
-		set.pinnedAt = input.pinned ? new Date() : null;
 		if (input.pinned) {
+			// Idempotent pin (m21): an already-pinned row keeps its pinned_at
+			// AND its slot; an unpinned one is stamped now() and appended to
+			// the END of the caller's shelf (max + 1, -1 + 1 = 0 for the first
+			// pin). Expressed as SQL so it is one statement — no read-then-
+			// write race, and the CHECK invariant holds on every path.
+			set.pinnedAt = sql`coalesce(${bookmarks.pinnedAt}, now())`;
+			set.pinPosition = sql`coalesce(${bookmarks.pinPosition}, (select coalesce(max(p.pin_position), -1) + 1 from ${bookmarks} p where p.user_id = ${bookmarks.userId} and p.pinned_at is not null))`;
 			// Pinning unarchives — a pinned row is a live row. Routes reject
 			// {archived: true, pinned: true}, so this never fights the branch
 			// above.
 			set.archivedAt = null;
+		} else {
+			set.pinnedAt = null;
+			set.pinPosition = null;
 		}
 	}
 	return set;
@@ -578,6 +605,92 @@ export async function patchBookmark(
 		and(eq(bookmarks.id, id), eq(bookmarks.userId, userId)),
 		input,
 	);
+}
+
+/**
+ * Rewrites the caller's pinned shelf order (m21, SPEC §8 —
+ * `PUT /api/bookmarks/pinned`). `ids` is the shelf as the user arranged it.
+ *
+ * LENIENT by design, because the shelf can change under a drag (a popup pin
+ * or unpin mid-gesture): ids that are not currently pinned, not the caller's,
+ * or duplicated are silently ignored, and pinned rows MISSING from `ids` keep
+ * their relative order and trail the listed ones. Nothing is created,
+ * unpinned or archived here.
+ *
+ * The surviving rows get dense `pin_position = 0..k-1` in one statement
+ * inside one transaction. CRITICAL (Hard rule #1): it never touches
+ * `updated_at` — nor `pinned_at`, which records WHEN a row was pinned and is
+ * not the order key any more.
+ *
+ * Returns the whole shelf in its new order, shaped exactly like the listing's
+ * `pinned` (highlights nested), so a client can swap it in verbatim.
+ */
+export async function reorderPinned(
+	db: BookmarksDb,
+	userId: string,
+	ids: number[],
+): Promise<Bookmark[]> {
+	return db.transaction(async (tx) => {
+		const shelfCond = and(
+			eq(bookmarks.userId, userId),
+			isNotNull(bookmarks.pinnedAt),
+		);
+
+		// The shelf as it stands right now, in its current order.
+		const current = await tx
+			.select({ id: bookmarks.id })
+			.from(bookmarks)
+			.where(shelfCond)
+			.orderBy(asc(bookmarks.pinPosition), desc(bookmarks.id));
+
+		const pinnedIds = new Set(current.map((row) => row.id));
+		const placed = new Set<number>();
+		const ordered: number[] = [];
+		// Requested order first (ignoring anything not on the shelf, and any
+		// repeat of an id already placed)...
+		for (const id of ids) {
+			if (pinnedIds.has(id) && !placed.has(id)) {
+				placed.add(id);
+				ordered.push(id);
+			}
+		}
+		// ...then whatever the caller did not list, in its prior relative order.
+		for (const row of current) {
+			if (!placed.has(row.id)) {
+				placed.add(row.id);
+				ordered.push(row.id);
+			}
+		}
+
+		if (ordered.length > 0) {
+			// One UPDATE joined against the id list with its ordinality — the
+			// slot is the list index. Ownership AND pinned-ness are re-checked
+			// in the WHERE: a popup unpin/archive that commits between the
+			// SELECT above and this statement (READ COMMITTED re-evaluates the
+			// predicate on the fresh row version) is then simply skipped —
+			// the lenient race SPEC §8 promises — instead of assigning a slot
+			// to an unpinned row and tripping the CHECK. `pin_position` is
+			// the ONLY column assigned.
+			const idList = sql.join(
+				ordered.map((id) => sql`${id}`),
+				sql`, `,
+			);
+			await tx.execute(sql`
+				update ${bookmarks} as b
+				set pin_position = v.ord - 1
+				from unnest(array[${idList}]::bigint[]) with ordinality as v(id, ord)
+				where b.id = v.id and b.user_id = ${userId} and b.pinned_at is not null
+			`);
+		}
+
+		const rows = await tx
+			.select(BOOKMARK_COLUMNS)
+			.from(bookmarks)
+			.where(shelfCond)
+			.orderBy(asc(bookmarks.pinPosition), desc(bookmarks.id));
+
+		return withHighlights(tx, rows);
+	});
 }
 
 /**

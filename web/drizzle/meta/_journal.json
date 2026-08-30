@@ -85,6 +85,13 @@
       "when": 1786500118516,
       "tag": "0011_browse-events-auth-fk",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788110200104,
+      "tag": "0012_pin-position",
+      "breakpoints": true
     }
   ]
 }
