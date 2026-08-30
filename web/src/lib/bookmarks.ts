@@ -664,10 +664,13 @@ export async function reorderPinned(
 
 		if (ordered.length > 0) {
 			// One UPDATE joined against the id list with its ordinality — the
-			// slot is the list index. Ownership is re-checked in the WHERE so
-			// the statement can never reach another user's row even if the
-			// membership filter above were wrong. `pin_position` is the ONLY
-			// column assigned.
+			// slot is the list index. Ownership AND pinned-ness are re-checked
+			// in the WHERE: a popup unpin/archive that commits between the
+			// SELECT above and this statement (READ COMMITTED re-evaluates the
+			// predicate on the fresh row version) is then simply skipped —
+			// the lenient race SPEC §8 promises — instead of assigning a slot
+			// to an unpinned row and tripping the CHECK. `pin_position` is
+			// the ONLY column assigned.
 			const idList = sql.join(
 				ordered.map((id) => sql`${id}`),
 				sql`, `,
@@ -676,7 +679,7 @@ export async function reorderPinned(
 				update ${bookmarks} as b
 				set pin_position = v.ord - 1
 				from unnest(array[${idList}]::bigint[]) with ordinality as v(id, ord)
-				where b.id = v.id and b.user_id = ${userId}
+				where b.id = v.id and b.user_id = ${userId} and b.pinned_at is not null
 			`);
 		}
 

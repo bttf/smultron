@@ -863,7 +863,12 @@ export function Feed() {
 		}
 		const ids = next.map((b) => b.id);
 		setOrderOverride(ids);
-		setReorderError(null);
+		// The key this drop was made under. The bound `mutate` always targets
+		// the LATEST key, so if a search/tag/view change lands before the PUT
+		// returns, writing the shelf into that key's (empty) cache would stall
+		// its fetch — the override keeps the order on screen and the new key's
+		// own response confirms it instead.
+		const keyAtDrop = key;
 		const seq = reorderSeqRef.current + 1;
 		reorderSeqRef.current = seq;
 		try {
@@ -880,6 +885,11 @@ export function Feed() {
 				// A newer drop is already on screen and in flight — this
 				// response is history. Don't paint it, don't release the newer
 				// override, don't report anything.
+				return;
+			}
+			// A failed-order line stands until a reorder SUCCEEDS (SPEC §9).
+			setReorderError(null);
+			if (prevKey.current !== keyAtDrop) {
 				return;
 			}
 			// `revalidate: false`: the PUT's own response IS the confirmed
@@ -1403,15 +1413,23 @@ function PinnedCard({
 			}}
 			// Pointer/touch lift from anywhere on the card (m21, SPEC §9)…
 			{...listeners}
-			onPointerDown={(e) => {
+			// Arms nothing itself (the Mouse/Touch sensors listen to their own
+			// native events); it only disarms a stale post-keyboard-drag flag
+			// so the next genuine click isn't swallowed.
+			onPointerDown={() => {
 				draggedRef.current = false;
-				listeners?.onPointerDown?.(e);
 			}}
 			// …but NOT the keyboard: the card's own Enter/Space stay "open the
 			// bookmark", and the ⋮⋮ grip below is the keyboard drag affordance.
 			// This override deliberately replaces the KeyboardSensor's
 			// activator spread just above.
 			onKeyDown={(e) => {
+				// Only the card body opens: Enter/Space on the ⋮⋮ grip (a
+				// keyboard lift/drop — dnd-kit prevents default but does not
+				// stop propagation) or on ✕ bubble up here and must not.
+				if (e.target !== e.currentTarget) {
+					return;
+				}
 				if (e.key === "Enter" || e.key === " ") {
 					e.preventDefault();
 					openBookmark();
@@ -1452,9 +1470,11 @@ function PinnedCard({
 					type="button"
 					aria-label={`Unpin ${label}`}
 					// m21: a button inside a sortable card is not a drag
-					// surface — swallow the pointerdown so hovering over ✕ and
-					// clicking it can't start a lift.
-					onPointerDown={(e) => e.stopPropagation()}
+					// surface. The Mouse/Touch sensors activate on the native
+					// mousedown/touchstart (NOT pointerdown), so those are the
+					// events to swallow — a press that starts on ✕ never lifts.
+					onMouseDown={(e) => e.stopPropagation()}
+					onTouchStart={(e) => e.stopPropagation()}
 					onClick={(e) => {
 						e.stopPropagation();
 						onUnpin();

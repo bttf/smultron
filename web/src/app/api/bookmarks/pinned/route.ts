@@ -15,27 +15,15 @@
 //
 // Returns `{ pinned }`: the whole shelf in its new order, the same shape as
 // the listing's `pinned` (highlights nested), so a client swaps it in as-is.
-import { z } from "zod";
 import { db } from "../../../../db";
 import { authenticateApiToken } from "../../../../lib/apiTokenAuth";
 import { getAuthedUser } from "../../../../lib/auth";
 import { reorderPinned } from "../../../../lib/bookmarks";
+import { pinnedOrderBodySchema } from "../../../../lib/pinnedOrder";
 import { authenticateRequest } from "../../../../lib/requestAuth";
 
 // Node runtime: the postgres driver needs it.
 export const runtime = "nodejs";
-
-// 1000 is a sanity bound far above any real shelf; duplicates are a client
-// bug (a drag can't produce them), so they are rejected rather than silently
-// collapsed — unlike ids the server merely doesn't recognize, which are a
-// legitimate mid-drag race and stay lenient in `reorderPinned`.
-const bodySchema = z
-	.strictObject({
-		ids: z.array(z.number().int().positive()).min(1).max(1000),
-	})
-	.refine((data) => new Set(data.ids).size === data.ids.length, {
-		message: "ids must be unique",
-	});
 
 export async function PUT(request: Request) {
 	const userId = await authenticateRequest(request, {
@@ -53,7 +41,7 @@ export async function PUT(request: Request) {
 		return Response.json({ error: "invalid_json" }, { status: 400 });
 	}
 
-	const parsed = bodySchema.safeParse(body);
+	const parsed = pinnedOrderBodySchema.safeParse(body);
 	if (!parsed.success) {
 		return Response.json(
 			{ error: "invalid_body", issues: parsed.error.issues },

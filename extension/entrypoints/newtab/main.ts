@@ -659,7 +659,13 @@ async function init(): Promise<void> {
 	} else {
 		renderShelf(feedPage.pinned);
 	}
-	await writeSnapshot(storage, feedPage, Date.now());
+	// The snapshot holds what the server CONFIRMED (SPEC §6). If a reorder
+	// committed while this fetch was out, `feedPage.pinned` is the client's
+	// not-yet-confirmed order — the reorder's own success path writes the
+	// snapshot once the PUT lands, so skip it here.
+	if (shelfSeq === listingSeq) {
+		await writeSnapshot(storage, feedPage, Date.now());
+	}
 }
 
 void init();
