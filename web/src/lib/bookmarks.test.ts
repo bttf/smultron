@@ -8,7 +8,15 @@ import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { eq, sql } from "drizzle-orm";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "vitest";
 import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
 import {
@@ -18,6 +26,7 @@ import {
 	listBookmarks,
 	patchBookmark,
 	patchBookmarkByUrl,
+	reorderPinned,
 } from "./bookmarks";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
@@ -78,9 +87,43 @@ type SeedRow = {
 	updatedAt: Date;
 	archivedAt?: Date | null;
 	pinnedAt?: Date | null;
+	/** m21 shelf slot; auto-seated (see `seed`) when omitted on a pinned row. */
+	pinPosition?: number | null;
 };
 
+/**
+ * m21: `pin_position` is null iff `pinned_at` is (a CHECK constraint), so a
+ * pinned seed row always needs a slot. One left unset is seated the way
+ * migration 0012 seats existing pins — per user, `pinned_at desc` then latest
+ * row first — so seeds written against the m13 shelf order still describe the
+ * same shelf.
+ */
+function autoPinPositions(rows: SeedRow[]): Map<SeedRow, number> {
+	const seats = new Map<SeedRow, number>();
+	const byUser = new Map<string, Array<{ row: SeedRow; i: number }>>();
+	rows.forEach((row, i) => {
+		if (row.pinnedAt && row.pinPosition == null) {
+			const list = byUser.get(row.userId) ?? [];
+			list.push({ row, i });
+			byUser.set(row.userId, list);
+		}
+	});
+	for (const list of byUser.values()) {
+		list
+			.sort(
+				(a, b) =>
+					(b.row.pinnedAt?.getTime() ?? 0) - (a.row.pinnedAt?.getTime() ?? 0) ||
+					b.i - a.i,
+			)
+			.forEach(({ row }, pos) => {
+				seats.set(row, pos);
+			});
+	}
+	return seats;
+}
+
 async function seed(rows: SeedRow[]) {
+	const seats = autoPinPositions(rows);
 	await db.insert(bookmarks).values(
 		rows.map((r) => ({
 			userId: r.userId,
@@ -93,6 +136,7 @@ async function seed(rows: SeedRow[]) {
 			updatedAt: r.updatedAt,
 			archivedAt: r.archivedAt ?? null,
 			pinnedAt: r.pinnedAt ?? null,
+			pinPosition: r.pinPosition ?? seats.get(r) ?? null,
 		})),
 	);
 }
@@ -784,12 +828,17 @@ describe("pins (m13)", () => {
 		expect(updated?.updatedAt).toEqual(before.updatedAt);
 	});
 
-	it("re-pinning refreshes pinned_at (moves the row to the shelf front)", async () => {
-		const before = await seedOne({ pinnedAt: T0 });
+	it("re-pinning is a no-op on BOTH pin columns (m21: it keeps its slot)", async () => {
+		const before = await seedOne({ pinnedAt: T0, pinPosition: 3 });
 		const updated = await patchBookmark(db, USER_A, before.id, {
 			pinned: true,
 		});
-		expect(updated?.pinnedAt?.getTime()).toBeGreaterThan(T0.getTime());
+		// m13 refreshed pinned_at here to jump to the shelf front; since the
+		// order is hand-arranged (m21) a re-pin must not move the card at all.
+		expect(updated?.pinnedAt).toEqual(T0);
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+		const after = await rawRow(before.id);
+		expect(after?.pinPosition).toBe(3);
 	});
 
 	it("pinning unarchives (a pinned row is a live row)", async () => {
@@ -842,7 +891,7 @@ describe("pins (m13)", () => {
 			"Page 1",
 			"Page 2",
 		]);
-		// The shelf: pinned rows ordered pinned_at desc.
+		// The shelf: ordered by pin_position, seeded here in the m13 order.
 		expect(result.pinned.map((b) => b.title)).toEqual([
 			"Pinned later",
 			"Pinned earlier",
@@ -956,6 +1005,295 @@ describe("pins (m13)", () => {
 		expect(page1.matching).toBe(60);
 		expect(page1.total).toBe(63);
 		expect(page1.pinned).toHaveLength(3);
+	});
+});
+
+describe("shelf ordering + reorder (m21)", () => {
+	const T0 = new Date("2026-01-01T00:00:00.000Z");
+
+	type PinSeed = {
+		title: string;
+		pinnedAt?: Date | null;
+		pinPosition?: number | null;
+		archivedAt?: Date | null;
+	};
+
+	/** Seeds rows for one user; returns their ids keyed by title. */
+	async function seedShelf(
+		userId: string,
+		rows: PinSeed[],
+	): Promise<Record<string, number>> {
+		await seed(
+			rows.map((r) => ({
+				userId,
+				url: `https://example.com/${encodeURIComponent(r.title)}`,
+				title: r.title,
+				createdAt: T0,
+				updatedAt: T0,
+				archivedAt: r.archivedAt ?? null,
+				pinnedAt: r.pinnedAt ?? null,
+				pinPosition: r.pinPosition ?? null,
+			})),
+		);
+		const inserted = await db
+			.select()
+			.from(bookmarks)
+			.where(eq(bookmarks.userId, userId));
+		return Object.fromEntries(inserted.map((row) => [row.title, row.id]));
+	}
+
+	/** Every row's (pin_position, pinned_at, updated_at), keyed by id. */
+	async function snapshot() {
+		const rows = await db.select().from(bookmarks);
+		return new Map(
+			rows.map((row) => [
+				row.id,
+				{
+					pinPosition: row.pinPosition,
+					pinnedAt: row.pinnedAt,
+					updatedAt: row.updatedAt,
+				},
+			]),
+		);
+	}
+
+	it("a new pin lands at the END of the shelf (max + 1; 0 when it is the first)", async () => {
+		// Another user's shelf must not influence the max.
+		await seedShelf(USER_B, [
+			{ title: "B pinned", pinnedAt: T0, pinPosition: 9 },
+		]);
+		const ids = await seedShelf(USER_A, [
+			{ title: "First" },
+			{ title: "Second" },
+		]);
+
+		const first = await patchBookmark(db, USER_A, ids.First, { pinned: true });
+		expect(first?.pinnedAt).not.toBeNull();
+		expect((await rawRow(ids.First))?.pinPosition).toBe(0);
+		expect(first?.updatedAt).toEqual(T0);
+
+		const second = await patchBookmark(db, USER_A, ids.Second, {
+			pinned: true,
+		});
+		expect(second?.pinnedAt).not.toBeNull();
+		expect((await rawRow(ids.Second))?.pinPosition).toBe(1);
+		expect(second?.updatedAt).toEqual(T0);
+
+		// User B's shelf is untouched by A's pins.
+		expect((await rawRow(ids["B pinned"] ?? -1))?.pinPosition).toBeUndefined();
+	});
+
+	it("slots are never compacted on unpin — the next pin still appends past the gap", async () => {
+		const ids = await seedShelf(USER_A, [
+			{ title: "A", pinnedAt: T0, pinPosition: 0 },
+			{ title: "B", pinnedAt: T0, pinPosition: 1 },
+			{ title: "C", pinnedAt: T0, pinPosition: 2 },
+			{ title: "D" },
+		]);
+
+		await patchBookmark(db, USER_A, ids.B, { pinned: false });
+		expect((await rawRow(ids.B))?.pinPosition).toBeNull();
+		expect((await rawRow(ids.B))?.pinnedAt).toBeNull();
+
+		await patchBookmark(db, USER_A, ids.D, { pinned: true });
+		expect((await rawRow(ids.D))?.pinPosition).toBe(3);
+	});
+
+	it("unpinning and archiving both clear pin_position with pinned_at", async () => {
+		const ids = await seedShelf(USER_A, [
+			{ title: "Unpin me", pinnedAt: T0, pinPosition: 0 },
+			{ title: "Archive me", pinnedAt: T0, pinPosition: 1 },
+		]);
+
+		const unpinned = await patchBookmark(db, USER_A, ids["Unpin me"], {
+			pinned: false,
+		});
+		expect(unpinned?.pinnedAt).toBeNull();
+		expect((await rawRow(ids["Unpin me"]))?.pinPosition).toBeNull();
+		expect(unpinned?.updatedAt).toEqual(T0);
+
+		const archived = await patchBookmark(db, USER_A, ids["Archive me"], {
+			archived: true,
+		});
+		expect(archived?.pinnedAt).toBeNull();
+		expect((await rawRow(ids["Archive me"]))?.pinPosition).toBeNull();
+		expect(archived?.updatedAt).toEqual(T0);
+	});
+
+	it("pinning an archived row unarchives it and gives it a slot", async () => {
+		const ids = await seedShelf(USER_A, [
+			{ title: "Seated", pinnedAt: T0, pinPosition: 0 },
+			{ title: "Archived", archivedAt: T0 },
+		]);
+
+		const updated = await patchBookmark(db, USER_A, ids.Archived, {
+			pinned: true,
+		});
+		expect(updated?.archivedAt).toBeNull();
+		expect(updated?.pinnedAt).not.toBeNull();
+		expect((await rawRow(ids.Archived))?.pinPosition).toBe(1);
+		expect(updated?.updatedAt).toEqual(T0);
+	});
+
+	it("the shelf sorts by pin_position, NOT pinned_at", async () => {
+		// Positions deliberately contradict the pinned_at order.
+		await seedShelf(USER_A, [
+			{
+				title: "Pinned first, sits last",
+				pinnedAt: new Date("2026-01-01T00:00:00.000Z"),
+				pinPosition: 2,
+			},
+			{
+				title: "Pinned last, sits first",
+				pinnedAt: new Date("2026-03-01T00:00:00.000Z"),
+				pinPosition: 0,
+			},
+			{
+				title: "Middle",
+				pinnedAt: new Date("2026-02-01T00:00:00.000Z"),
+				pinPosition: 1,
+			},
+		]);
+
+		const result = await listBookmarks(db, USER_A, {});
+		expect(result.pinned.map((b) => b.title)).toEqual([
+			"Pinned last, sits first",
+			"Middle",
+			"Pinned first, sits last",
+		]);
+		// pin_position is NOT part of the wire shape — the array order is.
+		expect(result.pinned[0]).not.toHaveProperty("pinPosition");
+	});
+
+	describe("reorderPinned", () => {
+		// One test seeds a highlight; the shared beforeEach truncates bookmarks,
+		// which the highlights FK would block.
+		afterEach(async () => {
+			await db.execute(sql`DELETE FROM smultron.highlights`);
+		});
+
+		async function seedThree() {
+			return seedShelf(USER_A, [
+				{ title: "A", pinnedAt: T0, pinPosition: 0 },
+				{
+					title: "B",
+					pinnedAt: new Date("2026-02-01T00:00:00.000Z"),
+					pinPosition: 1,
+				},
+				{
+					title: "C",
+					pinnedAt: new Date("2026-03-01T00:00:00.000Z"),
+					pinPosition: 2,
+				},
+			]);
+		}
+
+		it("a full permutation densifies 0..k-1 in list order", async () => {
+			const ids = await seedThree();
+			const before = await snapshot();
+
+			const shelf = await reorderPinned(db, USER_A, [ids.C, ids.A, ids.B]);
+			expect(shelf.map((b) => b.title)).toEqual(["C", "A", "B"]);
+			expect((await rawRow(ids.C))?.pinPosition).toBe(0);
+			expect((await rawRow(ids.A))?.pinPosition).toBe(1);
+			expect((await rawRow(ids.B))?.pinPosition).toBe(2);
+
+			// The listing agrees with what the reorder returned.
+			const result = await listBookmarks(db, USER_A, {});
+			expect(result.pinned.map((b) => b.title)).toEqual(["C", "A", "B"]);
+
+			// Hard rule #1: neither clock moved.
+			for (const [id, row] of await snapshot()) {
+				expect(row.updatedAt).toEqual(before.get(id)?.updatedAt);
+				expect(row.pinnedAt).toEqual(before.get(id)?.pinnedAt);
+			}
+		});
+
+		it("a partial list puts the listed rows first, the rest trailing in their prior order", async () => {
+			const ids = await seedThree();
+			const shelf = await reorderPinned(db, USER_A, [ids.C]);
+			expect(shelf.map((b) => b.title)).toEqual(["C", "A", "B"]);
+			expect((await rawRow(ids.C))?.pinPosition).toBe(0);
+			expect((await rawRow(ids.A))?.pinPosition).toBe(1);
+			expect((await rawRow(ids.B))?.pinPosition).toBe(2);
+		});
+
+		it("ignores unpinned, archived and other users' ids, changing nothing else", async () => {
+			const ids = await seedShelf(USER_A, [
+				{ title: "A", pinnedAt: T0, pinPosition: 0 },
+				{ title: "B", pinnedAt: T0, pinPosition: 1 },
+				{ title: "Loose", pinnedAt: null },
+				{ title: "Archived", archivedAt: T0 },
+			]);
+			const other = await seedShelf(USER_B, [
+				{ title: "B's pin", pinnedAt: T0, pinPosition: 0 },
+				{ title: "B's other pin", pinnedAt: T0, pinPosition: 1 },
+			]);
+			const before = await snapshot();
+
+			const shelf = await reorderPinned(db, USER_A, [
+				ids.Loose,
+				ids.Archived,
+				other["B's other pin"],
+				999_999,
+				ids.B,
+				ids.A,
+			]);
+			expect(shelf.map((b) => b.title)).toEqual(["B", "A"]);
+			expect((await rawRow(ids.B))?.pinPosition).toBe(0);
+			expect((await rawRow(ids.A))?.pinPosition).toBe(1);
+
+			// Ignored rows keep their state exactly.
+			const loose = await rawRow(ids.Loose);
+			expect(loose?.pinnedAt).toBeNull();
+			expect(loose?.pinPosition).toBeNull();
+			const archivedRow = await rawRow(ids.Archived);
+			expect(archivedRow?.archivedAt).toEqual(T0);
+			expect(archivedRow?.pinPosition).toBeNull();
+			// User B's shelf is untouched — order and clocks alike.
+			expect((await rawRow(other["B's pin"]))?.pinPosition).toBe(0);
+			expect((await rawRow(other["B's other pin"]))?.pinPosition).toBe(1);
+			for (const [id, row] of await snapshot()) {
+				expect(row.updatedAt).toEqual(before.get(id)?.updatedAt);
+				expect(row.pinnedAt).toEqual(before.get(id)?.pinnedAt);
+			}
+		});
+
+		it("de-duplicates repeated ids defensively", async () => {
+			const ids = await seedThree();
+			const shelf = await reorderPinned(db, USER_A, [
+				ids.B,
+				ids.B,
+				ids.A,
+				ids.B,
+			]);
+			expect(shelf.map((b) => b.title)).toEqual(["B", "A", "C"]);
+			expect((await rawRow(ids.B))?.pinPosition).toBe(0);
+			expect((await rawRow(ids.A))?.pinPosition).toBe(1);
+			expect((await rawRow(ids.C))?.pinPosition).toBe(2);
+		});
+
+		it("returns the shelf with nested highlights, exactly like the listing", async () => {
+			const ids = await seedThree();
+			await db.insert(schema.highlights).values({
+				userId: USER_A,
+				bookmarkId: ids.B,
+				text: "a snippet",
+			});
+
+			const shelf = await reorderPinned(db, USER_A, [ids.B]);
+			expect(shelf[0]?.title).toBe("B");
+			expect(shelf[0]?.highlights.map((h) => h.text)).toEqual(["a snippet"]);
+			expect(shelf[1]?.highlights).toEqual([]);
+
+			const result = await listBookmarks(db, USER_A, {});
+			expect(result.pinned).toEqual(shelf);
+		});
+
+		it("an empty shelf is a no-op returning []", async () => {
+			await seedShelf(USER_A, [{ title: "Not pinned" }]);
+			expect(await reorderPinned(db, USER_A, [1, 2, 3])).toEqual([]);
+		});
 	});
 });
 
@@ -1321,5 +1659,113 @@ describe("addBookmark", () => {
 		expect(created).toBe(true);
 		expect(bookmark.title).toBe("");
 		expect(bookmark.urlNormalized).toBe("not a url");
+	});
+});
+
+// Migration 0012's data transform, on its own PGlite: every migration EXCEPT
+// 0012 is applied first, old-style pinned rows (no pin_position) are seeded,
+// then 0012 alone runs — the shape a real deploy has.
+describe("migration 0012_pin-position data transform", () => {
+	const MIGRATION_TAG = "0012_pin-position";
+	const USER_1 = "44444444-4444-4444-8444-444444444444";
+	const USER_2 = "55555555-5555-4555-8555-555555555555";
+
+	let migClient: PGlite;
+
+	async function applyMigrationFile(tag: string) {
+		const migration = readFileSync(join(drizzleDir, `${tag}.sql`), "utf8");
+		for (const statement of migration.split("--> statement-breakpoint")) {
+			await migClient.exec(statement);
+		}
+	}
+
+	async function seedOld(
+		userId: string,
+		url: string,
+		pinnedAt: string | null,
+	): Promise<number> {
+		const res = await migClient.query<{ id: number }>(
+			`INSERT INTO smultron.bookmarks (user_id, url, url_normalized, title, tags, created_at, updated_at, pinned_at)
+			 VALUES ($1, $2, $2, 't', '{}', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', $3)
+			 RETURNING id`,
+			[userId, url, pinnedAt],
+		);
+		return res.rows[0].id;
+	}
+
+	async function rowOf(id: number) {
+		const res = await migClient.query<{
+			pin_position: number | null;
+			same_clocks: boolean;
+		}>(
+			`SELECT pin_position,
+			        (updated_at = '2024-01-01T00:00:00Z'::timestamptz) AS same_clocks
+			 FROM smultron.bookmarks WHERE id = $1`,
+			[id],
+		);
+		// A data migration is not a live capture (Hard rule #1).
+		expect(res.rows[0].same_clocks).toBe(true);
+		return res.rows[0].pin_position;
+	}
+
+	beforeAll(async () => {
+		migClient = new PGlite({ extensions: { pg_trgm } });
+		await migClient.exec(
+			"CREATE SCHEMA auth; CREATE TABLE auth.users (id uuid PRIMARY KEY);",
+		);
+		const journal = JSON.parse(
+			readFileSync(join(drizzleDir, "meta/_journal.json"), "utf8"),
+		) as { entries: Array<{ tag: string }> };
+		for (const entry of journal.entries) {
+			if (entry.tag === MIGRATION_TAG) continue;
+			await applyMigrationFile(entry.tag);
+		}
+		await migClient.exec(
+			`INSERT INTO auth.users (id) VALUES ('${USER_1}'), ('${USER_2}');`,
+		);
+	});
+
+	afterAll(async () => {
+		await migClient.close();
+	});
+
+	it("seats each user's existing pins in their m13 order and leaves the rest null", async () => {
+		// USER_1: three pins, seeded out of pinned_at order.
+		const oldest = await seedOld(USER_1, "https://a.com/1", "2026-01-01Z");
+		const newest = await seedOld(USER_1, "https://a.com/2", "2026-03-01Z");
+		const middle = await seedOld(USER_1, "https://a.com/3", "2026-02-01Z");
+		// A tie on pinned_at breaks by id desc, like the m13 shelf query.
+		const tieOld = await seedOld(USER_1, "https://a.com/4", "2025-01-01Z");
+		const tieNew = await seedOld(USER_1, "https://a.com/5", "2025-01-01Z");
+		const unpinned = await seedOld(USER_1, "https://a.com/6", null);
+		// A second user's shelf is numbered independently, from 0.
+		const otherPin = await seedOld(USER_2, "https://b.com/1", "2026-01-01Z");
+		const otherPin2 = await seedOld(USER_2, "https://b.com/2", "2026-02-01Z");
+
+		await applyMigrationFile(MIGRATION_TAG);
+
+		// pinned_at desc, id desc — exactly what the m13 shelf showed.
+		expect(await rowOf(newest)).toBe(0);
+		expect(await rowOf(middle)).toBe(1);
+		expect(await rowOf(oldest)).toBe(2);
+		expect(await rowOf(tieNew)).toBe(3);
+		expect(await rowOf(tieOld)).toBe(4);
+		expect(await rowOf(unpinned)).toBeNull();
+		expect(await rowOf(otherPin2)).toBe(0);
+		expect(await rowOf(otherPin)).toBe(1);
+
+		// The CHECK is live afterwards, in both directions.
+		await expect(
+			migClient.query(
+				"UPDATE smultron.bookmarks SET pin_position = NULL WHERE id = $1",
+				[newest],
+			),
+		).rejects.toThrow(/bookmarks_pin_position_check/);
+		await expect(
+			migClient.query(
+				"UPDATE smultron.bookmarks SET pin_position = 7 WHERE id = $1",
+				[unpinned],
+			),
+		).rejects.toThrow(/bookmarks_pin_position_check/);
 	});
 });

@@ -148,6 +148,17 @@
       .card:hover {
         border-color: color-mix(in oklab, var(--accent) 35%, transparent);
       }
+      /* The shelf is drag-sortable (m21, SPEC §6) — native HTML5 DnD, so the
+         reflow is instant DOM moves rather than an animated transform. */
+      .card {
+        cursor: grab;
+      }
+      .card:active {
+        cursor: grabbing;
+      }
+      .card.dragging {
+        opacity: 0.4;
+      }
       .card-host {
         display: flex;
         align-items: center;

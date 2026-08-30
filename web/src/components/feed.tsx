@@ -5,8 +5,28 @@
 // infinite-scroll sentinel. Row edits (title/tags/note/archive, highlight
 // delete) PATCH/DELETE then reconcile local state — see the comments inside
 // `Feed` for the reconciliation model.
+import {
+	type Announcements,
+	closestCenter,
+	DndContext,
+	type DragEndEvent,
+	KeyboardSensor,
+	MouseSensor,
+	type ScreenReaderInstructions,
+	TouchSensor,
+	useSensor,
+	useSensors,
+} from "@dnd-kit/core";
+import {
+	rectSortingStrategy,
+	SortableContext,
+	sortableKeyboardCoordinates,
+	useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
+import { moveItem, orderShelf } from "../lib/shelfOrder";
 import { cn } from "../lib/utils";
 import { type ApiBookmark, Favicon, hostOf, LogRow } from "./log-row";
 
@@ -19,7 +39,9 @@ type ListResponse = {
 	total?: number;
 	matching?: number;
 	facets?: Array<{ tag: string; count: number }>;
-	// m13 pinned shelf: every pinned row, most recently pinned first.
+	// m13 pinned shelf: every pinned row. Since m21 the array is in the user's
+	// hand-arranged order (`pin_position asc`, SPEC §8) — the order IS the
+	// contract; `pin_position` itself is not serialized.
 	// Optional for the same integration-window reason as the aggregates.
 	pinned?: ApiBookmark[];
 };
@@ -203,6 +225,17 @@ export function Feed() {
 	// later pin state changes made from the extension popup.
 	const [pinnedExtra, setPinnedExtra] = useState<ApiBookmark[]>([]);
 	const [unpinned, setUnpinned] = useState<Set<number>>(new Set());
+	// m21 shelf reordering (SPEC §9): the order a drop painted, laid over the
+	// server's shelf by `orderShelf` until a response confirms it. Same
+	// released-on-confirmation contract as the overlays above — and, like
+	// them, NOT reset on an SWR key change: the shelf is query-independent, so
+	// typing in the search box must not drop a reorder still in flight.
+	const [orderOverride, setOrderOverride] = useState<number[] | null>(null);
+	const [reorderError, setReorderError] = useState<string | null>(null);
+	// Monotonic drop counter. A slow FIRST PUT must never paint its response
+	// over a newer drop's override, so a stale response is dropped whole: no
+	// `mutate`, no override release, no error.
+	const reorderSeqRef = useRef(0);
 
 	// Reset all paging/local-edit state whenever the query, tag filter, or the
 	// feed/archive view changes (the SWR key, `key`, captures all of them).
@@ -276,6 +309,22 @@ export function Feed() {
 			return new Set([...prev].filter((id) => baseIds.has(id)));
 		});
 	}, [data, pinnedExtra]);
+
+	// m21 (SPEC §9): release the drag order override once a response's own
+	// `pinned` order already IS the order the override paints. Same reason as
+	// the pin/unpin overlays above: a confirmed override held longer would
+	// mask a reorder made on the other surface (the extension's new tab
+	// shelf). A response that still shows the pre-drop order confirms nothing
+	// and leaves the override standing, so the cards never flick back.
+	useEffect(() => {
+		const base = data?.pinned;
+		if (!base || orderOverride === null) {
+			return;
+		}
+		if (orderShelf(base, orderOverride).confirmed) {
+			setOrderOverride(null);
+		}
+	}, [data, orderOverride]);
 
 	const items = useMemo(() => {
 		const base = [...(data?.bookmarks ?? []), ...morePages.flat()];
@@ -513,13 +562,15 @@ export function Feed() {
 			}
 		} else if (patch.pinned !== undefined) {
 			if (patch.pinned) {
-				// Into the shelf (front — most recently pinned first). The row
-				// also leaves the current list when that list can no longer
-				// hold it: the feed log (the server excludes pinned rows) and
-				// the archived view (pinning unarchives, search or not). In a
-				// live search it stays listed — pinned rows remain findable —
-				// so it just takes the override.
-				setPinnedExtra((prev) => [updated, ...prev.filter((b) => b.id !== id)]);
+				// Into the shelf, at the END (m21: `pin_position = max + 1`,
+				// SPEC §8 — once the order is hand-arranged a new pin must not
+				// shove every card over). The row also leaves the current list
+				// when that list can no longer hold it: the feed log (the
+				// server excludes pinned rows) and the archived view (pinning
+				// unarchives, search or not). In a live search it stays listed
+				// — pinned rows remain findable — so it just takes the
+				// override.
+				setPinnedExtra((prev) => [...prev.filter((b) => b.id !== id), updated]);
 				setUnpinned((prev) => {
 					const next = new Set(prev);
 					next.delete(id);
@@ -784,13 +835,67 @@ export function Feed() {
 	);
 
 	// Shelf = server's pinned list + rows pinned since the last revalidation
-	// (front — most recent first), minus rows unpinned/archived since. Once
-	// the revalidated page lands the overlays dedupe into no-ops.
+	// (AFTER the server's rows — m21: a new pin joins the END of the shelf,
+	// SPEC §8), minus rows unpinned/archived since. Once the revalidated page
+	// lands the overlays dedupe into no-ops. `orderShelf` then lays a pending
+	// drag order (m21) over the result; with no override it is the identity.
 	const shelf = useMemo(() => {
 		const base = data?.pinned ?? [];
 		const extra = pinnedExtra.filter((p) => !base.some((b) => b.id === p.id));
-		return [...extra, ...base].filter((b) => !unpinned.has(b.id));
-	}, [data, pinnedExtra, unpinned]);
+		const composed = [...base, ...extra].filter((b) => !unpinned.has(b.id));
+		return orderShelf(composed, orderOverride).items;
+	}, [data, pinnedExtra, unpinned, orderOverride]);
+
+	// m21 drop handler (SPEC §9): paint the new order at once through the
+	// override, then send ONE `PUT /api/bookmarks/pinned` with the full id
+	// list. The response's shelf goes straight into the SWR cache so the next
+	// poll can't flash the old order back; a failure clears the override (the
+	// cards snap back to the server's order) and shows the error line.
+	async function reorderShelf(activeId: number, overId: number) {
+		const from = shelf.findIndex((b) => b.id === activeId);
+		const to = shelf.findIndex((b) => b.id === overId);
+		if (from === -1 || to === -1) {
+			return;
+		}
+		const next = moveItem(shelf, from, to);
+		if (next === shelf) {
+			return;
+		}
+		const ids = next.map((b) => b.id);
+		setOrderOverride(ids);
+		setReorderError(null);
+		const seq = reorderSeqRef.current + 1;
+		reorderSeqRef.current = seq;
+		try {
+			const res = await fetch("/api/bookmarks/pinned", {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ ids }),
+			});
+			if (!res.ok) {
+				throw new Error(`request failed (${res.status})`);
+			}
+			const { pinned } = (await res.json()) as { pinned: ApiBookmark[] };
+			if (reorderSeqRef.current !== seq) {
+				// A newer drop is already on screen and in flight — this
+				// response is history. Don't paint it, don't release the newer
+				// override, don't report anything.
+				return;
+			}
+			// `revalidate: false`: the PUT's own response IS the confirmed
+			// shelf (SPEC §8), so there is nothing to go and re-ask for. The
+			// release effect above then drops the override on this `data`.
+			mutate((current) => (current ? { ...current, pinned } : current), {
+				revalidate: false,
+			});
+		} catch {
+			if (reorderSeqRef.current !== seq) {
+				return;
+			}
+			setOrderOverride(null);
+			setReorderError("couldn't save order");
+		}
+	}
 
 	const facetFilterTrimmed = facetFilter.trim().toLowerCase();
 	const visibleFacets = facetFilterTrimmed
@@ -953,6 +1058,8 @@ export function Feed() {
 							open={pinsOpen}
 							onToggleOpen={() => setPinsOpen((open) => !open)}
 							onUnpin={(id) => patchRow(id, { pinned: false })}
+							onReorder={reorderShelf}
+							error={reorderError}
 						/>
 					) : null}
 
@@ -1053,50 +1160,186 @@ function EmptyState({
 	);
 }
 
+// m21 (SPEC §9): the keyboard path is the ⋮⋮ grip, so the instructions have
+// to name it — dnd-kit's default text says "press the space bar" with no hint
+// of what to focus first.
+const SHELF_SR_INSTRUCTIONS: ScreenReaderInstructions = {
+	draggable:
+		"To reorder a pinned bookmark, focus its reorder grip and press space or enter. " +
+		"While dragging, use the arrow keys to move the card one slot at a time. " +
+		"Press space or enter again to drop it in its new position, or press escape to cancel.",
+};
+
+/**
+ * m21: `prefers-reduced-motion`. Read once per shelf (not per card) and passed
+ * down, so a shelf of 30 pins keeps ONE media-query listener. Starts `false`
+ * and settles in an effect — SSR has no `matchMedia`, and the initial paint
+ * carries no transform to animate anyway.
+ */
+function usePrefersReducedMotion() {
+	const [reduced, setReduced] = useState(false);
+	useEffect(() => {
+		if (typeof window === "undefined" || !window.matchMedia) {
+			return;
+		}
+		const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+		setReduced(query.matches);
+		const onChange = (e: MediaQueryListEvent) => setReduced(e.matches);
+		query.addEventListener("change", onChange);
+		return () => query.removeEventListener("change", onChange);
+	}, []);
+	return reduced;
+}
+
 // m13 pinned shelf (mock `Feed with Pins`): PINNED strip with count and a
 // hide/show toggle, over a collapsible auto-fill card grid.
+// m21 (SPEC §9): the grid is drag-and-drop sortable — pointer (8px activation,
+// so a plain click still opens the bookmark), touch (200ms hold, so a swipe
+// still scrolls) and keyboard (through each card's ⋮⋮ grip). A COLLAPSED shelf
+// has nothing to drag, so it renders no DndContext at all.
 function PinnedShelf({
 	items,
 	open,
 	onToggleOpen,
 	onUnpin,
+	onReorder,
+	error,
 }: {
 	items: ApiBookmark[];
 	open: boolean;
 	onToggleOpen: () => void;
 	onUnpin: (id: number) => void;
+	onReorder: (activeId: number, overId: number) => void;
+	/** m21: `couldn't save order` after a failed PUT; null once one succeeds. */
+	error?: string | null;
 }) {
+	const reduceMotion = usePrefersReducedMotion();
+	const sensors = useSensors(
+		// Mouse: an 8px slop so a click on the card body is still a click. (Mouse,
+		// not Pointer: dnd-kit pairs Mouse+Touch so the touch hold below is never
+		// out-raced by the pointer distance constraint on a touch swipe.)
+		useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
+		// Touch: hold to lift, so a vertical swipe scrolls the feed instead.
+		useSensor(TouchSensor, {
+			activationConstraint: { delay: 200, tolerance: 5 },
+		}),
+		useSensor(KeyboardSensor, {
+			coordinateGetter: sortableKeyboardCoordinates,
+		}),
+	);
+
+	const ids = useMemo(() => items.map((b) => b.id), [items]);
+	// dnd-kit's live region only knows ids; announcements have to name cards
+	// the way the user sees them (SPEC §9).
+	const labels = useMemo(
+		() =>
+			new Map(
+				items.map((b) => [b.id, b.title || hostOf(b.url) || b.url] as const),
+			),
+		[items],
+	);
+
+	const announcements: Announcements = useMemo(() => {
+		const nameOf = (id: string | number) =>
+			labels.get(Number(id)) ?? `pinned bookmark ${id}`;
+		const slotOf = (id: string | number) => ids.indexOf(Number(id)) + 1;
+		const total = ids.length;
+		return {
+			onDragStart: ({ active }) =>
+				`Picked up ${nameOf(active.id)}. It is pinned in position ${slotOf(active.id)} of ${total}.`,
+			onDragOver: ({ active, over }) =>
+				over
+					? `${nameOf(active.id)} was moved to position ${slotOf(over.id)} of ${total}.`
+					: `${nameOf(active.id)} is no longer over a shelf position.`,
+			onDragEnd: ({ active, over }) =>
+				over
+					? `${nameOf(active.id)} was dropped in position ${slotOf(over.id)} of ${total}.`
+					: `${nameOf(active.id)} was dropped. The shelf order is unchanged.`,
+			onDragCancel: ({ active }) =>
+				`Reordering cancelled. ${nameOf(active.id)} stays in position ${slotOf(active.id)} of ${total}.`,
+		};
+	}, [ids, labels]);
+
+	function handleDragEnd(event: DragEndEvent) {
+		const { active, over } = event;
+		if (!over || active.id === over.id) {
+			return;
+		}
+		onReorder(Number(active.id), Number(over.id));
+	}
+
+	const strip = (
+		<div
+			className={cn(
+				"flex items-center gap-2 bg-[var(--log-panel)] px-4 pt-1.5",
+				// Closed: the strip is the whole shelf, so it draws the rule
+				// the grid would otherwise carry — unless the error line below
+				// is showing, in which case that carries it instead.
+				!open && !error && "border-b border-[var(--log-rule)] pb-1.5",
+			)}
+		>
+			<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+				PINNED
+			</span>
+			<span className="font-mono text-[10.5px] text-[var(--log-faint)]">
+				{items.length}
+			</span>
+			<button
+				type="button"
+				onClick={onToggleOpen}
+				className="ml-auto font-mono text-[10px] text-[var(--log-faint)] hover:text-[var(--log-fg)]"
+			>
+				{open ? "hide ▴" : "show ▾"}
+			</button>
+		</div>
+	);
+
+	const errorLine = error ? (
+		<p
+			className={cn(
+				"bg-[var(--log-panel)] px-4 pt-1 font-mono text-[10.5px] text-destructive",
+				!open && "border-b border-[var(--log-rule)] pb-1.5",
+			)}
+		>
+			{error}
+		</p>
+	) : null;
+
+	if (!open) {
+		return (
+			<Fragment>
+				{strip}
+				{errorLine}
+			</Fragment>
+		);
+	}
+
 	return (
 		<Fragment>
-			<div
-				className={cn(
-					"flex items-center gap-2 bg-[var(--log-panel)] px-4 pt-1.5",
-					// Closed: the strip is the whole shelf, so it draws the rule
-					// the grid would otherwise carry.
-					!open && "border-b border-[var(--log-rule)] pb-1.5",
-				)}
+			{strip}
+			{errorLine}
+			<DndContext
+				sensors={sensors}
+				collisionDetection={closestCenter}
+				onDragEnd={handleDragEnd}
+				accessibility={{
+					announcements,
+					screenReaderInstructions: SHELF_SR_INSTRUCTIONS,
+				}}
 			>
-				<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
-					PINNED
-				</span>
-				<span className="font-mono text-[10.5px] text-[var(--log-faint)]">
-					{items.length}
-				</span>
-				<button
-					type="button"
-					onClick={onToggleOpen}
-					className="ml-auto font-mono text-[10px] text-[var(--log-faint)] hover:text-[var(--log-fg)]"
-				>
-					{open ? "hide ▴" : "show ▾"}
-				</button>
-			</div>
-			{open ? (
-				<div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-2 border-b border-[var(--log-rule)] bg-[var(--log-panel)] px-4 pt-2.5 pb-3">
-					{items.map((b) => (
-						<PinnedCard key={b.id} bookmark={b} onUnpin={() => onUnpin(b.id)} />
-					))}
-				</div>
-			) : null}
+				<SortableContext items={ids} strategy={rectSortingStrategy}>
+					<div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-2 border-b border-[var(--log-rule)] bg-[var(--log-panel)] px-4 pt-2.5 pb-3">
+						{items.map((b) => (
+							<PinnedCard
+								key={b.id}
+								bookmark={b}
+								onUnpin={() => onUnpin(b.id)}
+								reduceMotion={reduceMotion}
+							/>
+						))}
+					</div>
+				</SortableContext>
+			</DndContext>
 		</Fragment>
 	);
 }
@@ -1104,30 +1347,89 @@ function PinnedShelf({
 function PinnedCard({
 	bookmark,
 	onUnpin,
+	reduceMotion,
 }: {
 	bookmark: ApiBookmark;
 	onUnpin: () => void;
+	reduceMotion: boolean;
 }) {
+	const {
+		attributes,
+		listeners,
+		setNodeRef,
+		setActivatorNodeRef,
+		transform,
+		transition,
+		isDragging,
+	} = useSortable({ id: bookmark.id });
 	const host = hostOf(bookmark.url);
+	const label = bookmark.title || bookmark.url;
 	const openBookmark = () =>
 		window.open(bookmark.url, "_blank", "noopener,noreferrer");
 
+	// m21: a COMPLETED drag must never open the bookmark — the pointerup that
+	// ends a lift still fires a trailing click on the card. The flag is armed
+	// the moment the card starts dragging and disarmed by whichever comes
+	// first: the click it was meant to swallow, or the next fresh pointerdown
+	// (which is what keeps a KEYBOARD reorder — no trailing click at all —
+	// from eating the user's next real click).
+	const draggedRef = useRef(false);
+	useEffect(() => {
+		if (isDragging) {
+			draggedRef.current = true;
+		}
+	}, [isDragging]);
+
+	// The grip is a real <button>, so dnd-kit's role="button" would be
+	// redundant; everything else in `attributes` (tabIndex, aria-describedby
+	// pointing at the instructions, aria-roledescription) is what the keyboard
+	// sensor needs.
+	const { role: _dragRole, ...gripAttributes } = attributes;
+
 	return (
-		// The card holds a nested unpin button, which rules out wrapping it in
-		// an <a> (invalid nesting) — same trade-off as LogRow.
-		// biome-ignore lint/a11y/useSemanticElements: see above — the nested unpin button forbids a native link/button wrapper.
+		// The card holds nested unpin/reorder buttons, which rules out wrapping
+		// it in an <a> (invalid nesting) — same trade-off as LogRow.
+		// biome-ignore lint/a11y/useSemanticElements: see above — the nested unpin and reorder buttons forbid a native link/button wrapper.
 		<div
+			ref={setNodeRef}
 			role="button"
 			tabIndex={0}
-			onClick={openBookmark}
+			title={bookmark.url}
+			style={{
+				transform: CSS.Transform.toString(transform),
+				// Reduced motion: the cards jump to their new slots instead of
+				// sliding. The drag itself still tracks the pointer.
+				transition: reduceMotion ? undefined : transition,
+			}}
+			// Pointer/touch lift from anywhere on the card (m21, SPEC §9)…
+			{...listeners}
+			onPointerDown={(e) => {
+				draggedRef.current = false;
+				listeners?.onPointerDown?.(e);
+			}}
+			// …but NOT the keyboard: the card's own Enter/Space stay "open the
+			// bookmark", and the ⋮⋮ grip below is the keyboard drag affordance.
+			// This override deliberately replaces the KeyboardSensor's
+			// activator spread just above.
 			onKeyDown={(e) => {
 				if (e.key === "Enter" || e.key === " ") {
 					e.preventDefault();
 					openBookmark();
 				}
 			}}
-			title={bookmark.url}
-			className="flex cursor-pointer flex-col gap-1.5 rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-2 hover:border-[var(--log-strong-border)]"
+			onClick={() => {
+				if (draggedRef.current) {
+					draggedRef.current = false;
+					return;
+				}
+				openBookmark();
+			}}
+			className={cn(
+				"flex cursor-pointer flex-col gap-1.5 rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-2 hover:border-[var(--log-strong-border)]",
+				// Grid items honour z-index without positioning; the lifted
+				// card rides over the ones sliding past it.
+				isDragging && "z-10 opacity-50",
+			)}
 		>
 			<div className="flex items-center gap-1.5">
 				{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
@@ -1136,7 +1438,23 @@ function PinnedCard({
 				</span>
 				<button
 					type="button"
-					aria-label={`Unpin ${bookmark.title || bookmark.url}`}
+					ref={setActivatorNodeRef}
+					aria-label={`Reorder ${label}`}
+					{...gripAttributes}
+					{...listeners}
+					// The grip drags; it never opens the bookmark.
+					onClick={(e) => e.stopPropagation()}
+					className="shrink-0 cursor-grab touch-none font-mono text-[10px] text-[var(--log-ghost)] hover:text-[var(--log-fg)] active:cursor-grabbing"
+				>
+					⋮⋮
+				</button>
+				<button
+					type="button"
+					aria-label={`Unpin ${label}`}
+					// m21: a button inside a sortable card is not a drag
+					// surface — swallow the pointerdown so hovering over ✕ and
+					// clicking it can't start a lift.
+					onPointerDown={(e) => e.stopPropagation()}
 					onClick={(e) => {
 						e.stopPropagation();
 						onUnpin();

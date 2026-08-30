@@ -215,7 +215,8 @@ describe("applySync", () => {
 			const pinTime = new Date("2026-02-01T00:00:00.000Z");
 			await db
 				.update(bookmarks)
-				.set({ pinnedAt: pinTime })
+				// m21: pinned_at and pin_position go together (a CHECK).
+				.set({ pinnedAt: pinTime, pinPosition: 0 })
 				.where(eq(bookmarks.userId, USER_A));
 
 			const result = await applySync(db, USER_A, "live", [

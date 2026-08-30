@@ -6,7 +6,9 @@
  *
  * Everything here is READ-ONLY. The new tab page never enqueues an outbox
  * entry, never writes a bookmark, and never touches sync state; the snapshot
- * is a render cache and nothing else.
+ * is a render cache and nothing else. The page's one write — the m21 shelf
+ * reorder (`PUT /api/bookmarks/pinned`) — deliberately lives in `pinOrder.ts`
+ * so that stays true here.
  */
 
 import { type KeyValueStorage, NEWTAB_KEY } from "./types";
@@ -75,7 +77,11 @@ function asBookmark(raw: unknown): NewTabBookmark | undefined {
 	};
 }
 
-function asBookmarkList(raw: unknown): NewTabBookmark[] {
+/**
+ * Tolerant row-array reader, shared with `pinOrder.ts` so the reorder
+ * response's shelf is parsed exactly like the listing's (m21, SPEC §8).
+ */
+export function asBookmarkList(raw: unknown): NewTabBookmark[] {
 	if (!Array.isArray(raw)) return [];
 	const rows: NewTabBookmark[] = [];
 	for (const entry of raw) {
