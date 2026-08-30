@@ -1,4 +1,7 @@
-// GET /api/bookmarks — SPEC §8. Session-authed. `q`/`cursor`/`archived`/`tag`
+// GET /api/bookmarks — SPEC §8. Session-authed OR Bearer-token-authed (m20:
+// the extension's new tab page reads pins/recent/search with the pairing
+// token; an Authorization header picks the token path, see requestAuth.ts).
+// `q`/`cursor`/`archived`/`tag`
 // are URL search params (not a body), validated with a strict-ish Zod schema:
 // `archived` accepts ONLY the literal "1" (see bookmarks.ts header for the
 // archived-view semantics decision); `tag` is repeatable (?tag=a&tag=b, AND
@@ -14,6 +17,7 @@
 import { after } from "next/server";
 import { z } from "zod";
 import { db } from "../../../db";
+import { authenticateApiToken } from "../../../lib/apiTokenAuth";
 import { getAuthedUser } from "../../../lib/auth";
 import { enrichBookmarkMetadata } from "../../../lib/bookmarkMetadata";
 import {
@@ -22,6 +26,7 @@ import {
 	listBookmarks,
 } from "../../../lib/bookmarks";
 import { scrapePageMetadata } from "../../../lib/firecrawl";
+import { authenticateRequest } from "../../../lib/requestAuth";
 
 // Node runtime: the postgres driver needs it.
 export const runtime = "nodejs";
@@ -40,8 +45,12 @@ const querySchema = z.object({
 });
 
 export async function GET(request: Request) {
-	const user = await getAuthedUser();
-	if (!user) {
+	// POST below stays session-only — the token grants READ here, nothing more.
+	const userId = await authenticateRequest(request, {
+		resolveToken: authenticateApiToken,
+		resolveSession: getAuthedUser,
+	});
+	if (!userId) {
 		return Response.json({ error: "unauthorized" }, { status: 401 });
 	}
 
@@ -62,7 +71,7 @@ export async function GET(request: Request) {
 	const { q, cursor, archived, tag } = parsed.data;
 
 	try {
-		const result = await listBookmarks(db, user.id, {
+		const result = await listBookmarks(db, userId, {
 			q,
 			cursor,
 			archived: archived === "1",
