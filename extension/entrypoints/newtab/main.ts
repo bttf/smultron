@@ -133,10 +133,15 @@ function renderShelf(pinned: NewTabBookmark[]): void {
 	cardsEl.replaceChildren(...pinned.map(renderCard));
 }
 
-/** `label` names what the rows are; `empty` is shown when there are none. */
+/**
+ * `label` names what the rows are; `empty` is shown when there are none.
+ * The feed trims to `LOG_LIMIT`; search passes `limit: rows.length` because
+ * the ranked page replaces the log whole (SPEC §6) — the RESULTS count must
+ * never claim rows the page doesn't show.
+ */
 function renderLog(
 	rows: NewTabBookmark[],
-	options: { label: string; empty: HTMLElement },
+	options: { label: string; empty: HTMLElement; limit?: number },
 ): void {
 	logLabelEl.textContent = options.label;
 	if (rows.length === 0) {
@@ -145,7 +150,7 @@ function renderLog(
 	}
 	const now = new Date();
 	logEl.replaceChildren(
-		...rows.slice(0, LOG_LIMIT).map((b) => renderRow(b, now)),
+		...rows.slice(0, options.limit ?? LOG_LIMIT).map((b) => renderRow(b, now)),
 	);
 }
 
@@ -209,6 +214,8 @@ async function loadConfig(): Promise<NewTabConfig | undefined> {
 let feedPage: NewTabPage = { pinned: [], recent: [] };
 /** False until a fetch succeeds: the rows on screen are the cached ones. */
 let live = false;
+/** True only after a refresh FAILED with cached rows to keep (SPEC §6). */
+let offline = false;
 /** Set once the config is known; search is inert until then. */
 let activeConfig: NewTabConfig | undefined;
 
@@ -218,14 +225,17 @@ function paintFeed(): void {
 		label: "RECENT",
 		empty: live ? emptyAccountMessage() : message("…"),
 	});
-	setMeta(live ? "" : "offline — showing the last snapshot", !live);
+	setMeta(offline ? "offline — showing the last snapshot" : "", offline);
 }
 
 // ---------------------------------------------------------------------------
 // Search. Latest-wins so a slow earlier response can never overwrite the
 // answer to what is being typed now (SPEC §6).
 
-const runSearch = createLatestOnly<void>();
+// Tasks RESOLVE TO their paint rather than painting as a side effect — the
+// sequencer discards a superseded task's value, so a paint that only happens
+// on the resolved value is what makes latest-wins actually bind.
+const runSearch = createLatestOnly<(() => void) | undefined>();
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let searchController: AbortController | undefined;
 
@@ -242,44 +252,45 @@ async function submitSearch(config: NewTabConfig): Promise<void> {
 	if (q === "") {
 		searchController = undefined;
 		// An emptied box is not a query — restore the feed without a round trip.
-		await runSearch(() => Promise.resolve(paintFeed()));
+		const paint = await runSearch(() => Promise.resolve(() => paintFeed()));
+		paint?.();
 		return;
 	}
 	const controller = new AbortController();
 	searchController = controller;
 
-	await runSearch(async () => {
+	const paint = await runSearch(async () => {
 		const result = await fetchBookmarksPage(config, fetch, {
 			q,
 			signal: controller.signal,
 		});
 		if (!result.ok) {
-			if (result.status === 401) {
-				renderUnpaired();
-				return;
-			}
-			// An aborted request is a superseded one — its paint is discarded by
-			// the sequencer, so there is nothing to report.
-			if (controller.signal.aborted) return;
-			renderLog([], {
-				label: "RESULTS",
-				empty: errorLine(
-					result.status === null
-						? `search failed: network error: ${result.message}`
-						: `search failed: HTTP ${result.status}`,
-				),
-			});
-			return;
+			if (result.status === 401) return () => renderUnpaired();
+			// An aborted request is a superseded one — nothing to report.
+			if (controller.signal.aborted) return undefined;
+			return () =>
+				renderLog([], {
+					label: "RESULTS",
+					empty: errorLine(
+						result.status === null
+							? `search failed: network error: ${result.message}`
+							: `search failed: HTTP ${result.status}`,
+					),
+				});
 		}
-		// The shelf is query-independent server-side (SPEC §8) — a search
-		// refreshes it rather than hiding it.
-		renderShelf(result.value.pinned);
-		renderLog(result.value.recent, {
-			label: `RESULTS ${result.value.recent.length}`,
-			empty: message("No matches."),
-		});
-		setMeta("");
+		return () => {
+			// The shelf is query-independent server-side (SPEC §8) — a search
+			// refreshes it rather than hiding it.
+			renderShelf(result.value.pinned);
+			renderLog(result.value.recent, {
+				label: `RESULTS ${result.value.recent.length}`,
+				empty: message("No matches."),
+				limit: result.value.recent.length,
+			});
+			setMeta("");
+		};
 	});
+	paint?.();
 }
 
 // ---------------------------------------------------------------------------
@@ -347,8 +358,12 @@ async function init(): Promise<void> {
 			renderUnpaired();
 			return;
 		}
-		// A failed refresh keeps whatever the cache had on screen behind the
-		// `offline` mark; with no cache there is nothing to keep.
+		// A failed refresh keeps the cached rows behind the `offline` mark
+		// (SPEC §6); the mark appears only now, never during revalidation.
+		offline = snapshot !== undefined;
+		// A search typed while the feed was still loading owns the log — the
+		// feed's failure must not paint over its results.
+		if (searchEl.value.trim() !== "") return;
 		if (snapshot === undefined) {
 			setMeta("");
 			renderLog([], {
@@ -359,6 +374,8 @@ async function init(): Promise<void> {
 						: `couldn't load bookmarks: HTTP ${result.status}`,
 				),
 			});
+		} else {
+			paintFeed();
 		}
 		return;
 	}
