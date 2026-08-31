@@ -482,6 +482,12 @@ export async function addBookmark(
 	return { bookmark, created: wasInserted };
 }
 
+/**
+ * The fields BOTH patch routes accept. `url` is deliberately NOT here: on
+ * `PATCH /api/bookmarks/by-url` the URL is the row SELECTOR, never an edit
+ * (SPEC §8, m22). `buildPatchSet` below likewise knows nothing about `url`,
+ * so even a future field-passthrough cannot leak one into the by-url path.
+ */
 export type PatchBookmarkInput = {
 	title?: string;
 	tags?: string[];
@@ -500,11 +506,24 @@ export type PatchBookmarkInput = {
 	pinned?: boolean;
 };
 
+/**
+ * `PATCH /api/bookmarks/:id` only (m22, SPEC §8): the ONE way to correct a
+ * bookmark's URL. `url` is the new RAW URL — already trimmed and validated by
+ * the route (parseable http(s), dotted hostname) — from which
+ * `url_normalized` is recomputed here (Hard rule #3: one implementation).
+ */
+export type PatchBookmarkByIdInput = PatchBookmarkInput & {
+	url?: string;
+};
+
 type PatchSet = {
 	title?: string;
 	tags?: string[];
 	note?: string | null;
 	archivedAt?: Date | null;
+	url?: string;
+	urlNormalized?: string;
+	faviconUrl?: string | null;
 	// The pin columns are SQL expressions on the pin path (m21): the new slot
 	// is read from the caller's other rows inside the same UPDATE, so a pin
 	// never becomes a read-then-write race.
@@ -591,21 +610,130 @@ async function patchWhere(
 }
 
 /**
+ * Thrown by `patchBookmark` when the edited URL normalizes onto ANOTHER of the
+ * caller's rows (SPEC §8: `409 {error: "duplicate_url", conflict}`). Nothing
+ * was written — never a silent merge, because reconciling two rows' tags,
+ * highlights and pins has no right answer; the client shows the conflict.
+ * `conflict` is the bare row that already owns the key (null only in the race
+ * where it vanished between the failed UPDATE and the lookup).
+ */
+export class DuplicateUrlError extends Error {
+	readonly conflict: BookmarkRow | null;
+
+	constructor(conflict: BookmarkRow | null) {
+		super("duplicate url");
+		this.name = "DuplicateUrlError";
+		this.conflict = conflict;
+	}
+}
+
+/**
+ * Postgres SQLSTATE 23505 (unique_violation). Drizzle wraps driver errors in a
+ * `DrizzleQueryError` whose `cause` is the real pg error — identical for
+ * postgres-js (prod) and PGlite (tests) — so walk the chain rather than
+ * matching one wrapper's shape.
+ */
+function isUniqueViolation(err: unknown): boolean {
+	let current: unknown = err;
+	for (let depth = 0; current != null && depth < 5; depth++) {
+		if (
+			typeof current === "object" &&
+			(current as { code?: unknown }).code === "23505"
+		) {
+			return true;
+		}
+		current = (current as { cause?: unknown }).cause;
+	}
+	return false;
+}
+
+/** `new URL(raw).host`, or null when the URL doesn't parse. */
+function hostOf(raw: string): string | null {
+	try {
+		return new URL(raw).host;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Updates ONLY the provided fields, scoped to `user_id` for ownership.
  * `archived: true` sets `archived_at = now()`; `false` clears it to null.
  * Never bumps `updated_at` (see `patchWhere`).
+ *
+ * `url` (m22, `:id` route only): replaces `url` and recomputes
+ * `url_normalized`. When the new URL's HOST differs from the current row's —
+ * an unparseable current URL counts as different — `favicon_url` is cleared
+ * too: the stored icon belongs to the old site and the hostname-derived
+ * fallback (SPEC §9) is instantly right. Title, tags, note, pins, highlights
+ * and any article are untouched. A collision with another of the caller's
+ * rows throws `DuplicateUrlError` and writes nothing.
  */
 export async function patchBookmark(
 	db: BookmarksDb,
 	userId: string,
 	id: number,
-	input: PatchBookmarkInput,
+	input: PatchBookmarkByIdInput,
 ): Promise<BookmarkRow | null> {
-	return patchWhere(
-		db,
-		and(eq(bookmarks.id, id), eq(bookmarks.userId, userId)),
-		input,
-	);
+	const cond = and(eq(bookmarks.id, id), eq(bookmarks.userId, userId));
+	const { url, ...rest } = input;
+
+	if (url === undefined) {
+		return patchWhere(db, cond, rest);
+	}
+
+	const rawUrl = url.trim();
+	const urlNormalized = normalizeUrl(rawUrl);
+
+	try {
+		// One transaction: the favicon decision needs the CURRENT row's host, so
+		// the read and the write must see the same row version. Both statements
+		// carry the ownership condition.
+		return await db.transaction(async (tx) => {
+			const [current] = await tx
+				.select({ url: bookmarks.url })
+				.from(bookmarks)
+				.where(cond)
+				.limit(1);
+			if (!current) {
+				return null;
+			}
+
+			const set: PatchSet = {
+				...buildPatchSet(rest),
+				url: rawUrl,
+				urlNormalized,
+			};
+			const currentHost = hostOf(current.url);
+			if (currentHost === null || currentHost !== hostOf(rawUrl)) {
+				set.faviconUrl = null;
+			}
+
+			const rows = await tx
+				.update(bookmarks)
+				.set(set)
+				.where(cond)
+				.returning(BOOKMARK_COLUMNS);
+			return rows[0] ?? null;
+		});
+	} catch (err) {
+		if (!isUniqueViolation(err)) {
+			throw err;
+		}
+		// The transaction rolled back, so this lookup runs on the outer
+		// connection: fetch the row that already owns the key for the 409 body.
+		const [conflict] = await db
+			.select(BOOKMARK_COLUMNS)
+			.from(bookmarks)
+			.where(
+				and(
+					eq(bookmarks.userId, userId),
+					eq(bookmarks.urlNormalized, urlNormalized),
+				),
+			)
+			.limit(1);
+		throw new DuplicateUrlError(conflict ?? null);
+	}
 }
 
 /**

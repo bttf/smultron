@@ -86,6 +86,10 @@ export async function PATCH(request: Request) {
 		);
 	}
 
+	// `url` is the row SELECTOR here, never an edit (SPEC §8, m22): URL editing
+	// belongs to the `:id` route alone. It is destructured out before the input
+	// reaches the lib, and `PatchBookmarkInput`/`buildPatchSet` have no notion
+	// of `url` at all, so it cannot leak through this path.
 	const { url, ...input } = parsed.data;
 	const updated = await patchBookmarkByUrl(db, auth.userId, url, input);
 	if (!updated) {
