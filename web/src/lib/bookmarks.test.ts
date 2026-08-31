@@ -21,6 +21,7 @@ import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
 import {
 	addBookmark,
+	DuplicateUrlError,
 	getBookmarkByUrl,
 	InvalidCursorError,
 	listBookmarks,
@@ -28,6 +29,7 @@ import {
 	patchBookmarkByUrl,
 	reorderPinned,
 } from "./bookmarks";
+import { normalizeUrl } from "./normalizeUrl";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -83,6 +85,7 @@ type SeedRow = {
 	title: string;
 	tags?: string[];
 	note?: string | null;
+	faviconUrl?: string | null;
 	createdAt: Date;
 	updatedAt: Date;
 	archivedAt?: Date | null;
@@ -132,6 +135,7 @@ async function seed(rows: SeedRow[]) {
 			title: r.title,
 			tags: r.tags ?? [],
 			note: r.note ?? null,
+			faviconUrl: r.faviconUrl ?? null,
 			createdAt: r.createdAt,
 			updatedAt: r.updatedAt,
 			archivedAt: r.archivedAt ?? null,
@@ -783,6 +787,265 @@ describe("patchBookmark", () => {
 	});
 });
 
+describe("patchBookmark — url editing (m22)", () => {
+	const T0 = new Date("2026-01-01T00:00:00.000Z");
+
+	async function seedOne(extra: Partial<SeedRow> = {}) {
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/old-path",
+				title: "Kept title",
+				tags: ["kept"],
+				note: "kept note",
+				faviconUrl: "https://example.com/favicon.ico",
+				createdAt: T0,
+				updatedAt: T0,
+				...extra,
+			},
+		]);
+		const [row] = await db
+			.select()
+			.from(bookmarks)
+			.where(eq(bookmarks.url, extra.url ?? "https://example.com/old-path"));
+		if (!row) {
+			throw new Error("seed failed");
+		}
+		return row;
+	}
+
+	it("replaces url and recomputes url_normalized (§4 applied server-side)", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			url: "https://Example.com/new-path/?utm_source=x&b=1",
+		});
+		expect(updated?.url).toBe("https://Example.com/new-path/?utm_source=x&b=1");
+		expect(updated?.urlNormalized).toBe("https://example.com/new-path?b=1");
+		// Everything else the row owns is untouched.
+		expect(updated?.title).toBe("Kept title");
+		expect(updated?.tags).toEqual(["kept"]);
+		expect(updated?.note).toBe("kept note");
+		expect(updated?.createdAt).toEqual(before.createdAt);
+	});
+
+	it("trims the incoming url before storing and normalizing", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			url: "  https://example.com/trimmed  ",
+		});
+		expect(updated?.url).toBe("https://example.com/trimmed");
+		expect(updated?.urlNormalized).toBe("https://example.com/trimmed");
+	});
+
+	it("keeps the fragment per the m22 rule, directive stripped", async () => {
+		const before = await seedOne();
+		const inbox = await patchBookmark(db, USER_A, before.id, {
+			url: "https://mail.google.com/mail/u/0/#inbox",
+		});
+		expect(inbox?.urlNormalized).toBe("https://mail.google.com/mail/u/0#inbox");
+
+		const directive = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/doc#usage:~:text=foo",
+		});
+		expect(directive?.urlNormalized).toBe("https://example.com/doc#usage");
+	});
+
+	it("never bumps updated_at — alone or alongside other fields", async () => {
+		const before = await seedOne();
+
+		const urlOnly = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/one",
+		});
+		expect(urlOnly?.updatedAt).toEqual(before.updatedAt);
+		expect((await rawRow(before.id))?.updatedAt).toEqual(before.updatedAt);
+
+		const withTitle = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/two",
+			title: "Retitled",
+			tags: ["a"],
+			note: "  ",
+		});
+		expect(withTitle?.url).toBe("https://example.com/two");
+		expect(withTitle?.title).toBe("Retitled");
+		expect(withTitle?.tags).toEqual(["a"]);
+		// note trim→NULL still applies in the same statement.
+		expect(withTitle?.note).toBeNull();
+		expect(withTitle?.updatedAt).toEqual(before.updatedAt);
+		expect((await rawRow(before.id))?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("clears favicon_url when the HOST changes", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			url: "https://other.example.com/old-path",
+		});
+		expect(updated?.faviconUrl).toBeNull();
+	});
+
+	it("keeps favicon_url when only the path, query or fragment changes", async () => {
+		const before = await seedOne();
+
+		const path = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/new-path?q=1",
+		});
+		expect(path?.faviconUrl).toBe("https://example.com/favicon.ico");
+
+		const fragment = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/new-path?q=1#section",
+		});
+		expect(fragment?.faviconUrl).toBe("https://example.com/favicon.ico");
+	});
+
+	it("treats a port change as a host change (URL#host includes the port)", async () => {
+		const before = await seedOne({ url: "https://example.com:8443/a" });
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/a",
+		});
+		expect(updated?.faviconUrl).toBeNull();
+	});
+
+	it("clears favicon_url when the CURRENT url does not parse", async () => {
+		// A pre-normalization row (or junk from an old import): unparseable
+		// counts as a different host, so the stale icon goes.
+		const before = await seedOne({ url: "not a url" });
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/old-path",
+		});
+		expect(updated?.faviconUrl).toBeNull();
+		expect(updated?.urlNormalized).toBe("https://example.com/old-path");
+	});
+
+	it("re-spelling the SAME normalized key is an ordinary update, not a 409", async () => {
+		const before = await seedOne({ url: "https://example.com/same#a" });
+		expect(before.urlNormalized).toBe("https://example.com/same#a");
+
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			// Different raw spelling, identical normalized key.
+			url: "https://Example.com/same/?utm_source=x#a",
+		});
+		expect(updated?.id).toBe(before.id);
+		expect(updated?.url).toBe("https://Example.com/same/?utm_source=x#a");
+		expect(updated?.urlNormalized).toBe("https://example.com/same#a");
+		expect(updated?.faviconUrl).toBe("https://example.com/favicon.ico");
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("throws DuplicateUrlError carrying the conflicting row, changing nothing", async () => {
+		const before = await seedOne();
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/taken",
+				title: "Already saved",
+				tags: ["other"],
+				createdAt: T0,
+				updatedAt: T0,
+			},
+		]);
+
+		await expect(
+			patchBookmark(db, USER_A, before.id, {
+				// A messy spelling of the taken key — the collision is on the
+				// NORMALIZED value, not the raw one.
+				url: "https://EXAMPLE.com/taken/?utm_source=x",
+			}),
+		).rejects.toBeInstanceOf(DuplicateUrlError);
+
+		let caught: DuplicateUrlError | null = null;
+		try {
+			await patchBookmark(db, USER_A, before.id, {
+				url: "https://example.com/taken",
+				title: "should not land",
+			});
+		} catch (err) {
+			caught = err as DuplicateUrlError;
+		}
+		expect(caught).toBeInstanceOf(DuplicateUrlError);
+		expect(caught?.conflict?.url).toBe("https://example.com/taken");
+		expect(caught?.conflict?.title).toBe("Already saved");
+		expect(caught?.conflict?.tags).toEqual(["other"]);
+
+		// The patched row is untouched — no partial write, no title change.
+		const after = await rawRow(before.id);
+		expect(after?.url).toBe("https://example.com/old-path");
+		expect(after?.urlNormalized).toBe("https://example.com/old-path");
+		expect(after?.title).toBe("Kept title");
+		expect(after?.updatedAt).toEqual(before.updatedAt);
+	});
+
+	it("does NOT collide with another USER's identical key (the index is per-user)", async () => {
+		const before = await seedOne();
+		await seed([
+			{
+				userId: USER_B,
+				url: "https://example.com/shared",
+				title: "B's row",
+				createdAt: T0,
+				updatedAt: T0,
+			},
+		]);
+
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/shared",
+		});
+		expect(updated?.urlNormalized).toBe("https://example.com/shared");
+
+		// B's row is untouched.
+		const bRows = await db
+			.select()
+			.from(bookmarks)
+			.where(eq(bookmarks.userId, USER_B));
+		expect(bRows).toHaveLength(1);
+		expect(bRows[0].title).toBe("B's row");
+	});
+
+	it("enforces ownership: user B cannot rewrite user A's url", async () => {
+		const before = await seedOne();
+		const result = await patchBookmark(db, USER_B, before.id, {
+			url: "https://hijacked.example.com/x",
+		});
+		expect(result).toBeNull();
+
+		const after = await rawRow(before.id);
+		expect(after?.url).toBe("https://example.com/old-path");
+	});
+
+	it("returns null (route 404s) for a nonexistent id", async () => {
+		const result = await patchBookmark(db, USER_A, 999_999, {
+			url: "https://example.com/nope",
+		});
+		expect(result).toBeNull();
+	});
+
+	it("the edited row stays findable by its new normalized key", async () => {
+		const before = await seedOne();
+		await patchBookmark(db, USER_A, before.id, {
+			url: "https://mail.google.com/mail/u/0/#inbox",
+		});
+		const found = await getBookmarkByUrl(
+			db,
+			USER_A,
+			"https://mail.google.com/mail/u/0/#inbox",
+		);
+		expect(found?.id).toBe(before.id);
+		expect(found?.urlNormalized).toBe(
+			normalizeUrl("https://mail.google.com/mail/u/0/#inbox"),
+		);
+	});
+
+	it("composes with pinning in one call, still without bumping updated_at", async () => {
+		const before = await seedOne();
+		const updated = await patchBookmark(db, USER_A, before.id, {
+			url: "https://example.com/pinned-and-moved",
+			pinned: true,
+		});
+		expect(updated?.url).toBe("https://example.com/pinned-and-moved");
+		expect(updated?.pinnedAt).not.toBeNull();
+		expect(updated?.updatedAt).toEqual(before.updatedAt);
+		expect((await rawRow(before.id))?.pinPosition).toBe(0);
+	});
+});
+
 describe("pins (m13)", () => {
 	const T0 = new Date("2026-01-01T00:00:00.000Z");
 
@@ -861,23 +1124,26 @@ describe("pins (m13)", () => {
 		expect(updated?.updatedAt).toEqual(before.updatedAt);
 	});
 
-	it("feed log excludes pinned rows; the shelf carries them, most recently pinned first", async () => {
+	it("feed log INCLUDES pinned rows in updated_at order (m22); the shelf carries them too", async () => {
 		const base = Date.parse("2026-01-01T00:00:00.000Z");
 		await seed([
+			// Page 0 @ base, Page 1 @ base-1s, Page 2 @ base-2s.
 			...makeFeedRows(USER_A, 3),
 			{
 				userId: USER_A,
 				url: "https://example.com/pin-old",
 				title: "Pinned earlier",
 				tags: ["tools"],
-				createdAt: new Date(base - 10_000),
-				updatedAt: new Date(base - 10_000),
+				// Sits between Page 0 and Page 1 in the log's chronology.
+				createdAt: new Date(base - 500),
+				updatedAt: new Date(base - 500),
 				pinnedAt: new Date(base - 5_000),
 			},
 			{
 				userId: USER_A,
 				url: "https://example.com/pin-new",
 				title: "Pinned later",
+				// Oldest row of all — the log must not float it to the top.
 				createdAt: new Date(base - 20_000),
 				updatedAt: new Date(base - 20_000),
 				pinnedAt: new Date(base - 1_000),
@@ -885,22 +1151,68 @@ describe("pins (m13)", () => {
 		]);
 
 		const result = await listBookmarks(db, USER_A, {});
-		// The log: only the 3 unpinned rows.
+		// The log: every row, pinned or not, in plain updated_at desc order.
 		expect(result.bookmarks.map((b) => b.title)).toEqual([
 			"Page 0",
+			"Pinned earlier",
 			"Page 1",
 			"Page 2",
+			"Pinned later",
 		]);
-		// The shelf: ordered by pin_position, seeded here in the m13 order.
+		// The shelf still carries them, ordered by pin_position (seeded in the
+		// m13 order) — a pinned row appears in BOTH.
 		expect(result.pinned.map((b) => b.title)).toEqual([
 			"Pinned later",
 			"Pinned earlier",
 		]);
-		// total describes the view (pins included); matching describes the log.
+		// m22: nothing is subtracted any more, so the plain feed has
+		// matching === total.
 		expect(result.total).toBe(5);
-		expect(result.matching).toBe(3);
-		// Facets keep counting pinned rows — they're still part of the view.
+		expect(result.matching).toBe(5);
+		// Facets keep counting pinned rows — they always described the view.
 		expect(result.facets).toEqual([{ tag: "tools", count: 1 }]);
+	});
+
+	it("tag filters apply to pinned rows like any others (m22)", async () => {
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/pinned-tagged",
+				title: "Pinned + tagged",
+				tags: ["tools"],
+				createdAt: new Date(base),
+				updatedAt: new Date(base),
+				pinnedAt: new Date(base),
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/pinned-untagged",
+				title: "Pinned, other tag",
+				tags: ["misc"],
+				createdAt: new Date(base - 1_000),
+				updatedAt: new Date(base - 1_000),
+				pinnedAt: new Date(base - 1_000),
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/plain-tagged",
+				title: "Unpinned + tagged",
+				tags: ["tools"],
+				createdAt: new Date(base - 2_000),
+				updatedAt: new Date(base - 2_000),
+			},
+		]);
+
+		const result = await listBookmarks(db, USER_A, { tags: ["tools"] });
+		expect(result.bookmarks.map((b) => b.title)).toEqual([
+			"Pinned + tagged",
+			"Unpinned + tagged",
+		]);
+		expect(result.matching).toBe(2);
+		expect(result.total).toBe(3);
+		// The shelf ignores the tag filter — it is always the whole shelf.
+		expect(result.pinned).toHaveLength(2);
 	});
 
 	it("search includes pinned rows (they stay findable) and counts them in matching", async () => {
@@ -948,7 +1260,7 @@ describe("pins (m13)", () => {
 			db,
 			USER_A,
 			// Messy raw variant — normalization must land on the same row.
-			"https://example.com/pin-me/#frag",
+			"https://example.com/pin-me/?utm_source=x#:~:text=frag",
 			{ pinned: true },
 		);
 		expect(updated?.id).toBe(before.id);
@@ -972,10 +1284,10 @@ describe("pins (m13)", () => {
 		);
 	});
 
-	it("cursor pagination never surfaces pinned rows on any page", async () => {
-		// 60 unpinned rows (2 pages) with 3 pinned rows interleaved in the
-		// same updated_at range — the not-pinned condition must compose with
-		// the keyset cursor on both pages.
+	it("cursor pagination walks across pinned rows without gap or overlap (m22)", async () => {
+		// 60 unpinned rows with 3 pinned rows interleaved in the same
+		// updated_at range: 63 rows = 2 pages, and the keyset must step over a
+		// pinned row exactly like an unpinned one.
 		const base = Date.parse("2026-01-01T00:00:00.000Z");
 		await seed([
 			...makeFeedRows(USER_A, 60),
@@ -996,13 +1308,19 @@ describe("pins (m13)", () => {
 		const page2 = await listBookmarks(db, USER_A, {
 			cursor: page1.nextCursor ?? undefined,
 		});
-		expect(page2.bookmarks).toHaveLength(10);
+		expect(page2.bookmarks).toHaveLength(13);
 		expect(page2.nextCursor).toBeNull();
 
 		const titles = [...page1.bookmarks, ...page2.bookmarks].map((b) => b.title);
-		expect(titles).toHaveLength(60);
-		expect(titles.some((t) => t.startsWith("Pinned"))).toBe(false);
-		expect(page1.matching).toBe(60);
+		expect(titles).toHaveLength(63);
+		expect(new Set(titles).size).toBe(63);
+		// Each pinned row lands right after the unpinned row it follows in
+		// updated_at order (pinned-i is 500ms older than Page i).
+		expect(titles.indexOf("Pinned 10")).toBe(titles.indexOf("Page 10") + 1);
+		expect(titles.indexOf("Pinned 30")).toBe(titles.indexOf("Page 30") + 1);
+		// …including the one that straddles the page boundary.
+		expect(titles.indexOf("Pinned 55")).toBe(titles.indexOf("Page 55") + 1);
+		expect(page1.matching).toBe(63);
 		expect(page1.total).toBe(63);
 		expect(page1.pinned).toHaveLength(3);
 	});
@@ -1471,7 +1789,7 @@ describe("by-url lookup + patch (m10)", () => {
 	// already-normalized form and query with messy raw spellings.
 	const NORMALIZED = "https://example.com/article?x=1";
 	const MESSY_RAW =
-		"HTTPS://Example.com/article/?x=1&utm_source=tw&fbclid=abc#frag";
+		"HTTPS://Example.com/article/?x=1&utm_source=tw&fbclid=abc#:~:text=frag";
 
 	async function seedOne(userId = USER_A) {
 		await seed([
@@ -1626,12 +1944,12 @@ describe("addBookmark", () => {
 			},
 		]);
 
-		// Messy re-add: fragment + utm + trailing slash + uppercase host all
-		// normalize down to the seeded url_normalized.
+		// Messy re-add: text-fragment directive + utm + trailing slash +
+		// uppercase host all normalize down to the seeded url_normalized.
 		const { bookmark, created } = await addBookmark(
 			db,
 			USER_A,
-			"https://EXAMPLE.com/a/?utm_source=x#frag",
+			"https://EXAMPLE.com/a/?utm_source=x#:~:text=frag",
 		);
 
 		expect(created).toBe(false);

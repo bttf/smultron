@@ -215,14 +215,14 @@ describe("applyHighlight", () => {
 	it("matches a raw variant URL (tracking params/fragment/case) via normalization", async () => {
 		const bookmark = await seedBookmark({
 			userId: USER_A,
-			url: "https://Example.com/Page/?utm_source=nl&x=1#frag",
+			url: "https://Example.com/Page/?utm_source=nl&x=1#:~:text=frag",
 			// What applySync would have stored for that raw URL.
 			urlNormalized: "https://example.com/Page?x=1",
 		});
 
 		const created = await applyHighlight(db, USER_A, {
 			// A DIFFERENT raw spelling of the same page.
-			url: "https://EXAMPLE.com/Page?x=1&fbclid=abc#other",
+			url: "https://EXAMPLE.com/Page?x=1&fbclid=abc#:~:text=other",
 			text: "matched through normalization",
 		});
 

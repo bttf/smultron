@@ -28,7 +28,12 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { moveItem, orderShelf } from "../lib/shelfOrder";
 import { cn } from "../lib/utils";
-import { type ApiBookmark, Favicon, hostOf, LogRow } from "./log-row";
+import {
+	type ApiBookmark,
+	BookmarkEditor,
+	DuplicateUrlError,
+} from "./bookmark-editor";
+import { Favicon, hostOf, LogRow } from "./log-row";
 
 // m9 contract: facets/total/matching are computed on page 1 of the current
 // key. Kept optional so the UI degrades to 0 / [] against the pre-m9 API
@@ -118,6 +123,10 @@ export function Feed() {
 	const [facetFilter, setFacetFilter] = useState("");
 	// Single expanded row at a time (mock semantics); null = all collapsed.
 	const [expanded, setExpanded] = useState<number | null>(null);
+	// m22 (SPEC §9): the shelf card whose editor is open beneath the grid —
+	// the SAME panel a log row mounts. At most ONE editor is open across the
+	// two surfaces, so opening either one closes the other.
+	const [shelfEditId, setShelfEditId] = useState<number | null>(null);
 	// m13 pinned shelf (mock `Feed with Pins`): collapsible card grid above
 	// the log. Open/closed is per-load UI state, like the mock.
 	const [pinsOpen, setPinsOpen] = useState(true);
@@ -512,6 +521,7 @@ export function Feed() {
 	async function patchRow(
 		id: number,
 		patch: {
+			url?: string;
 			title?: string;
 			tags?: string[];
 			note?: string;
@@ -536,6 +546,19 @@ export function Feed() {
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify(patch),
 		});
+		if (res.status === 409) {
+			// m22 (SPEC §8): a URL edit collided with another of the user's
+			// rows and NOTHING was written. Carry the conflicting row up so the
+			// URL editor can name it. (`conflict` is null in the narrow race
+			// where the server couldn't read it back.)
+			const body = (await res.json().catch(() => null)) as {
+				error?: string;
+				conflict?: { id: number; title: string; url: string } | null;
+			} | null;
+			if (body?.error === "duplicate_url") {
+				throw new DuplicateUrlError(body.conflict ?? null);
+			}
+		}
 		if (!res.ok) {
 			throw new Error(`request failed (${res.status})`);
 		}
@@ -564,28 +587,28 @@ export function Feed() {
 			if (patch.pinned) {
 				// Into the shelf, at the END (m21: `pin_position = max + 1`,
 				// SPEC §8 — once the order is hand-arranged a new pin must not
-				// shove every card over). The row also leaves the current list
-				// when that list can no longer hold it: the feed log (the
-				// server excludes pinned rows) and the archived view (pinning
-				// unarchives, search or not). In a live search it stays listed
-				// — pinned rows remain findable — so it just takes the
-				// override.
+				// shove every card over). Since m22 the row STAYS in whatever
+				// list it was in — the feed log holds pinned rows like any
+				// others, and a live search always did — so it just takes the
+				// override (which is what paints its `★`). The one list that
+				// can no longer hold it is the archived view: pinning
+				// unarchives.
 				setPinnedExtra((prev) => [...prev.filter((b) => b.id !== id), updated]);
 				setUnpinned((prev) => {
 					const next = new Set(prev);
 					next.delete(id);
 					return next;
 				});
-				if (noQuery || archived) {
+				if (archived) {
 					setRemoved((prev) => new Set(prev).add(id));
 					setExpanded((prev) => (prev === id ? null : prev));
 				} else {
 					setOverrides((prev) => new Map(prev).set(id, updated));
 				}
 			} else {
-				// Out of the shelf immediately; the revalidated page puts the
-				// row back into the feed log (clear any pin-time removal so
-				// the overlay doesn't keep filtering it out).
+				// Out of the shelf immediately; the row itself stays in the log
+				// (m22), minus its `★`. Clear any pin-time removal (the
+				// archived-view path above) so the overlay stops filtering it.
 				setUnpinned((prev) => new Set(prev).add(id));
 				setPinnedExtra((prev) => prev.filter((b) => b.id !== id));
 				setRemoved((prev) => {
@@ -758,33 +781,29 @@ export function Feed() {
 					created: boolean;
 				};
 				const id = bookmark.id;
-				// A resurfaced duplicate that is PINNED lives in the shelf, not
-				// the log (m13) — drop the overlay row and let the revalidation
-				// refresh the shelf. Otherwise the server's row replaces the
-				// temp row. The `a.id !== id` filter drops a stale overlay copy
-				// of the SAME real row (re-adding a URL whose earlier reconcile
-				// hasn't been released yet) — without it the log would render
-				// two rows with one React key. (`highlights` is the one field
-				// POST doesn't return; a duplicate's highlights arrive with the
-				// revalidated page.)
-				const pinned = bookmark.pinnedAt !== null;
+				// The server's row replaces the temp row. The `a.id !== id`
+				// filter drops a stale overlay copy of the SAME real row
+				// (re-adding a URL whose earlier reconcile hasn't been released
+				// yet) — without it the log would render two rows with one
+				// React key. (`highlights` is the one field POST doesn't
+				// return; a duplicate's highlights arrive with the revalidated
+				// page.) m22 retired the PINNED-duplicate special case: a
+				// pinned row is a log row like any other now, so it reconciles
+				// like any other duplicate.
 				setAdded((prev) => {
 					const rest = prev.filter((a) => a.id !== id);
-					return pinned
-						? rest.filter((a) => a.id !== tempId)
-						: rest.map((a) =>
-								a.id === tempId ? { ...bookmark, highlights: [] } : a,
-							);
+					return rest.map((a) =>
+						a.id === tempId ? { ...bookmark, highlights: [] } : a,
+					);
 				});
 				// Mock semantics (SPEC §9): the reconciled row auto-expands, and
 				// a NEWLY created bookmark focuses the panel's add-tag input
 				// (tagging is the expected next action). Deliberately not done
 				// at submit — see the comment above the temp row.
-				if (!pinned) {
-					setExpanded(id);
-				}
-				setJustAddedId(created && !pinned ? id : null);
-				setFlashId((prev) => (prev === tempId ? (pinned ? null : id) : prev));
+				setExpanded(id);
+				setShelfEditId(null);
+				setJustAddedId(created ? id : null);
+				setFlashId((prev) => (prev === tempId ? id : prev));
 				setTimeout(
 					() => setFlashId((prev) => (prev === id ? null : prev)),
 					2000,
@@ -839,12 +858,62 @@ export function Feed() {
 	// SPEC §8), minus rows unpinned/archived since. Once the revalidated page
 	// lands the overlays dedupe into no-ops. `orderShelf` then lays a pending
 	// drag order (m21) over the result; with no override it is the identity.
+	// m22: `overrides` applies here too — the shelf's own editor writes through
+	// it, so a card must show the edit it just made without waiting for a poll.
 	const shelf = useMemo(() => {
 		const base = data?.pinned ?? [];
 		const extra = pinnedExtra.filter((p) => !base.some((b) => b.id === p.id));
-		const composed = [...base, ...extra].filter((b) => !unpinned.has(b.id));
+		const composed = [...base, ...extra]
+			.filter((b) => !unpinned.has(b.id))
+			.map((b) => {
+				const patch = overrides.get(b.id);
+				return patch ? { ...b, ...patch } : b;
+			});
 		return orderShelf(composed, orderOverride).items;
-	}, [data, pinnedExtra, unpinned, orderOverride]);
+	}, [data, pinnedExtra, unpinned, orderOverride, overrides]);
+
+	// The card whose editor is open, if it is still on the shelf.
+	const shelfEditing = useMemo(
+		() =>
+			shelfEditId === null
+				? undefined
+				: shelf.find((b) => b.id === shelfEditId),
+		[shelf, shelfEditId],
+	);
+
+	// m22 (SPEC §9): a card that LEAVES the shelf — unpinned from its own
+	// panel, from the popup, or dropped by a poll — takes its editor with it.
+	// The dep is the derived BOOLEAN, not the row: `shelfEditing` takes a new
+	// identity on every poll, and re-running this on each one would be noise.
+	const shelfEditGone = shelfEditId !== null && shelfEditing === undefined;
+	useEffect(() => {
+		if (shelfEditGone) {
+			setShelfEditId(null);
+		}
+	}, [shelfEditGone]);
+
+	// …and Escape closes it. `defaultPrevented` skips the keystroke the panel's
+	// own editors already consumed (cancelling a title, note or URL draft):
+	// that Escape belongs to the field, not to the panel.
+	useEffect(() => {
+		if (shelfEditId === null) {
+			return;
+		}
+		function onKeyDown(e: KeyboardEvent) {
+			if (e.key === "Escape" && !e.defaultPrevented) {
+				setShelfEditId(null);
+			}
+		}
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [shelfEditId]);
+
+	// Opening a shelf editor collapses the expanded log row, and vice versa —
+	// at most ONE panel is open across the two surfaces (SPEC §9).
+	function toggleShelfEdit(id: number) {
+		setShelfEditId((prev) => (prev === id ? null : id));
+		setExpanded(null);
+	}
 
 	// m21 drop handler (SPEC §9): paint the new order at once through the
 	// override, then send ONE `PUT /api/bookmarks/pinned` with the full id
@@ -1068,9 +1137,43 @@ export function Feed() {
 							open={pinsOpen}
 							onToggleOpen={() => setPinsOpen((open) => !open)}
 							onUnpin={(id) => patchRow(id, { pinned: false })}
+							onEdit={toggleShelfEdit}
+							editId={shelfEditId}
 							onReorder={reorderShelf}
 							error={reorderError}
 						/>
+					) : null}
+
+					{/* m22 shelf edit-in-place (SPEC §9): the log's own editor
+					    panel, full-width directly beneath the grid. A collapsed
+					    shelf shows none. */}
+					{!archived && pinsOpen && shelfEditing ? (
+						<Fragment>
+							<div className="flex items-center gap-2 bg-[var(--log-panel)] px-4 pt-2">
+								<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+									EDITING
+								</span>
+								<span className="min-w-0 truncate text-[12.5px] font-medium">
+									{shelfEditing.title || "(untitled)"}
+								</span>
+								<button
+									type="button"
+									onClick={() => setShelfEditId(null)}
+									className="ml-auto shrink-0 font-mono text-[10px] text-[var(--log-faint)] hover:text-[var(--log-fg)]"
+								>
+									close ▴
+								</button>
+							</div>
+							<BookmarkEditor
+								bookmark={shelfEditing}
+								archivedView={false}
+								autoFocusTags={false}
+								tagSuggestions={tagSuggestions}
+								onPatch={patchRow}
+								onDeleteHighlight={deleteHighlight}
+								className="pl-4"
+							/>
+						</Fragment>
 					) : null}
 
 					{error ? (
@@ -1084,11 +1187,7 @@ export function Feed() {
 							Loading…
 						</p>
 					) : rows.length === 0 ? (
-						<EmptyState
-							archived={archived}
-							noQuery={noQuery}
-							hasPins={!archived && shelf.length > 0}
-						/>
+						<EmptyState archived={archived} noQuery={noQuery} />
 					) : (
 						// Stale rows (previous key, kept by keepPreviousData) dim
 						// while the new page is in flight.
@@ -1122,6 +1221,8 @@ export function Feed() {
 										// affordance — re-expanding later must
 										// not steal focus into the tag input.
 										setJustAddedId(null);
+										// m22: one editor across shelf + log.
+										setShelfEditId(null);
 										setExpanded((prev) => (prev === b.id ? null : b.id));
 									}}
 									onToggleTag={toggleTag}
@@ -1146,23 +1247,21 @@ export function Feed() {
 	);
 }
 
+// m22 retired the m13 "Everything is pinned." case along with the server-side
+// exclusion that made it reachable: the log now holds pinned rows, so an empty
+// log really does mean an empty view.
 function EmptyState({
 	archived,
 	noQuery,
-	hasPins,
 }: {
 	archived: boolean;
 	noQuery: boolean;
-	/** m13: an empty LOG with a populated shelf isn't "no bookmarks". */
-	hasPins: boolean;
 }) {
 	const message = !noQuery
 		? "No matches."
 		: archived
 			? "No archived bookmarks yet."
-			: hasPins
-				? "Everything is pinned."
-				: "No bookmarks yet — hit + Add above, or save one in Chrome (the extension backfills when it starts).";
+			: "No bookmarks yet — hit + Add above, or save one in Chrome (the extension backfills when it starts).";
 	return (
 		<p className="max-w-md px-4 py-6 font-mono text-xs text-muted-foreground">
 			{message}
@@ -1212,6 +1311,8 @@ function PinnedShelf({
 	open,
 	onToggleOpen,
 	onUnpin,
+	onEdit,
+	editId,
 	onReorder,
 	error,
 }: {
@@ -1219,6 +1320,10 @@ function PinnedShelf({
 	open: boolean;
 	onToggleOpen: () => void;
 	onUnpin: (id: number) => void;
+	/** m22: toggle the shared editor panel for this card (rendered by Feed). */
+	onEdit: (id: number) => void;
+	/** The card whose editor is open — its `✎` wears the accent. */
+	editId: number | null;
 	onReorder: (activeId: number, overId: number) => void;
 	/** m21: `couldn't save order` after a failed PUT; null once one succeeds. */
 	error?: string | null;
@@ -1344,6 +1449,8 @@ function PinnedShelf({
 								key={b.id}
 								bookmark={b}
 								onUnpin={() => onUnpin(b.id)}
+								onEdit={() => onEdit(b.id)}
+								editing={editId === b.id}
 								reduceMotion={reduceMotion}
 							/>
 						))}
@@ -1357,10 +1464,15 @@ function PinnedShelf({
 function PinnedCard({
 	bookmark,
 	onUnpin,
+	onEdit,
+	editing,
 	reduceMotion,
 }: {
 	bookmark: ApiBookmark;
 	onUnpin: () => void;
+	onEdit: () => void;
+	/** This card's editor is the one open beneath the grid (m22). */
+	editing: boolean;
 	reduceMotion: boolean;
 }) {
 	const {
@@ -1426,7 +1538,7 @@ function PinnedCard({
 			onKeyDown={(e) => {
 				// Only the card body opens: Enter/Space on the ⋮⋮ grip (a
 				// keyboard lift/drop — dnd-kit prevents default but does not
-				// stop propagation) or on ✕ bubble up here and must not.
+				// stop propagation) or on ✎ / ✕ bubble up here and must not.
 				if (e.target !== e.currentTarget) {
 					return;
 				}
@@ -1454,6 +1566,28 @@ function PinnedCard({
 				<span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
 					{host ?? bookmark.url}
 				</span>
+				{/* m22: opens the shared editor panel under the grid. Like ✕ it
+				    is a button inside a sortable card, not a drag surface — the
+				    same mousedown/touchstart swallow keeps a press on it from
+				    lifting — and its keydown is ignored at the card below. */}
+				<button
+					type="button"
+					aria-label={`Edit ${label}`}
+					onMouseDown={(e) => e.stopPropagation()}
+					onTouchStart={(e) => e.stopPropagation()}
+					onClick={(e) => {
+						e.stopPropagation();
+						onEdit();
+					}}
+					className={cn(
+						"shrink-0 font-mono text-[10px]",
+						editing
+							? "text-[var(--log-accent)]"
+							: "text-[var(--log-ghost)] hover:text-[var(--log-accent)]",
+					)}
+				>
+					✎
+				</button>
 				<button
 					type="button"
 					ref={setActivatorNodeRef}

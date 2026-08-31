@@ -8,7 +8,27 @@
 //      punycode-encodes IDN hosts, e.g. münchen.de → xn--mnchen-3ya.de, and
 //      drops default ports — :443 for https, :80 for http — so two spellings
 //      of the same origin collapse to one key).
-//   3. Strip the fragment (`#...`).
+//   3. KEEP the fragment, minus any text-fragment directive: everything from
+//      the first `:~:` inside the fragment is stripped, and a fragment left
+//      empty by that (or a bare trailing `#`) is dropped entirely. Everything
+//      before `:~:` survives in the parser's canonical fragment encoding
+//      (space → %20, `"` → %22, `<` → %3C, `>` → %3E, backtick → %60,
+//      non-ASCII → UTF-8 percent-escapes; existing percent-sequences and a
+//      stray `%` are left alone). Applies to EVERY scheme.
+//
+//      m22 change (2026-08-30): rule 3 used to strip the whole fragment,
+//      which collapsed every page of a fragment-routed SPA into a single row
+//      — bookmarking the Gmail inbox (`…/mail/u/0/#inbox`) bumped and
+//      unarchived a years-old bookmark for one specific message, and
+//      archiving that row just meant the next save resurrected it. A kept
+//      anchor at worst splits one page into two rows; a stripped route makes
+//      a page un-bookmarkable, so the fragment stays. The `:~:` directive is
+//      the one provably-safe strip: browsers remove it before page scripts
+//      run, so it can never carry routing state — and Chrome's "copy link to
+//      highlight" plus our own highlight link-outs mint such URLs constantly,
+//      so keeping it would dupe rows the app itself already owns. Migration
+//      `0013_keep-fragments` recomputed every stored `url_normalized` to
+//      match.
 //   4. Remove tracking params: any name with the `utm_` prefix, plus `fbclid`
 //      and `gclid`. Matching is case-insensitive (Chrome-reality reading:
 //      `UTM_SOURCE` and `utm_source` are the same tracker; treating them
@@ -30,13 +50,15 @@
 //
 // Steps 4–5 apply only to http/https URLs. Chrome bookmarks can hold
 // `chrome://`, `about:`, `javascript:`, `data:`, `file://`, … — for those we
-// only parse (canonical scheme casing) and strip the fragment, because `?`
-// and `/` inside such URLs are often payload, not structure (removing a
-// "utm_source" from a data: URL would corrupt the data). None of them crash.
+// only parse (canonical scheme casing) and apply rule 3, because `?` and `/`
+// inside such URLs are often payload, not structure (removing a "utm_source"
+// from a data: URL would corrupt the data). None of them crash.
 //
-// Percent-encoding: we emit the parser's canonical path encoding and the raw
-// query byte-for-byte — no extra encoding or decoding — so the function is
-// idempotent: normalizeUrl(normalizeUrl(x)) === normalizeUrl(x).
+// Percent-encoding: we emit the parser's canonical path and fragment encoding
+// and the raw query byte-for-byte — no extra encoding or decoding — so the
+// function is idempotent: normalizeUrl(normalizeUrl(x)) === normalizeUrl(x).
+// The kept fragment is idempotent too: it never contains `:~:` after the cut,
+// and the parser's fragment encoding is a fixed point.
 
 const TRACKING_EXACT = new Set(["fbclid", "gclid"]);
 
@@ -51,6 +73,22 @@ function isTrackingParam(rawName: string): boolean {
 	return name.startsWith("utm_") || TRACKING_EXACT.has(name);
 }
 
+/**
+ * Rule 3: the fragment as it survives normalization. `hash` is the raw
+ * `#...` slice in the parser's canonical encoding, or `""` when the URL
+ * carries no fragment. Everything from the first `:~:` is cut; what is left
+ * is dropped when it is a bare `#` (an empty fragment, or one that was
+ * nothing but a directive).
+ */
+function keepFragment(hash: string): string {
+	if (hash === "") {
+		return "";
+	}
+	const directive = hash.indexOf(":~:");
+	const kept = directive === -1 ? hash : hash.slice(0, directive);
+	return kept === "#" ? "" : kept;
+}
+
 export function normalizeUrl(raw: string): string {
 	const trimmed = raw.trim();
 
@@ -62,9 +100,14 @@ export function normalizeUrl(raw: string): string {
 	}
 
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
-		// Non-http(s) scheme: fragment strip only (see header comment).
-		url.hash = "";
-		return url.href;
+		// Non-http(s) scheme: rule 3 only (see header comment). Cut the href at
+		// its first `#` rather than reading `url.hash` — `hash` is "" for an
+		// EMPTY fragment too, but `href` keeps the bare `#` we have to drop.
+		const href = url.href;
+		const hashAt = href.indexOf("#");
+		return hashAt === -1
+			? href
+			: href.slice(0, hashAt) + keepFragment(href.slice(hashAt));
 	}
 
 	// 4. Filter tracking params out of the RAW query string, preserving the
@@ -98,5 +141,9 @@ export function normalizeUrl(raw: string): string {
 			? `${url.username}${url.password ? `:${url.password}` : ""}@`
 			: "";
 
-	return `${url.protocol}//${userinfo}${url.host}${path}${query}`;
+	// 3. The kept fragment goes last. `url.hash` is "" for both "no fragment"
+	// and "empty fragment" — exactly the drop rule 3 asks for.
+	const fragment = keepFragment(url.hash);
+
+	return `${url.protocol}//${userinfo}${url.host}${path}${query}${fragment}`;
 }

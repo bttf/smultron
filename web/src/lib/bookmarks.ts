@@ -16,11 +16,15 @@
 //     search branch always returns `nextCursor: null` and caps at one page
 //     (PAGE_SIZE rows), ranked by ts_rank then recency. Good enough for a
 //     single-user tool's search box; deeper search paging is out of scope.
-//   - m13 pins: the feed's log (no `q`) excludes pinned rows — they render
-//     in the shelf carried by `pinned` on every response — and `matching`
-//     counts what the log can reach, so it excludes them too. Search
-//     includes pinned rows (findability wins). `total` and `facets` keep
-//     counting them: they describe the view, not the log.
+//   - m22 pins: the log lists pinned rows like any others, on BOTH branches.
+//     m13–m21 excluded them from the feed (no `q`) branch in favor of the
+//     shelf, which left a pinned row visible only as a shelf card — out of
+//     the log's chronology and uneditable in place. The shelf is quick
+//     access, not the row's new home, so the exclusion is gone and with it
+//     the subtraction from `matching`: on a plain live feed (no q, no tags)
+//     `matching === total` again. `pinned` still carries the whole shelf on
+//     every response; `total` and `facets` are unchanged (they always
+//     described the view, not the log).
 //   - m9 log view: `tags` filters with AND semantics (`tags @> ARRAY[...]`,
 //     exact strings). Every response carries view aggregates — `total`
 //     (view only), `matching` (view + q + tags, uncapped), `facets`
@@ -249,10 +253,10 @@ export type ListBookmarksResult = {
 	/** Rows in the current view (user + archived state), ignoring q and tags. */
 	total: number;
 	/**
-	 * Rows the LOG can reach — full count, not capped at PAGE_SIZE. The
-	 * feed branch (no q) excludes pinned rows (they render in the shelf,
-	 * not the log), so its `matching` does too; search (`q`) includes
-	 * pinned rows and so does its `matching`.
+	 * Rows the LOG can reach — full count, not capped at PAGE_SIZE. Both
+	 * branches include pinned rows since m22, so on a plain live feed (no q,
+	 * no tags) this equals `total`; it only diverges once `q` or `tags`
+	 * narrows the log.
 	 */
 	matching: number;
 	/**
@@ -297,7 +301,8 @@ async function tagFacets(
 
 /**
  * Feed (no `q`): `user_id` + archived-state filter (+ tag filter), ordered
- * `updated_at desc, id desc`, keyset-paginated 50/page.
+ * `updated_at desc, id desc`, keyset-paginated 50/page. Pinned rows are in
+ * the log like any others (m22) AND on the shelf.
  *
  * Search (`q`): same filters, matched via FTS (`websearch_to_tsquery`) OR
  * trigram similarity / ILIKE substring on `title` + `url_normalized`,
@@ -350,24 +355,20 @@ export async function listBookmarks(
 		)`
 		: undefined;
 
-	// The feed's log never shows pinned rows — they render in the shelf above
-	// it (m13). Search DOES include them (a pinned bookmark must stay findable).
-	const notPinnedCond = isNull(bookmarks.pinnedAt);
-
 	// Aggregates (returned on every page — uniform shape):
 	//   total    — view only; facets — view + q, IGNORING tags (an active tag
 	//   keeps its count); matching — whatever the LOG query below can reach
-	//   (feed: view + tags MINUS pinned; search: view + q + tags incl. pinned).
+	//   (view + q + tags; since m22 pinned rows are in the log on BOTH
+	//   branches, so nothing is subtracted here either).
 	//   pinned   — the shelf: every pinned row in its hand-arranged order
 	//   (m21: pin_position asc, id desc), view/filter-independent (pinned rows
-	//   are always live — archiving unpins).
+	//   are always live — archiving unpins). A pinned row therefore appears
+	//   twice in a response: once in the log, once on the shelf.
 	const [total, matching, facets, pinnedRows] = await Promise.all([
 		countBookmarks(db, viewCond),
 		countBookmarks(
 			db,
-			q
-				? and(viewCond, matchCond, tagsCond)
-				: and(viewCond, tagsCond, notPinnedCond),
+			q ? and(viewCond, matchCond, tagsCond) : and(viewCond, tagsCond),
 		),
 		tagFacets(db, and(viewCond, matchCond)),
 		db
@@ -384,7 +385,7 @@ export async function listBookmarks(
 	};
 
 	if (!q) {
-		const conditions = [viewCond, tagsCond, notPinnedCond];
+		const conditions = [viewCond, tagsCond];
 
 		if (cursor) {
 			// Keyset pagination: strictly "after" the cursor row in the
@@ -481,6 +482,12 @@ export async function addBookmark(
 	return { bookmark, created: wasInserted };
 }
 
+/**
+ * The fields BOTH patch routes accept. `url` is deliberately NOT here: on
+ * `PATCH /api/bookmarks/by-url` the URL is the row SELECTOR, never an edit
+ * (SPEC §8, m22). `buildPatchSet` below likewise knows nothing about `url`,
+ * so even a future field-passthrough cannot leak one into the by-url path.
+ */
 export type PatchBookmarkInput = {
 	title?: string;
 	tags?: string[];
@@ -499,11 +506,24 @@ export type PatchBookmarkInput = {
 	pinned?: boolean;
 };
 
+/**
+ * `PATCH /api/bookmarks/:id` only (m22, SPEC §8): the ONE way to correct a
+ * bookmark's URL. `url` is the new RAW URL — already trimmed and validated by
+ * the route (parseable http(s), dotted hostname) — from which
+ * `url_normalized` is recomputed here (Hard rule #3: one implementation).
+ */
+export type PatchBookmarkByIdInput = PatchBookmarkInput & {
+	url?: string;
+};
+
 type PatchSet = {
 	title?: string;
 	tags?: string[];
 	note?: string | null;
 	archivedAt?: Date | null;
+	url?: string;
+	urlNormalized?: string;
+	faviconUrl?: string | null;
 	// The pin columns are SQL expressions on the pin path (m21): the new slot
 	// is read from the caller's other rows inside the same UPDATE, so a pin
 	// never becomes a read-then-write race.
@@ -590,21 +610,130 @@ async function patchWhere(
 }
 
 /**
+ * Thrown by `patchBookmark` when the edited URL normalizes onto ANOTHER of the
+ * caller's rows (SPEC §8: `409 {error: "duplicate_url", conflict}`). Nothing
+ * was written — never a silent merge, because reconciling two rows' tags,
+ * highlights and pins has no right answer; the client shows the conflict.
+ * `conflict` is the bare row that already owns the key (null only in the race
+ * where it vanished between the failed UPDATE and the lookup).
+ */
+export class DuplicateUrlError extends Error {
+	readonly conflict: BookmarkRow | null;
+
+	constructor(conflict: BookmarkRow | null) {
+		super("duplicate url");
+		this.name = "DuplicateUrlError";
+		this.conflict = conflict;
+	}
+}
+
+/**
+ * Postgres SQLSTATE 23505 (unique_violation). Drizzle wraps driver errors in a
+ * `DrizzleQueryError` whose `cause` is the real pg error — identical for
+ * postgres-js (prod) and PGlite (tests) — so walk the chain rather than
+ * matching one wrapper's shape.
+ */
+function isUniqueViolation(err: unknown): boolean {
+	let current: unknown = err;
+	for (let depth = 0; current != null && depth < 5; depth++) {
+		if (
+			typeof current === "object" &&
+			(current as { code?: unknown }).code === "23505"
+		) {
+			return true;
+		}
+		current = (current as { cause?: unknown }).cause;
+	}
+	return false;
+}
+
+/** `new URL(raw).host`, or null when the URL doesn't parse. */
+function hostOf(raw: string): string | null {
+	try {
+		return new URL(raw).host;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Updates ONLY the provided fields, scoped to `user_id` for ownership.
  * `archived: true` sets `archived_at = now()`; `false` clears it to null.
  * Never bumps `updated_at` (see `patchWhere`).
+ *
+ * `url` (m22, `:id` route only): replaces `url` and recomputes
+ * `url_normalized`. When the new URL's HOST differs from the current row's —
+ * an unparseable current URL counts as different — `favicon_url` is cleared
+ * too: the stored icon belongs to the old site and the hostname-derived
+ * fallback (SPEC §9) is instantly right. Title, tags, note, pins, highlights
+ * and any article are untouched. A collision with another of the caller's
+ * rows throws `DuplicateUrlError` and writes nothing.
  */
 export async function patchBookmark(
 	db: BookmarksDb,
 	userId: string,
 	id: number,
-	input: PatchBookmarkInput,
+	input: PatchBookmarkByIdInput,
 ): Promise<BookmarkRow | null> {
-	return patchWhere(
-		db,
-		and(eq(bookmarks.id, id), eq(bookmarks.userId, userId)),
-		input,
-	);
+	const cond = and(eq(bookmarks.id, id), eq(bookmarks.userId, userId));
+	const { url, ...rest } = input;
+
+	if (url === undefined) {
+		return patchWhere(db, cond, rest);
+	}
+
+	const rawUrl = url.trim();
+	const urlNormalized = normalizeUrl(rawUrl);
+
+	try {
+		// One transaction: the favicon decision needs the CURRENT row's host, so
+		// the read and the write must see the same row version. Both statements
+		// carry the ownership condition.
+		return await db.transaction(async (tx) => {
+			const [current] = await tx
+				.select({ url: bookmarks.url })
+				.from(bookmarks)
+				.where(cond)
+				.limit(1);
+			if (!current) {
+				return null;
+			}
+
+			const set: PatchSet = {
+				...buildPatchSet(rest),
+				url: rawUrl,
+				urlNormalized,
+			};
+			const currentHost = hostOf(current.url);
+			if (currentHost === null || currentHost !== hostOf(rawUrl)) {
+				set.faviconUrl = null;
+			}
+
+			const rows = await tx
+				.update(bookmarks)
+				.set(set)
+				.where(cond)
+				.returning(BOOKMARK_COLUMNS);
+			return rows[0] ?? null;
+		});
+	} catch (err) {
+		if (!isUniqueViolation(err)) {
+			throw err;
+		}
+		// The transaction rolled back, so this lookup runs on the outer
+		// connection: fetch the row that already owns the key for the 409 body.
+		const [conflict] = await db
+			.select(BOOKMARK_COLUMNS)
+			.from(bookmarks)
+			.where(
+				and(
+					eq(bookmarks.userId, userId),
+					eq(bookmarks.urlNormalized, urlNormalized),
+				),
+			)
+			.limit(1);
+		throw new DuplicateUrlError(conflict ?? null);
+	}
 }
 
 /**

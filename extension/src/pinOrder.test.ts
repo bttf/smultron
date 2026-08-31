@@ -10,6 +10,7 @@ function bookmark(over: Partial<NewTabBookmark> = {}): NewTabBookmark {
 		faviconUrl: null,
 		tags: [],
 		updatedAt: "2026-08-30T10:00:00.000Z",
+		pinnedAt: null,
 		...over,
 	};
 }

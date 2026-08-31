@@ -218,6 +218,13 @@
         white-space: nowrap;
         text-overflow: ellipsis;
       }
+      /* m22 pin marker — colour only, sitting inside the title cell so an
+         unpinned row keeps the same column alignment (SPEC §9). */
+      .pin {
+        margin-right: 4px;
+        color: var(--accent);
+        font-size: 11px;
+      }
       .row-host {
         font-family: var(--mono);
         font-size: 10.5px;

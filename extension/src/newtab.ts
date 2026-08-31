@@ -22,6 +22,12 @@ export interface NewTabBookmark {
 	faviconUrl: string | null;
 	tags: string[];
 	updatedAt: string;
+	/**
+	 * m13 pin timestamp; null = not pinned. Since m22 the listing's log
+	 * includes pinned rows, so a recent row has to say whether it is one — the
+	 * log marks it with a `★` (SPEC §9).
+	 */
+	pinnedAt: string | null;
 }
 
 /** One painted view: the pinned shelf plus the log below it. */
@@ -74,6 +80,7 @@ function asBookmark(raw: unknown): NewTabBookmark | undefined {
 			? row.tags.filter((tag): tag is string => typeof tag === "string")
 			: [],
 		updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : "",
+		pinnedAt: typeof row.pinnedAt === "string" ? row.pinnedAt : null,
 	};
 }
 

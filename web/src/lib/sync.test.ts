@@ -90,7 +90,7 @@ describe("applySync", () => {
 		it("inserts with dateAddedMs and folderPath", async () => {
 			const result = await applySync(db, USER_A, "live", [
 				{
-					url: "https://Example.com/Page/?utm_source=nl&x=1#frag",
+					url: "https://Example.com/Page/?utm_source=nl&x=1#:~:text=frag",
 					title: "A page",
 					chromeId: "c1",
 					dateAddedMs: PAST.getTime(),
@@ -102,7 +102,9 @@ describe("applySync", () => {
 			const [row] = await allRows();
 			expect(row.userId).toBe(USER_A);
 			// Raw URL stored untouched; normalized computed server-side.
-			expect(row.url).toBe("https://Example.com/Page/?utm_source=nl&x=1#frag");
+			expect(row.url).toBe(
+				"https://Example.com/Page/?utm_source=nl&x=1#:~:text=frag",
+			);
 			expect(row.urlNormalized).toBe("https://example.com/Page?x=1");
 			expect(row.title).toBe("A page");
 			expect(row.chromeId).toBe("c1");
@@ -329,7 +331,7 @@ describe("applySync", () => {
 		it("two raw URLs that normalize identically hit one row across calls", async () => {
 			const first = await applySync(db, USER_A, "live", [
 				{
-					url: "https://X.com/a/?utm_source=t#frag",
+					url: "https://X.com/a/?utm_source=t#:~:text=frag",
 					title: "one",
 					chromeId: "c1",
 				},
