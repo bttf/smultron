@@ -125,9 +125,19 @@ function renderRow(bookmark: NewTabBookmark, now: Date): HTMLAnchorElement {
 	if (bookmark.tags.length > ROW_TAG_LIMIT) {
 		tags.append(el("span", "tag", `+${bookmark.tags.length - ROW_TAG_LIMIT}`));
 	}
+	// m22: the listing's log includes pinned rows (SPEC §8), so the row says
+	// so — an accent `★` immediately before the title, inside the title cell
+	// so an unpinned row keeps the grid's alignment. Color-only state.
+	const title = el("span", "row-title");
+	if (bookmark.pinnedAt !== null) {
+		const pin = el("span", "pin", "★");
+		pin.title = "Pinned";
+		title.append(pin);
+	}
+	title.append(el("span", undefined, titleOf(bookmark)));
 	row.append(
 		favicon(bookmark),
-		el("span", "row-title", titleOf(bookmark)),
+		title,
 		el("span", "row-host", displayUrl(bookmark.url)),
 		tags,
 		el("span", "row-time", relativeTime(bookmark.updatedAt, now)),

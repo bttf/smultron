@@ -38,6 +38,7 @@ function bookmark(over: Partial<NewTabBookmark> = {}): NewTabBookmark {
 		faviconUrl: null,
 		tags: [],
 		updatedAt: "2026-08-30T10:00:00.000Z",
+		pinnedAt: null,
 		...over,
 	};
 }
@@ -99,7 +100,20 @@ describe("parseBookmarksResponse", () => {
 			faviconUrl: null,
 			tags: ["a"],
 			updatedAt: "",
+			pinnedAt: null,
 		});
+	});
+
+	it("carries the pin timestamp the log's ★ reads (m22)", () => {
+		const page = parseBookmarksResponse({
+			bookmarks: [
+				{ id: 1, url: "https://p.test/", pinnedAt: "2026-08-30T09:00:00.000Z" },
+				{ id: 2, url: "https://u.test/", pinnedAt: 7 },
+			],
+		});
+		expect(page.recent[0]?.pinnedAt).toBe("2026-08-30T09:00:00.000Z");
+		// A wrong-typed value degrades to "not pinned", never to a bad row.
+		expect(page.recent[1]?.pinnedAt).toBeNull();
 	});
 
 	it("survives a body that isn't a listing at all", () => {
@@ -184,8 +198,10 @@ describe("new tab snapshot", () => {
 	it("round-trips a page with its clock reading", async () => {
 		const storage = memoryStorage();
 		const page = {
-			pinned: [bookmark({ id: 9 })],
-			recent: [bookmark({ id: 2 })],
+			// The recent row is pinned too (m22): the log's ★ has to survive a
+			// paint that comes from the cache rather than the network.
+			pinned: [bookmark({ id: 9, pinnedAt: "2026-08-30T09:00:00.000Z" })],
+			recent: [bookmark({ id: 2, pinnedAt: "2026-08-30T09:00:00.000Z" })],
 		};
 
 		await writeSnapshot(storage, page, 1_700_000_000_000);
