@@ -119,7 +119,7 @@ describe("applyBrowseEvents", () => {
 				occurredAtMs: T0,
 				tabId: 12,
 				windowId: 3,
-				url: "https://Example.com/Page/?utm_source=nl&x=1#frag",
+				url: "https://Example.com/Page/?utm_source=nl&x=1#:~:text=frag",
 				transition: "typed|from_address_bar",
 				documentLifecycle: "prerender",
 			},
@@ -133,7 +133,9 @@ describe("applyBrowseEvents", () => {
 		expect(row.kind).toBe("nav");
 		expect(row.occurredAt).toEqual(new Date(T0));
 		// Raw URL stored untouched; normalized computed server-side (SPEC §4).
-		expect(row.url).toBe("https://Example.com/Page/?utm_source=nl&x=1#frag");
+		expect(row.url).toBe(
+			"https://Example.com/Page/?utm_source=nl&x=1#:~:text=frag",
+		);
 		expect(row.urlNormalized).toBe("https://example.com/Page?x=1");
 		expect(row.tabId).toBe(12);
 		expect(row.windowId).toBe(3);
@@ -165,11 +167,15 @@ describe("applyBrowseEvents", () => {
 	it("normalizes urls the same way the rest of the app does", async () => {
 		await applyBrowseEvents(db, USER_A, [
 			nav(1, { url: "HTTPS://WWW.Example.COM/a/?utm_campaign=x&b=2" }),
+			// m22: the fragment is KEPT — SPA navigations (the ones
+			// onHistoryStateUpdated catches) differ mostly BY fragment.
 			nav(2, { url: "http://example.com/a/b/#section" }),
+			nav(3, { url: "http://example.com/a/b/#:~:text=quoted" }),
 		]);
 		const rows = await allRows();
 		expect(rows.map((r) => r.urlNormalized)).toEqual([
 			"https://www.example.com/a?b=2",
+			"http://example.com/a/b#section",
 			"http://example.com/a/b",
 		]);
 	});

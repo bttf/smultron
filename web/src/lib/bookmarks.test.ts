@@ -948,7 +948,7 @@ describe("pins (m13)", () => {
 			db,
 			USER_A,
 			// Messy raw variant — normalization must land on the same row.
-			"https://example.com/pin-me/#frag",
+			"https://example.com/pin-me/?utm_source=x#:~:text=frag",
 			{ pinned: true },
 		);
 		expect(updated?.id).toBe(before.id);
@@ -1471,7 +1471,7 @@ describe("by-url lookup + patch (m10)", () => {
 	// already-normalized form and query with messy raw spellings.
 	const NORMALIZED = "https://example.com/article?x=1";
 	const MESSY_RAW =
-		"HTTPS://Example.com/article/?x=1&utm_source=tw&fbclid=abc#frag";
+		"HTTPS://Example.com/article/?x=1&utm_source=tw&fbclid=abc#:~:text=frag";
 
 	async function seedOne(userId = USER_A) {
 		await seed([
@@ -1626,12 +1626,12 @@ describe("addBookmark", () => {
 			},
 		]);
 
-		// Messy re-add: fragment + utm + trailing slash + uppercase host all
-		// normalize down to the seeded url_normalized.
+		// Messy re-add: text-fragment directive + utm + trailing slash +
+		// uppercase host all normalize down to the seeded url_normalized.
 		const { bookmark, created } = await addBookmark(
 			db,
 			USER_A,
-			"https://EXAMPLE.com/a/?utm_source=x#frag",
+			"https://EXAMPLE.com/a/?utm_source=x#:~:text=frag",
 		);
 
 		expect(created).toBe(false);

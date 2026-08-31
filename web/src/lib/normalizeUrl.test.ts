@@ -36,19 +36,127 @@ describe("normalizeUrl", () => {
 		});
 	});
 
-	describe("fragment stripping", () => {
-		it("strips fragments", () => {
+	describe("fragments (m22: kept, minus any text-fragment directive)", () => {
+		it("keeps a plain fragment", () => {
 			expect(normalizeUrl("https://example.com/a#section")).toBe(
-				"https://example.com/a",
+				"https://example.com/a#section",
 			);
 			expect(normalizeUrl("https://example.com/a?b=1#section")).toBe(
-				"https://example.com/a?b=1",
+				"https://example.com/a?b=1#section",
 			);
 		});
 
-		it("strips empty fragments", () => {
+		it("keeps fragment-routed SPA routes distinct (the m22 motivation)", () => {
+			expect(normalizeUrl("https://mail.google.com/mail/u/0/#inbox")).toBe(
+				"https://mail.google.com/mail/u/0#inbox",
+			);
+			expect(
+				normalizeUrl("https://mail.google.com/mail/u/0/#inbox/FMfcgzQbfWxyz"),
+			).toBe("https://mail.google.com/mail/u/0#inbox/FMfcgzQbfWxyz");
+			expect(normalizeUrl("https://mail.google.com/mail/u/0/#inbox")).not.toBe(
+				normalizeUrl("https://mail.google.com/mail/u/0/#inbox/FMfcgzQbfWxyz"),
+			);
+			// …and both stay distinct from the fragment-less URL.
+			expect(normalizeUrl("https://mail.google.com/mail/u/0/")).toBe(
+				"https://mail.google.com/mail/u/0",
+			);
+		});
+
+		it("keeps a fragment that looks like a path, with its own slashes", () => {
+			expect(normalizeUrl("https://app.example.com/#/settings/profile")).toBe(
+				"https://app.example.com#/settings/profile",
+			);
+		});
+
+		it("drops an empty fragment (bare trailing #)", () => {
 			expect(normalizeUrl("https://example.com/a#")).toBe(
 				"https://example.com/a",
+			);
+			expect(normalizeUrl("https://example.com/#")).toBe("https://example.com");
+		});
+
+		it("drops a fragment that is nothing but a text-fragment directive", () => {
+			expect(normalizeUrl("https://example.com/a#:~:text=foo")).toBe(
+				"https://example.com/a",
+			);
+			expect(
+				normalizeUrl("https://example.com/a#:~:text=foo,bar&text=baz"),
+			).toBe("https://example.com/a");
+		});
+
+		it("cuts a mid-fragment directive, keeping what precedes it", () => {
+			expect(normalizeUrl("https://example.com/a#usage:~:text=foo")).toBe(
+				"https://example.com/a#usage",
+			);
+			expect(normalizeUrl("https://example.com/a#/route:~:text=x")).toBe(
+				"https://example.com/a#/route",
+			);
+		});
+
+		it("keeps a second # inside the fragment", () => {
+			expect(normalizeUrl("https://example.com/a#one#two")).toBe(
+				"https://example.com/a#one#two",
+			);
+		});
+
+		it("emits the parser's canonical fragment encoding", () => {
+			// space, ", <, > and ` are in the WHATWG fragment percent-encode set;
+			// existing percent-sequences and a stray % are left alone.
+			expect(normalizeUrl("https://example.com/a#fr ag")).toBe(
+				"https://example.com/a#fr%20ag",
+			);
+			expect(normalizeUrl("https://example.com/a#a%20b")).toBe(
+				"https://example.com/a#a%20b",
+			);
+			expect(normalizeUrl("https://example.com/a#100%")).toBe(
+				"https://example.com/a#100%",
+			);
+			expect(normalizeUrl("https://example.com/a#café")).toBe(
+				"https://example.com/a#caf%C3%A9",
+			);
+		});
+
+		it("keeps fragments on non-http(s) schemes, directive still stripped", () => {
+			expect(normalizeUrl("chrome://settings/passwords#top")).toBe(
+				"chrome://settings/passwords#top",
+			);
+			expect(normalizeUrl("chrome://settings/passwords#top:~:text=x")).toBe(
+				"chrome://settings/passwords#top",
+			);
+			expect(normalizeUrl("chrome://settings/passwords#:~:text=x")).toBe(
+				"chrome://settings/passwords",
+			);
+			expect(normalizeUrl("chrome://settings/passwords#")).toBe(
+				"chrome://settings/passwords",
+			);
+			expect(normalizeUrl("data:text/html,<p>hi</p>#frag")).toBe(
+				"data:text/html,<p>hi</p>#frag",
+			);
+			expect(normalizeUrl("data:text/html,<p>hi</p>#")).toBe(
+				"data:text/html,<p>hi</p>",
+			);
+			expect(normalizeUrl("javascript:void(0)#x")).toBe("javascript:void(0)#x");
+			expect(normalizeUrl("mailto:someone@example.com?subject=hi#note")).toBe(
+				"mailto:someone@example.com?subject=hi#note",
+			);
+		});
+
+		it("composes with trailing-slash stripping and tracking-param removal", () => {
+			expect(normalizeUrl("https://x.com/a/?utm_source=z#frag")).toBe(
+				"https://x.com/a#frag",
+			);
+			expect(normalizeUrl("https://x.com/?utm_source=z#frag")).toBe(
+				"https://x.com#frag",
+			);
+			expect(normalizeUrl("https://x.com/a/?utm_source=z&b=1#frag")).toBe(
+				"https://x.com/a?b=1#frag",
+			);
+		});
+
+		it("returns an unparseable input verbatim, fragment included", () => {
+			expect(normalizeUrl("  not a url#frag  ")).toBe("not a url#frag");
+			expect(normalizeUrl("example.com/a#:~:text=foo")).toBe(
+				"example.com/a#:~:text=foo",
 			);
 		});
 	});
@@ -229,10 +337,10 @@ describe("normalizeUrl", () => {
 	});
 
 	describe("non-http(s) schemes (Chrome bookmarks can contain these)", () => {
-		it("chrome:// URLs survive with fragment stripped, otherwise untouched", () => {
+		it("chrome:// URLs survive untouched, fragment included (m22)", () => {
 			expect(normalizeUrl("chrome://flags/")).toBe("chrome://flags/");
 			expect(normalizeUrl("chrome://settings/passwords#top")).toBe(
-				"chrome://settings/passwords",
+				"chrome://settings/passwords#top",
 			);
 		});
 
@@ -242,7 +350,7 @@ describe("normalizeUrl", () => {
 
 		it("javascript: URLs do not crash and keep their body", () => {
 			expect(normalizeUrl("javascript:alert(1)")).toBe("javascript:alert(1)");
-			expect(normalizeUrl("javascript:void(0)#x")).toBe("javascript:void(0)");
+			expect(normalizeUrl("javascript:void(0)#x")).toBe("javascript:void(0)#x");
 		});
 
 		it("data: URLs keep their payload (no query/slash munging)", () => {
@@ -250,7 +358,7 @@ describe("normalizeUrl", () => {
 				"data:text/plain,hello?utm_source=x",
 			);
 			expect(normalizeUrl("data:text/html,<p>hi</p>#frag")).toBe(
-				"data:text/html,<p>hi</p>",
+				"data:text/html,<p>hi</p>#frag",
 			);
 		});
 
@@ -302,6 +410,30 @@ describe("normalizeUrl", () => {
 			"  https://example.com/a/?utm_source=t&b=1  ",
 			"https://example.com/a?",
 			"https://example.com/a?utm_source&b=1&&c=2",
+			// m22 fragment cases.
+			"https://mail.google.com/mail/u/0/#inbox",
+			"https://mail.google.com/mail/u/0/#inbox/FMfcgzQbfWxyz",
+			"https://app.example.com/#/settings/profile",
+			"https://example.com/a#section",
+			"https://example.com/a#",
+			"https://example.com/#",
+			"https://example.com/a#:~:text=foo",
+			"https://example.com/a#usage:~:text=foo",
+			"https://example.com/a#one#two",
+			"https://example.com/a#fr ag",
+			"https://example.com/a#café",
+			"https://example.com/a#100%",
+			"https://x.com/a/?utm_source=z#frag",
+			"https://x.com/?utm_source=z#frag",
+			"chrome://settings/passwords#top",
+			"chrome://settings/passwords#top:~:text=x",
+			"chrome://settings/passwords#:~:text=x",
+			"chrome://settings/passwords#",
+			"data:text/html,<p>hi</p>#frag",
+			"javascript:void(0)#x",
+			"mailto:someone@example.com?subject=hi#note",
+			"not a url#frag",
+			"example.com/a#:~:text=foo",
 		];
 
 		it.each(samples)("normalizeUrl is idempotent for %j", (input) => {

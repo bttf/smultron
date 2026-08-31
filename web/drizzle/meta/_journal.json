@@ -92,6 +92,13 @@
       "when": 1788110200104,
       "tag": "0012_pin-position",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788091200000,
+      "tag": "0013_keep-fragments",
+      "breakpoints": true
     }
   ]
 }
