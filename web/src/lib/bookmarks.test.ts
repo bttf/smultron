@@ -861,23 +861,26 @@ describe("pins (m13)", () => {
 		expect(updated?.updatedAt).toEqual(before.updatedAt);
 	});
 
-	it("feed log excludes pinned rows; the shelf carries them, most recently pinned first", async () => {
+	it("feed log INCLUDES pinned rows in updated_at order (m22); the shelf carries them too", async () => {
 		const base = Date.parse("2026-01-01T00:00:00.000Z");
 		await seed([
+			// Page 0 @ base, Page 1 @ base-1s, Page 2 @ base-2s.
 			...makeFeedRows(USER_A, 3),
 			{
 				userId: USER_A,
 				url: "https://example.com/pin-old",
 				title: "Pinned earlier",
 				tags: ["tools"],
-				createdAt: new Date(base - 10_000),
-				updatedAt: new Date(base - 10_000),
+				// Sits between Page 0 and Page 1 in the log's chronology.
+				createdAt: new Date(base - 500),
+				updatedAt: new Date(base - 500),
 				pinnedAt: new Date(base - 5_000),
 			},
 			{
 				userId: USER_A,
 				url: "https://example.com/pin-new",
 				title: "Pinned later",
+				// Oldest row of all — the log must not float it to the top.
 				createdAt: new Date(base - 20_000),
 				updatedAt: new Date(base - 20_000),
 				pinnedAt: new Date(base - 1_000),
@@ -885,22 +888,68 @@ describe("pins (m13)", () => {
 		]);
 
 		const result = await listBookmarks(db, USER_A, {});
-		// The log: only the 3 unpinned rows.
+		// The log: every row, pinned or not, in plain updated_at desc order.
 		expect(result.bookmarks.map((b) => b.title)).toEqual([
 			"Page 0",
+			"Pinned earlier",
 			"Page 1",
 			"Page 2",
+			"Pinned later",
 		]);
-		// The shelf: ordered by pin_position, seeded here in the m13 order.
+		// The shelf still carries them, ordered by pin_position (seeded in the
+		// m13 order) — a pinned row appears in BOTH.
 		expect(result.pinned.map((b) => b.title)).toEqual([
 			"Pinned later",
 			"Pinned earlier",
 		]);
-		// total describes the view (pins included); matching describes the log.
+		// m22: nothing is subtracted any more, so the plain feed has
+		// matching === total.
 		expect(result.total).toBe(5);
-		expect(result.matching).toBe(3);
-		// Facets keep counting pinned rows — they're still part of the view.
+		expect(result.matching).toBe(5);
+		// Facets keep counting pinned rows — they always described the view.
 		expect(result.facets).toEqual([{ tag: "tools", count: 1 }]);
+	});
+
+	it("tag filters apply to pinned rows like any others (m22)", async () => {
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		await seed([
+			{
+				userId: USER_A,
+				url: "https://example.com/pinned-tagged",
+				title: "Pinned + tagged",
+				tags: ["tools"],
+				createdAt: new Date(base),
+				updatedAt: new Date(base),
+				pinnedAt: new Date(base),
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/pinned-untagged",
+				title: "Pinned, other tag",
+				tags: ["misc"],
+				createdAt: new Date(base - 1_000),
+				updatedAt: new Date(base - 1_000),
+				pinnedAt: new Date(base - 1_000),
+			},
+			{
+				userId: USER_A,
+				url: "https://example.com/plain-tagged",
+				title: "Unpinned + tagged",
+				tags: ["tools"],
+				createdAt: new Date(base - 2_000),
+				updatedAt: new Date(base - 2_000),
+			},
+		]);
+
+		const result = await listBookmarks(db, USER_A, { tags: ["tools"] });
+		expect(result.bookmarks.map((b) => b.title)).toEqual([
+			"Pinned + tagged",
+			"Unpinned + tagged",
+		]);
+		expect(result.matching).toBe(2);
+		expect(result.total).toBe(3);
+		// The shelf ignores the tag filter — it is always the whole shelf.
+		expect(result.pinned).toHaveLength(2);
 	});
 
 	it("search includes pinned rows (they stay findable) and counts them in matching", async () => {
@@ -972,10 +1021,10 @@ describe("pins (m13)", () => {
 		);
 	});
 
-	it("cursor pagination never surfaces pinned rows on any page", async () => {
-		// 60 unpinned rows (2 pages) with 3 pinned rows interleaved in the
-		// same updated_at range — the not-pinned condition must compose with
-		// the keyset cursor on both pages.
+	it("cursor pagination walks across pinned rows without gap or overlap (m22)", async () => {
+		// 60 unpinned rows with 3 pinned rows interleaved in the same
+		// updated_at range: 63 rows = 2 pages, and the keyset must step over a
+		// pinned row exactly like an unpinned one.
 		const base = Date.parse("2026-01-01T00:00:00.000Z");
 		await seed([
 			...makeFeedRows(USER_A, 60),
@@ -996,13 +1045,19 @@ describe("pins (m13)", () => {
 		const page2 = await listBookmarks(db, USER_A, {
 			cursor: page1.nextCursor ?? undefined,
 		});
-		expect(page2.bookmarks).toHaveLength(10);
+		expect(page2.bookmarks).toHaveLength(13);
 		expect(page2.nextCursor).toBeNull();
 
 		const titles = [...page1.bookmarks, ...page2.bookmarks].map((b) => b.title);
-		expect(titles).toHaveLength(60);
-		expect(titles.some((t) => t.startsWith("Pinned"))).toBe(false);
-		expect(page1.matching).toBe(60);
+		expect(titles).toHaveLength(63);
+		expect(new Set(titles).size).toBe(63);
+		// Each pinned row lands right after the unpinned row it follows in
+		// updated_at order (pinned-i is 500ms older than Page i).
+		expect(titles.indexOf("Pinned 10")).toBe(titles.indexOf("Page 10") + 1);
+		expect(titles.indexOf("Pinned 30")).toBe(titles.indexOf("Page 30") + 1);
+		// …including the one that straddles the page boundary.
+		expect(titles.indexOf("Pinned 55")).toBe(titles.indexOf("Page 55") + 1);
+		expect(page1.matching).toBe(63);
 		expect(page1.total).toBe(63);
 		expect(page1.pinned).toHaveLength(3);
 	});

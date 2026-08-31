@@ -16,11 +16,15 @@
 //     search branch always returns `nextCursor: null` and caps at one page
 //     (PAGE_SIZE rows), ranked by ts_rank then recency. Good enough for a
 //     single-user tool's search box; deeper search paging is out of scope.
-//   - m13 pins: the feed's log (no `q`) excludes pinned rows — they render
-//     in the shelf carried by `pinned` on every response — and `matching`
-//     counts what the log can reach, so it excludes them too. Search
-//     includes pinned rows (findability wins). `total` and `facets` keep
-//     counting them: they describe the view, not the log.
+//   - m22 pins: the log lists pinned rows like any others, on BOTH branches.
+//     m13–m21 excluded them from the feed (no `q`) branch in favor of the
+//     shelf, which left a pinned row visible only as a shelf card — out of
+//     the log's chronology and uneditable in place. The shelf is quick
+//     access, not the row's new home, so the exclusion is gone and with it
+//     the subtraction from `matching`: on a plain live feed (no q, no tags)
+//     `matching === total` again. `pinned` still carries the whole shelf on
+//     every response; `total` and `facets` are unchanged (they always
+//     described the view, not the log).
 //   - m9 log view: `tags` filters with AND semantics (`tags @> ARRAY[...]`,
 //     exact strings). Every response carries view aggregates — `total`
 //     (view only), `matching` (view + q + tags, uncapped), `facets`
@@ -249,10 +253,10 @@ export type ListBookmarksResult = {
 	/** Rows in the current view (user + archived state), ignoring q and tags. */
 	total: number;
 	/**
-	 * Rows the LOG can reach — full count, not capped at PAGE_SIZE. The
-	 * feed branch (no q) excludes pinned rows (they render in the shelf,
-	 * not the log), so its `matching` does too; search (`q`) includes
-	 * pinned rows and so does its `matching`.
+	 * Rows the LOG can reach — full count, not capped at PAGE_SIZE. Both
+	 * branches include pinned rows since m22, so on a plain live feed (no q,
+	 * no tags) this equals `total`; it only diverges once `q` or `tags`
+	 * narrows the log.
 	 */
 	matching: number;
 	/**
@@ -297,7 +301,8 @@ async function tagFacets(
 
 /**
  * Feed (no `q`): `user_id` + archived-state filter (+ tag filter), ordered
- * `updated_at desc, id desc`, keyset-paginated 50/page.
+ * `updated_at desc, id desc`, keyset-paginated 50/page. Pinned rows are in
+ * the log like any others (m22) AND on the shelf.
  *
  * Search (`q`): same filters, matched via FTS (`websearch_to_tsquery`) OR
  * trigram similarity / ILIKE substring on `title` + `url_normalized`,
@@ -350,24 +355,20 @@ export async function listBookmarks(
 		)`
 		: undefined;
 
-	// The feed's log never shows pinned rows — they render in the shelf above
-	// it (m13). Search DOES include them (a pinned bookmark must stay findable).
-	const notPinnedCond = isNull(bookmarks.pinnedAt);
-
 	// Aggregates (returned on every page — uniform shape):
 	//   total    — view only; facets — view + q, IGNORING tags (an active tag
 	//   keeps its count); matching — whatever the LOG query below can reach
-	//   (feed: view + tags MINUS pinned; search: view + q + tags incl. pinned).
+	//   (view + q + tags; since m22 pinned rows are in the log on BOTH
+	//   branches, so nothing is subtracted here either).
 	//   pinned   — the shelf: every pinned row in its hand-arranged order
 	//   (m21: pin_position asc, id desc), view/filter-independent (pinned rows
-	//   are always live — archiving unpins).
+	//   are always live — archiving unpins). A pinned row therefore appears
+	//   twice in a response: once in the log, once on the shelf.
 	const [total, matching, facets, pinnedRows] = await Promise.all([
 		countBookmarks(db, viewCond),
 		countBookmarks(
 			db,
-			q
-				? and(viewCond, matchCond, tagsCond)
-				: and(viewCond, tagsCond, notPinnedCond),
+			q ? and(viewCond, matchCond, tagsCond) : and(viewCond, tagsCond),
 		),
 		tagFacets(db, and(viewCond, matchCond)),
 		db
@@ -384,7 +385,7 @@ export async function listBookmarks(
 	};
 
 	if (!q) {
-		const conditions = [viewCond, tagsCond, notPinnedCond];
+		const conditions = [viewCond, tagsCond];
 
 		if (cursor) {
 			// Keyset pagination: strictly "after" the cursor row in the
