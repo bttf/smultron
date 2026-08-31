@@ -121,6 +121,31 @@ const CASES: Case[] = [
 		old: "https://ws.example.com/a",
 	},
 	{
+		// JS trim() reaches past ASCII — the SQL's inner btrim must too.
+		name: "trailing NBSP after the fragment is trimmed",
+		url: "https://nbsp.example.com/a#b\u00A0",
+		old: "https://nbsp.example.com/a",
+	},
+	{
+		// The case that forces the migration's NESTED btrims: trim() stops at
+		// the C0 (not JS whitespace), the parser strip stops at the NBSP (not
+		// C0-or-space) — so the NBSP SURVIVES and is encoded %C2%A0. A single
+		// union-set btrim would wrongly eat both.
+		name: "NBSP shielded by a trailing C0 control survives, encoded",
+		url: "https://nbspc0.example.com/a#b\u00A0\u0001",
+		old: "https://nbspc0.example.com/a",
+	},
+	{
+		name: "ideographic space + BOM trail off",
+		url: "https://wide.example.com/a#b\u3000\uFEFF",
+		old: "https://wide.example.com/a",
+	},
+	{
+		name: "C0 control inside the fragment is percent-encoded",
+		url: "https://c0.example.com/a#b\u0001c",
+		old: "https://c0.example.com/a",
+	},
+	{
 		name: "non-http scheme keeps its fragment",
 		url: "chrome://settings/passwords#top",
 		old: "chrome://settings/passwords",
@@ -321,5 +346,27 @@ describe("migration 0013_keep-fragments", () => {
 			"SELECT url_normalized FROM smultron.bookmarks ORDER BY id",
 		);
 		expect(after.rows).toEqual(before.rows);
+	});
+});
+
+// Not about 0013's SQL, but discovered shipping it: drizzle's migrator applies
+// an entry only when its `when` exceeds the NEWEST recorded migration's
+// timestamp — an out-of-order `when` (easy to fabricate in a hand-written
+// entry) makes `db:migrate` SKIP the migration while still reporting success,
+// and the PGlite harnesses can't see it (they apply the SQL files directly in
+// journal order). Guard the invariant at the source.
+describe("drizzle journal", () => {
+	it("timestamps strictly increase (out-of-order entries are silently skipped)", () => {
+		const journal = JSON.parse(
+			readFileSync(join(drizzleDir, "meta/_journal.json"), "utf8"),
+		) as { entries: Array<{ tag: string; when: number }> };
+		for (let i = 1; i < journal.entries.length; i++) {
+			const prev = journal.entries[i - 1];
+			const entry = journal.entries[i];
+			expect(
+				entry.when,
+				`${entry.tag} must postdate ${prev.tag}`,
+			).toBeGreaterThan(prev.when);
+		}
 	});
 });

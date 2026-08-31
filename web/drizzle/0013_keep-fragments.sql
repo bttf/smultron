@@ -11,7 +11,8 @@
 -- re-parse: `smultron.m22_kept_fragment(url)` reproduces, in SQL, exactly the
 -- fragment the WHATWG parser would hand `normalizeUrl`:
 --   * tab/CR/LF are removed anywhere (the parser strips them pre-parse) and
---     surrounding whitespace is trimmed (`normalizeUrl` trims first);
+--     the edges are stripped in the TS order — JS `trim()` first, then the
+--     parser's C0-control-or-space strip (see the `cleaned` CTE);
 --   * everything from the FIRST `#` to the end is the fragment;
 --   * everything from the first `:~:` inside it is cut;
 --   * what survives is re-encoded in the parser's canonical fragment
@@ -52,7 +53,26 @@
 CREATE FUNCTION "smultron"."m22_kept_fragment"(raw text) RETURNS text
 LANGUAGE sql STABLE AS $fn$
 	WITH cleaned AS (
-		SELECT btrim(translate(raw, E'\t\n\r', ''), E' \t\n\r\f\x0B') AS s
+		-- Two-stage edge strip, in the TS order: `normalizeUrl` first runs
+		-- JS `trim()` (whose whitespace reaches past ASCII: NBSP, U+1680,
+		-- the U+2000 block, LS/PS, U+202F/U+205F, ideographic space, BOM),
+		-- THEN the WHATWG parser strips leading/trailing C0 controls or
+		-- spaces. The stages must stay NESTED, not merged into one set: in
+		-- `...#b<NBSP><C0>` the trim cannot reach the NBSP (a C0 ends the
+		-- string) and the parser strip stops AT it — that NBSP survives
+		-- into the fragment as %C2%A0, which a single union-set btrim
+		-- would wrongly eat. tab/CR/LF go first and globally (the parser
+		-- removes them anywhere in the URL).
+		SELECT btrim(
+			btrim(
+				translate(raw, E'\t\n\r', ''),
+				E' \t\n\r\f\x0B'
+					|| E'\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A'
+					|| E'\u2028\u2029\u202F\u205F\u3000\uFEFF'
+			),
+			E' \x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F'
+				|| E'\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F'
+		) AS s
 	),
 	fragment AS (
 		SELECT CASE
