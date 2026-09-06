@@ -96,6 +96,33 @@ create table smultron.attention_reports (
   unique (user_id, week_start)
 );
 
+-- m24: per-user attention configuration (§13 "User configuration"). What
+-- counts as focus or drift is the USER's judgement, never a list we ship.
+-- Both runtimes read these: the server for weekly report cards, the extension
+-- for realtime detection.
+create table smultron.attention_settings (
+  user_id         uuid primary key references auth.users(id),
+  timezone        text not null,           -- zone the work-hours scope is evaluated in
+  scope_days      text[] not null,         -- e.g. {Mon,Tue,Wed,Thu,Fri}; empty = every day in scope
+  scope_from_hour smallint not null,       -- inclusive local hour, 0-23
+  scope_to_hour   smallint not null,       -- exclusive local hour, 1-24
+  thresholds      jsonb,                   -- per-detector overrides; null = shipped defaults
+  updated_at      timestamptz not null default now(),
+  check (scope_from_hour >= 0 and scope_from_hour < 24),
+  check (scope_to_hour > scope_from_hour and scope_to_hour <= 24)
+);
+
+-- One row per host the user has classified. A table rather than a jsonb blob:
+-- the settings UI edits it a row at a time, and two open tabs must not
+-- read-modify-write over each other.
+create table smultron.attention_host_rules (
+  user_id    uuid not null references auth.users(id),
+  host       text not null,                -- bare host, no scheme, no leading www.
+  category   text not null,                -- 'focus' | 'drift' | 'shopping' | 'neutral'
+  created_at timestamptz not null default now(),
+  primary key (user_id, host)
+);
+
 create table smultron.highlights (
   id           bigint generated always as identity primary key,
   user_id      uuid not null references auth.users(id),
@@ -402,6 +429,7 @@ Every external step throws `PipelineError` (`lib/pipelineError.ts`) carrying a s
 21. Pinned shelf reordering: `pin_position` column + CHECK + shelf index swap, with a data migration that seats existing pins in their m13 order; the shelf sorts by position, a new pin joins the end, re-pin is idempotent; `PUT /api/bookmarks/pinned` (session or token, lenient full-order write, never bumps `updated_at`/`pinned_at`); drag-and-drop on the site's shelf (dnd-kit: pointer, touch, keyboard grip; optimistic order override) and on the extension's new tab shelf (native HTML5 DnD, snapshot rewritten on success) (§3, §6, §8, §9).
 22. URL fidelity + pin editability: fragment-keeping normalization (`:~:` directive stripped, bare `#` dropped) with the `0013_keep-fragments` recompute of `url_normalized` for bookmarks AND browse_events; `url` on `PATCH /api/bookmarks/:id` (web-add validation, 409 `duplicate_url` with the conflicting row, `favicon_url` cleared on host change, never bumps `updated_at`) + click-to-edit URL in the expanded panel; pinned rows return to the feed log (accent `★` marker, `matching` no longer subtracts pins, "Everything is pinned." empty state retired, pinned-duplicate composer special case retired, new-tab log inherits + `★`); shelf-card `✎` opening the shared expanded editor beneath the shelf (§3, §4, §6, §8, §9, §13).
 23. Attention retention + weekly report cards: `attention_reports` schema + migrations (§3); the dwell / stay / session / detector rules from RED-92 promoted into tested `web/` library code driven by the checked-in detector config; a weekly job that generates the completed week's card and only then prunes `browse_events` older than 14 days; `GET /api/attention/reports` for the card history (§8, §13). Realtime toasts remain RED-93.
+24. Attention settings (per user): `attention_settings` + `attention_host_rules` schema + migrations (§3); `GET`/`PUT /api/attention/settings` (session or token); a `/settings` section for host categories, work-hours scope and threshold overrides, seeded by suggestions derived from the user's own top hosts; the extension fetching and caching settings in `chrome.storage.local`, with a missing cache meaning no detection; and the separate notifications opt-in, default off (§3, §6, §8, §9, §13). Lands BEFORE m23's card generation, so cards are computed against the user's own categories rather than a checked-in list.
 
 ## 13. Attention tracking: browse-event capture (m19)
 
@@ -410,7 +438,7 @@ Detect distraction patterns by first collecting a week of REAL browsing data, th
 ### Principles
 
 -   **Raw edges, never precomputed durations.** Dwell time = the intervals where a tab is active AND its window focused AND the user non-idle. The capture stores only the EDGES of those three signals; slicing (idle thresholds, session boundaries) happens retroactively in RED-92. Edges cannot be backfilled after the fact, which is why window-focus and idle events must be in from day one.
--   **Opt-in, and off means OFF.** Capture is gated on an explicit toggle (default disabled). Off = no events observed, buffered, or sent — zero capture, not zero notifications. The single `capture_stop` edge emitted AT disable time is the capture's own final edge, not capture-while-off; already-captured events still drain (they were captured while on).
+-   **Opt-in, and off means OFF.** Capture is gated on an explicit toggle (default disabled). Off = no events observed, buffered, or sent — zero capture, not zero notifications. The single `capture_stop` edge emitted AT disable time is the capture's own final edge, not capture-while-off; already-captured events still drain (they were captured while on). The toggle is authoritative in `chrome.storage.local` and is deliberately NOT mirrored server-side as the source of truth: "off means zero capture" is a stronger promise when honouring it requires no network call. **Notifications are a second, separate opt-in** (m24): enabling capture must never silently start showing toasts, because wanting the weekly card is not the same as wanting to be interrupted. Both default off.
 -   **Completely separate from bookmarks.** Browse events never read or write the bookmarks table; nothing in this feature can bump `bookmarks.updated_at` (Hard rule #1) because nothing in it touches bookmarks at all.
 
 ### Event kinds
@@ -451,6 +479,20 @@ The opt-in toggle lives in `chrome.storage.local` under its own key (`attention`
 
 **Validation bounds (Zod, strict at every level):** a malformed batch must be a deterministic 400 — never a payload that passes Zod but dies in Postgres, because that 5xx would halt-and-retry the same batch forever, wedging the outbox behind it. Bounds: `clientEventId`/`bootId` UUID format; `kind` from the enum; `occurredAtMs` integer in `[0, 253_402_300_799_999]` (the last millisecond of year 9999 — the earlier `8_640_000_000_000_000` bound, JS's max representable Date, was unsound: from year 10000 on `toISOString()` emits expanded-year form (`+010000-…`) that Postgres rejects, so a value passing Zod would 5xx at INSERT. `/api/sync`'s `dateAddedMs` carries the same latent hazard and is a separate follow-up); `tabId`/`windowId` 32-bit integers; `idleState` from its enum; `url` ≤ 8192 chars, `title` ≤ 4096, `transition` ≤ 256, `documentLifecycle` ≤ 64, and none of those four free-text fields may contain a NUL byte (`\u0000`) — Postgres `text` cannot store one, so it is the same 400-not-500 concern; per-kind required/forbidden fields enforced per the table above (required means present; fields not listed for a kind are rejected). The same `[0, year 9999]` window bounds the timestamp inside a `GET` keyset cursor, so a forged-but-JS-parseable date is a 400 rather than a 500. The extension's own unit tests keep batches well-formed; the poison rule cleans up if they ever aren't.
 
+### User configuration (m24)
+
+**What counts as focus or drift is the user's judgement, not ours.** Shipping a built-in list of "distracting" sites would be both presumptuous and wrong: the same site is work for one person and procrastination for another, and it can be both for the same person in different hours. So every input the detectors depend on is per-user configuration, stored server-side (§3) and edited on `/settings`:
+
+-   **Host categories** — `focus`, `drift`, `shopping`, `neutral`. Matching is exact host or parent domain (`gist.github.com` inherits `github.com`); `neutral` is the default for anything unclassified and is invisible to the detectors.
+-   **Work-hours scope** — days plus a local hour range, with the timezone recorded. Outside the scope nothing is flagged, though capture and measurement continue.
+-   **Detector thresholds** — optional overrides. Null means the shipped defaults, which come from the RED-92 calibration.
+
+**No opinionated defaults, and no empty-page dead end.** A user who has classified nothing gets no detection, which is the honest behaviour for a feature that is off by default anyway. Instead the settings UI proposes candidates **from that user's own data**: their top hosts by engaged time over the retained window, uncategorised first, one click each. The suggestion is derived, never applied automatically — the user confirms every rule. This also means the feature gets more useful the longer capture has been on, rather than demanding a taxonomy up front.
+
+**Both runtimes read the same settings.** The server needs them to compute weekly report cards (§13 retention); the extension needs them to detect in realtime (RED-93). They are fetched over `GET /api/attention/settings` (session for the site, Bearer for the extension), cached by the extension in `chrome.storage.local`, and refreshed on the existing alarm. **A missing or unreadable cache means no detection, never guessed detection** — the same principle as the capture toggle: when the extension is unsure, it does nothing.
+
+**Multi-user readiness.** These tables are the point where attention tracking stops being single-user by construction (§14): categories, scope and thresholds are all keyed by `user_id`, and nothing in the detector path reads a global list.
+
 ### Retention and report cards (m23)
 
 Raw browse events are a **means, not an archive**. They exist so detectors can be calibrated and so the current week can be summarised; keeping years of every URL visited is a privacy liability with no matching use. Decided 2026-09-06:
@@ -460,7 +502,7 @@ Raw browse events are a **means, not an archive**. They exist so detectors can b
 
 **Ordering is the whole safety property**: a week's card must exist before any event it covers is pruned. The weekly job therefore (1) generates the card for the most recently completed week, (2) verifies the row was written, and (3) only then prunes events older than the retention window. A 14-day window against a weekly cadence leaves a full week of slack, so one missed run loses nothing — the next run still finds the raw events it needs. If card generation fails, the prune is skipped, and the backlog is bounded by the fact that the prune only ever removes what a stored card already covers.
 
-**Where the computation lives.** Cards are computed **server-side from the stored events**, not by the extension, so a week is summarised whether or not the browser was open at the boundary. That means the dwell state machine, the stay/session rules and the detectors (§13, RED-92) must exist in `web/` as tested library code — the same logic RED-93 ports into the service worker for realtime toasts. These are two runtimes over one contract: the rules live in a single shared, unit-tested module, and neither copy may drift from `config.json`'s thresholds. The `config_hash` column records which thresholds produced a card, because cards computed under different thresholds are not comparable across weeks.
+**Where the computation lives.** Cards are computed **server-side from the stored events**, not by the extension, so a week is summarised whether or not the browser was open at the boundary. That means the dwell state machine, the stay/session rules and the detectors (§13, RED-92) must exist in `web/` as tested library code — the same logic RED-93 ports into the service worker for realtime toasts. These are two runtimes over one contract: the rules live in a single shared, unit-tested module, and neither copy may drift from the other. The thresholds and categories they read are the user's own settings (m24, above), so `config_hash` is a hash of that user's effective configuration — recategorising a host or moving the scope makes later cards incomparable with earlier ones, and the hash is what makes that visible instead of silent.
 
 **Weeks and zones.** A week is Monday-to-Sunday in the user's local zone, and the zone is stored on the card. Changing zones later does not retroactively re-bucket old cards.
 
