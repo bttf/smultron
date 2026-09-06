@@ -76,6 +76,26 @@ create table smultron.browse_events (
   unique (user_id, client_event_id)
 );
 
+-- m23: weekly attention report cards (§13 "Retention and report cards").
+-- browse_events is pruned to a rolling 14 days; these rows are the permanent
+-- record and are never deleted. One row per user per ISO week.
+create table smultron.attention_reports (
+  id            bigint generated always as identity primary key,
+  user_id       uuid not null references auth.users(id),
+  week_start    date not null,           -- Monday of the ISO week, in the user's local zone (below)
+  timezone      text not null,           -- zone the week was bucketed in; recorded so a later zone change can't silently reinterpret old cards
+  config_hash   text not null,           -- sha256 of the detector config used; cards computed under different thresholds are not comparable
+  engaged_ms    bigint not null,         -- total dwell in the week (all hours)
+  active_ms     bigint not null,         -- of which input-active (§13 active vs passive)
+  in_scope_ms   bigint not null,         -- dwell inside config.scope (work hours)
+  session_count integer not null,
+  by_category   jsonb not null,          -- {focus,drift,shopping,newtab,neutral} -> {engagedMs, activeMs, inScopeMs}
+  by_host       jsonb not null,          -- top N hosts -> {engagedMs, activeMs, category}; N capped so a card stays small
+  flags         jsonb not null,          -- detector -> {inScope, allHours, byTier}
+  generated_at  timestamptz not null default now(),
+  unique (user_id, week_start)
+);
+
 create table smultron.highlights (
   id           bigint generated always as identity primary key,
   user_id      uuid not null references auth.users(id),
@@ -381,6 +401,7 @@ Every external step throws `PipelineError` (`lib/pipelineError.ts`) carrying a s
 20. New tab page: `chrome_url_overrides.newtab` (unconditional — no toggle, §6); Bearer-token read access on `GET /api/bookmarks`; pinned shelf + recent log + instant search painted from a `chrome.storage.local` snapshot cache and revalidated on load (§6, §8).
 21. Pinned shelf reordering: `pin_position` column + CHECK + shelf index swap, with a data migration that seats existing pins in their m13 order; the shelf sorts by position, a new pin joins the end, re-pin is idempotent; `PUT /api/bookmarks/pinned` (session or token, lenient full-order write, never bumps `updated_at`/`pinned_at`); drag-and-drop on the site's shelf (dnd-kit: pointer, touch, keyboard grip; optimistic order override) and on the extension's new tab shelf (native HTML5 DnD, snapshot rewritten on success) (§3, §6, §8, §9).
 22. URL fidelity + pin editability: fragment-keeping normalization (`:~:` directive stripped, bare `#` dropped) with the `0013_keep-fragments` recompute of `url_normalized` for bookmarks AND browse_events; `url` on `PATCH /api/bookmarks/:id` (web-add validation, 409 `duplicate_url` with the conflicting row, `favicon_url` cleared on host change, never bumps `updated_at`) + click-to-edit URL in the expanded panel; pinned rows return to the feed log (accent `★` marker, `matching` no longer subtracts pins, "Everything is pinned." empty state retired, pinned-duplicate composer special case retired, new-tab log inherits + `★`); shelf-card `✎` opening the shared expanded editor beneath the shelf (§3, §4, §6, §8, §9, §13).
+23. Attention retention + weekly report cards: `attention_reports` schema + migrations (§3); the dwell / stay / session / detector rules from RED-92 promoted into tested `web/` library code driven by the checked-in detector config; a weekly job that generates the completed week's card and only then prunes `browse_events` older than 14 days; `GET /api/attention/reports` for the card history (§8, §13). Realtime toasts remain RED-93.
 
 ## 13. Attention tracking: browse-event capture (m19)
 
@@ -426,9 +447,24 @@ The opt-in toggle lives in `chrome.storage.local` under its own key (`attention`
 
 ### Server semantics
 
-`applyBrowseEvents` (web `lib/browseEvents.ts`): normalize `url` → `url_normalized` (§4, same single implementation), insert append-only, `ON CONFLICT (user_id, client_event_id) DO NOTHING`, return `{inserted, deduped}`. The FK to `auth.users` rides a hand-written migration (the `0001_trgm-fk.sql` pattern — `auth.users` is deliberately unmodeled in Drizzle). `listBrowseEvents` powers the log view (§8, §9). Rows are never updated or deleted (append-only telemetry; retention is a future decision) — with one recorded exception: migration `0013_keep-fragments` (m22, §4) recomputed the DERIVED `url_normalized` column from each row's stored raw `url` so the dedupe/join key follows §4's single implementation everywhere; the captured payload itself has never been touched. Fragment-keeping is a straight win here: SPA navigations (`onHistoryStateUpdated`) differ mostly BY fragment, which the old rule collapsed.
+`applyBrowseEvents` (web `lib/browseEvents.ts`): normalize `url` → `url_normalized` (§4, same single implementation), insert append-only, `ON CONFLICT (user_id, client_event_id) DO NOTHING`, return `{inserted, deduped}`. The FK to `auth.users` rides a hand-written migration (the `0001_trgm-fk.sql` pattern — `auth.users` is deliberately unmodeled in Drizzle). `listBrowseEvents` powers the log view (§8, §9). Rows are append-only in normal operation: never updated, and deleted only by the m23 retention prune described below (retention was an open question through m19–m22 and was decided on 2026-09-06). One further recorded exception: migration `0013_keep-fragments` (m22, §4) recomputed the DERIVED `url_normalized` column from each row's stored raw `url` so the dedupe/join key follows §4's single implementation everywhere; the captured payload itself has never been touched. Fragment-keeping is a straight win here: SPA navigations (`onHistoryStateUpdated`) differ mostly BY fragment, which the old rule collapsed.
 
 **Validation bounds (Zod, strict at every level):** a malformed batch must be a deterministic 400 — never a payload that passes Zod but dies in Postgres, because that 5xx would halt-and-retry the same batch forever, wedging the outbox behind it. Bounds: `clientEventId`/`bootId` UUID format; `kind` from the enum; `occurredAtMs` integer in `[0, 253_402_300_799_999]` (the last millisecond of year 9999 — the earlier `8_640_000_000_000_000` bound, JS's max representable Date, was unsound: from year 10000 on `toISOString()` emits expanded-year form (`+010000-…`) that Postgres rejects, so a value passing Zod would 5xx at INSERT. `/api/sync`'s `dateAddedMs` carries the same latent hazard and is a separate follow-up); `tabId`/`windowId` 32-bit integers; `idleState` from its enum; `url` ≤ 8192 chars, `title` ≤ 4096, `transition` ≤ 256, `documentLifecycle` ≤ 64, and none of those four free-text fields may contain a NUL byte (`\u0000`) — Postgres `text` cannot store one, so it is the same 400-not-500 concern; per-kind required/forbidden fields enforced per the table above (required means present; fields not listed for a kind are rejected). The same `[0, year 9999]` window bounds the timestamp inside a `GET` keyset cursor, so a forged-but-JS-parseable date is a 400 rather than a 500. The extension's own unit tests keep batches well-formed; the poison rule cleans up if they ever aren't.
+
+### Retention and report cards (m23)
+
+Raw browse events are a **means, not an archive**. They exist so detectors can be calibrated and so the current week can be summarised; keeping years of every URL visited is a privacy liability with no matching use. Decided 2026-09-06:
+
+-   **`browse_events` is retained for a rolling 14 days.** Anything older is hard-deleted. This is the deliberate exception to the append-only rule above.
+-   **Weekly report cards are kept indefinitely.** One `attention_reports` row per user per ISO week (§3) holds the aggregates that outlive the raw rows: engaged/active/in-scope time, per-category and top-host breakdowns, session count, and detector flag counts by tier. No URLs beyond the host, no timestamps below the week.
+
+**Ordering is the whole safety property**: a week's card must exist before any event it covers is pruned. The weekly job therefore (1) generates the card for the most recently completed week, (2) verifies the row was written, and (3) only then prunes events older than the retention window. A 14-day window against a weekly cadence leaves a full week of slack, so one missed run loses nothing — the next run still finds the raw events it needs. If card generation fails, the prune is skipped, and the backlog is bounded by the fact that the prune only ever removes what a stored card already covers.
+
+**Where the computation lives.** Cards are computed **server-side from the stored events**, not by the extension, so a week is summarised whether or not the browser was open at the boundary. That means the dwell state machine, the stay/session rules and the detectors (§13, RED-92) must exist in `web/` as tested library code — the same logic RED-93 ports into the service worker for realtime toasts. These are two runtimes over one contract: the rules live in a single shared, unit-tested module, and neither copy may drift from `config.json`'s thresholds. The `config_hash` column records which thresholds produced a card, because cards computed under different thresholds are not comparable across weeks.
+
+**Weeks and zones.** A week is Monday-to-Sunday in the user's local zone, and the zone is stored on the card. Changing zones later does not retroactively re-bucket old cards.
+
+**Interaction with the scope decision** (§13, RED-92): a card records both the all-hours and the in-scope (Mon–Fri 08:00–18:00) figures. The scope governs which flags are raised, not which time is measured.
 
 ## 14. Out of scope (v1)
 
