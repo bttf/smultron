@@ -178,10 +178,21 @@ for (const g of [300000, 900000, 1800000, 3600000]) {
 	const dr = r.dwells.filter((d) => d.category === "drift");
 	const pas = sum(dr.filter((d) => d.passive).map((d) => d.end - d.start));
 	const act = sum(dr.filter((d) => !d.passive).map((d) => d.end - d.start));
-	const yt = r.dwells.filter((d) => d.host === "youtube.com");
+	// The heaviest drift host, whichever it is — no site is named in committed code.
+	const topDriftHost = [...r.dwells.filter((d) => d.category === "drift")]
+		.reduce(
+			(acc, d) => acc.set(d.host, (acc.get(d.host) ?? 0) + (d.end - d.start)),
+			new Map<string, number>(),
+		)
+		.entries()
+		.reduce((best, e) => (e[1] > best[1] ? e : best), ["", 0] as [
+			string,
+			number,
+		])[0];
+	const yt = r.dwells.filter((d) => d.host === topDriftHost);
 	const ytp = sum(yt.filter((d) => d.passive).map((d) => d.end - d.start));
 	p(
-		`- grace ${fmtDur(g)}: drift active ${fmtDur(act)}, passive ${fmtDur(pas)} (${pct(pas, act + pas)}); youtube passive ${fmtDur(ytp)} of ${fmtDur(sum(yt.map((d) => d.end - d.start)))}`,
+		`- grace ${fmtDur(g)}: drift active ${fmtDur(act)}, passive ${fmtDur(pas)} (${pct(pas, act + pas)}); top drift host (${topDriftHost}) passive ${fmtDur(ytp)} of ${fmtDur(sum(yt.map((d) => d.end - d.start)))}`,
 	);
 }
 p();

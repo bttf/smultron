@@ -20,3 +20,4 @@ analysis/red92/data/
 analysis/red92/out/
 analysis/red92/FINDINGS_DATA.md
 analysis/red92/FINDINGS_SUMMARIZED.md
+analysis/red92/config.hosts.local.json

@@ -87,9 +87,29 @@ export type Session = {
 };
 
 export function loadConfig(): Config {
-	return JSON.parse(
+	const cfg = JSON.parse(
 		readFileSync(new URL("./config.json", import.meta.url), "utf8"),
-	);
+	) as Config;
+	// Host classification is personal, so the committed config ships it empty
+	// and the real lists live in a gitignored local file (this repo is public).
+	// No local file = every host is `neutral` and no detector can fire, which is
+	// the same "when unsure, do nothing" default the product uses (SPEC §13).
+	try {
+		const local = JSON.parse(
+			readFileSync(
+				new URL("./config.hosts.local.json", import.meta.url),
+				"utf8",
+			),
+		) as { hosts?: Config["hosts"] };
+		if (local.hosts) {
+			cfg.hosts = { ...cfg.hosts, ...local.hosts };
+		}
+	} catch {
+		console.warn(
+			"[red92] no config.hosts.local.json — every host is neutral, detectors will not fire",
+		);
+	}
+	return cfg;
 }
 
 export function loadEvents(): Ev[] {

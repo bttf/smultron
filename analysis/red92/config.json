@@ -15,63 +15,11 @@
 		"stayBreakMs": 60000
 	},
 	"hosts": {
-		"focus": [
-			"github.com",
-			"linear.app",
-			"claude.ai",
-			"localhost",
-			"vercel.com",
-			"supabase.com",
-			"waxnerd.sentry.io",
-			"sentry.io",
-			"smultron.redpine.software",
-			"waxnerd.com",
-			"mail.google.com",
-			"calendar.google.com",
-			"docs.google.com",
-			"drive.google.com",
-			"console.anthropic.com",
-			"platform.openai.com",
-			"developer.chrome.com",
-			"developer.mozilla.org",
-			"stackoverflow.com",
-			"npmjs.com",
-			"firecrawl.dev",
-			"notion.so",
-			"figma.com"
-		],
-		"drift": [
-			"x.com",
-			"twitter.com",
-			"instagram.com",
-			"youtube.com",
-			"twitch.tv",
-			"reddit.com",
-			"facebook.com",
-			"tiktok.com",
-			"threads.net",
-			"bsky.app",
-			"letterboxd.com",
-			"news.ycombinator.com",
-			"pluto.tv",
-			"hbomax.com",
-			"play.hbomax.com",
-			"max.com",
-			"netflix.com",
-			"hulu.com",
-			"disneyplus.com",
-			"primevideo.com"
-		],
-		"shopping": [
-			"amazon.com",
-			"ebay.com",
-			"carvana.com",
-			"publix.com",
-			"target.com",
-			"walmart.com",
-			"bestbuy.com"
-		],
-		"newtab": ["newtab", "new-tab-page", "ccnpkgbnphmkfdcbpcccclcejamcpbmm"]
+		"_comment": "Empty by design: host classification is personal and is NOT committed to this public repo. Put your own lists in config.hosts.local.json (gitignored) and the scripts will merge them. Product-side this is per-user settings, SPEC 13 'User configuration' (m24).",
+		"focus": [],
+		"drift": [],
+		"shopping": [],
+		"newtab": []
 	},
 	"detectors": {
 		"quickCheckLoop": {
