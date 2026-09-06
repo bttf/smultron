@@ -1,0 +1,116 @@
+{
+	"timezone": "America/New_York",
+	"scope": {
+		"_comment": "detectors only flag inside these local hours on these days; evenings are recreation, out of scope",
+		"hours": [8, 18],
+		"days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
+	},
+	"dwell": {
+		"idleGraceMs": 300000,
+		"maxSilentDwellMs": 7200000
+	},
+	"session": {
+		"gapMs": 1800000,
+		"bounceMs": 3000,
+		"stayBreakMs": 60000
+	},
+	"hosts": {
+		"focus": [
+			"github.com",
+			"linear.app",
+			"claude.ai",
+			"localhost",
+			"vercel.com",
+			"supabase.com",
+			"waxnerd.sentry.io",
+			"sentry.io",
+			"smultron.redpine.software",
+			"waxnerd.com",
+			"mail.google.com",
+			"calendar.google.com",
+			"docs.google.com",
+			"drive.google.com",
+			"console.anthropic.com",
+			"platform.openai.com",
+			"developer.chrome.com",
+			"developer.mozilla.org",
+			"stackoverflow.com",
+			"npmjs.com",
+			"firecrawl.dev",
+			"notion.so",
+			"figma.com"
+		],
+		"drift": [
+			"x.com",
+			"twitter.com",
+			"instagram.com",
+			"youtube.com",
+			"twitch.tv",
+			"reddit.com",
+			"facebook.com",
+			"tiktok.com",
+			"threads.net",
+			"bsky.app",
+			"letterboxd.com",
+			"news.ycombinator.com",
+			"pluto.tv",
+			"hbomax.com",
+			"play.hbomax.com",
+			"max.com",
+			"netflix.com",
+			"hulu.com",
+			"disneyplus.com",
+			"primevideo.com"
+		],
+		"shopping": [
+			"amazon.com",
+			"ebay.com",
+			"carvana.com",
+			"publix.com",
+			"target.com",
+			"walmart.com",
+			"bestbuy.com"
+		],
+		"newtab": ["newtab", "new-tab-page", "ccnpkgbnphmkfdcbpcccclcejamcpbmm"]
+	},
+	"detectors": {
+		"quickCheckLoop": {
+			"categories": ["drift"],
+			"windowMs": 1200000,
+			"minOpens": 3,
+			"maxStayMs": 90000,
+			"minAbsenceMs": 60000
+		},
+		"tabSwitchFlicker": {
+			"windowMs": 60000,
+			"minSwitches": 6,
+			"maxStayMs": 8000,
+			"minDistinctTabs": 2,
+			"requireDriftTab": true,
+			"driftCategories": ["drift"]
+		},
+		"postFrictionDrift": {
+			"minFocusStayMs": 120000,
+			"maxLagMs": 30000,
+			"userInitiatedOnly": true,
+			"driftCategories": ["drift", "shopping"]
+		},
+		"chainSpiral": {
+			"categories": ["drift"],
+			"minLinkNavs": 8,
+			"minDurationMs": 900000
+		},
+		"returnVelocityCollapse": {
+			"driftCategories": ["drift"],
+			"window": 4,
+			"collapsedGapMs": 300000,
+			"baselineFactor": 3,
+			"minBaselineGapMs": 120000
+		},
+		"sunkSession": {
+			"driftCategories": ["drift"],
+			"minDriftShare": 0.6,
+			"minDriftMs": 2700000
+		}
+	}
+}

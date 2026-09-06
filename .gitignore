@@ -12,3 +12,11 @@ coverage
 .DS_Store
 .vercel
 .firecrawl/
+
+# RED-92 scratch analysis: anything derived from real browsing data is personal
+# and must never reach this PUBLIC repo. The committed FINDINGS.md carries the
+# method and the tuned config only; every measured number lives in these.
+analysis/red92/data/
+analysis/red92/out/
+analysis/red92/FINDINGS_DATA.md
+analysis/red92/FINDINGS_SUMMARIZED.md
