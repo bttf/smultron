@@ -20,7 +20,7 @@ cd web && node_modules/.bin/tsx ../analysis/red92/report.mts
 | `model.mts` | dwell state machine (SPEC §13 rule: active tab ∧ focused window ∧ non-idle, never across a bootId), bounce collapse, stays, sessions |
 | `detectors.mts` | quickCheckLoop · tabSwitchFlicker · postFrictionDrift · chainSpiral · returnVelocityCollapse · sunkSession |
 | `report.mts` | writes `out/report.md`: diagnostics, host table, per-day table, flag counts, threshold sweeps, one section per session with timeline + flags |
-| `config.json` | every threshold, the host→category lists, and the work-hours scope — the thing RED-93 consumes |
+| `config.json` | thresholds, host→category lists, work-hours scope. A calibration artifact: only the threshold defaults carry into the product, since categories and scope become per-user settings (SPEC §13, m24) |
 | `FINDINGS.md` | **committed**: method, detector definitions, verdicts, recommended tiering — no measurements |
 | `FINDINGS_DATA.md` | **local only**: every number measured from the real data, keyed to FINDINGS.md's sections |
 | `FINDINGS_SUMMARIZED.md` | **local only**: the plain-language behavioural read, written for Adnan rather than for an implementer |

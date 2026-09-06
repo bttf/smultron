@@ -2,6 +2,8 @@
 
 Status: **calibration pass done; host-category review and session eyeballing still with Adnan** (the "do the flags match how it actually felt?" step can only be done by the person who lived the sessions). This document plus `config.json` are the durable outputs of RED-92; the scripts here are throwaway and may be deleted once RED-93 has ported the detectors.
 
+**`config.json` is a calibration artifact, not product configuration.** The host lists in it are one person's judgement about one person's sites, arrived at by inspection. Product-side, categories, scope and thresholds are **per-user settings** (SPEC §13 "User configuration", m24): nothing here ships as a built-in list. What survives from this file is the *threshold defaults*, which m24 uses when a user has set no overrides.
+
 > **Privacy boundary.** `bttf/smultron` is a public repository, so this file deliberately contains **no measurements taken from the actual browsing data** — no host hours, dates, timestamps, drift shares or flag counts. Those live in `FINDINGS_DATA.md` and `FINDINGS_SUMMARIZED.md`, which are local-only (excluded via `.git/info/exclude`), alongside `data/` and `out/`. What is committed here is the machinery and the conclusions about the machinery: how dwell is reconstructed, what each detector means, which knob controls it, and whether it earned its place in RED-93.
 
 ## 1. What the collection window gave us
@@ -44,7 +46,7 @@ The measured result is the interesting part, and it contradicted the obvious ass
 
 Categories drive every detector. The lists live in `config.json → hosts` and match by exact host or parent domain (`gist.github.com` → `github.com`); `localhost*` is focus; anything unlisted is `neutral` and invisible to the detectors.
 
-Four categories are in use: `focus`, `drift`, `shopping`, `newtab`. `shopping` is kept separate from `drift` because deliberate errands (a car, groceries) are not the same behaviour as a feed, and it only feeds the post-friction detector. **This list is the main thing needing Adnan's review** — see §7.
+Four categories are in use: `focus`, `drift`, `shopping`, `newtab`. `shopping` is kept separate from `drift` because deliberate errands (a car, groceries) are not the same behaviour as a feed, and it only feeds the post-friction detector. **This list is the main thing needing Adnan's review** — see §7. It is also the seed for m24's per-user category editor rather than a shipped default: the product asks each user to classify their own top hosts instead of assuming.
 
 ## 5. Detectors — definitions and verdicts
 
