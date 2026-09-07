@@ -162,6 +162,16 @@ Upsert on `(user_id, url_normalized)`:
 -   **Insert** if new: `created_at = updated_at = now()` (or event's `dateAdded` if present), tags derived from `folderPath` (approved 2026-08-02): the **leafmost folder name only** — and NO tag when the path is a single segment exactly matching one of Chrome's default root containers by name (`Bookmarks Bar`, `Other Bookmarks`, `Mobile Bookmarks` — name-matched, not structural, so a user's own top-level folder still tags; English names, localized Chrome would tag its containers). The extension keeps sending the full raw path (§6); the server derives (`folderTags` in `sync.ts`). Applies to backfill inserts identically. Existing rows were retagged by data migration `0004_leaf-folder-tags`.
 -   **On conflict (re-save)**: `updated_at = now()`, `archived_at = null` (unarchive), `title = excluded.title`, `chrome_id = excluded.chrome_id`, `url = excluded.url` (the raw form refreshes to the newest spelling; approved 2026-08-01). Tags are NOT touched on re-save (site-owned after insert); neither is `pinned_at` (pins are site-owned, m13 — a re-save keeps the row wherever it sat on the shelf).
 
+#### Favicon on live captures (RED-205)
+
+A live capture carries `faviconUrl`: the `favIconUrl` of the open tab showing the page, read at enqueue time (§6). Chrome hangs the icon off the tab, never off the bookmark node, so this is the only place the page's OWN icon is available — without it the row stores `favicon_url = null` and both renderers fall back to a hostname-keyed icon service, which answers with the DOMAIN's icon (`calendar.google.com` → the Google "G").
+
+-   The tab is found by listing ALL tabs (`chrome.tabs.query({})`) and comparing `tab.url` as a STRING — deliberately NOT `query({url})`, whose argument is a **match pattern**, not a URL: a pattern containing `#` matches nothing (Chromium matches the path against `GURL::PathForRequest()`, fragment dropped) and returns `[]` without throwing, so every SPA-route bookmark (`mail.google.com/mail/u/0/#inbox`, `docs.google.com/…/edit#gid=0`) would silently lose its favicon; a `*` in the URL would act as a wildcard and pull an unrelated tab's icon; userinfo (`https://u@host/`) is not a valid pattern at all. String equality has none of those semantics. When several tabs share the URL the ACTIVE one wins (it is the one the user just bookmarked), falling back to any other matching tab that has an icon.
+-   The extension sends the value RAW and unvalidated beyond "non-empty string" (hard rule #3's spirit: judgment is the server's). No tab open on the URL, no icon, or a failed `tabs.query` simply omits the field — the lookup never blocks or fails the enqueue.
+-   The server validates with `validFaviconUrl` (`lib/firecrawl.ts`) — the SAME rule as the m17 metadata fill, one implementation: absolute http(s) only, ≤2048 chars, no `data:`/relative/other-scheme URLs, and no `/favicon.ico` guessing. Anything rejected stores as null and the UI's hostname fallback (§9) stands.
+-   **Insert**: the validated value is stored. **On conflict (live re-save)**: `favicon_url = coalesce(bookmarks.favicon_url, excluded.favicon_url)` — fill-when-null, exactly like the m17 fill. A resolved icon is site-owned and survives a re-save; a re-save carrying no favicon never erases one.
+-   **Backfill never carries it and never writes it.** The tree walk (`flattenTree`) omits the field, and `applySync` ignores any favicon in `backfill` mode — backfill inserts write null (the column default) and backfill conflicts stay `DO NOTHING`, byte-identical on `updated_at`.
+
 Live captures — this path, web adds (below), and highlight inserts (below) — are the ONLY paths that bump `updated_at`.
 
 ### `web add` (site composer, via `POST /api/bookmarks`, m11)
@@ -204,7 +214,7 @@ Server normalizes the URL and looks up `smultron.bookmarks` by `(user_id, url_no
 
 -   `manifest`: permissions `bookmarks`, `storage`, `alarms`, `contextMenus`; `host_permissions` for `APP_URL`.
 -   **Service worker**:
-    -   `onCreated` listener → enqueue `{mode:'live', bookmark}` in outbox → flush.
+    -   `onCreated` listener → enqueue `{mode:'live', bookmark}` in outbox → flush. The live entry also carries `faviconUrl` when a tab is open on the URL (`chrome.tabs.query({})` + exact `tab.url` string match, active tab preferred — NEVER a `{url}` match pattern, which drops fragments; pure helper `src/favicon.ts`, unit-tested) — see §5. Backfill entries never carry it.
     -   `chrome.runtime.onStartup` + `onInstalled` → reconciliation sweep: `chrome.bookmarks.getTree()`, flatten (skip folders; capture each bookmark's folder path), send in batches of ~500 as `{mode:'backfill', bookmarks:[...]}` → also flush outbox.
     -   Folder path = `/`-joined ancestor folder titles, e.g. `Bookmarks Bar/Dev/Postgres`.
 -   **Highlights capture**: context-menu item ("Add highlight in Smultronstället", `contexts: ['selection']`, fixed id, re-created idempotently on `onInstalled`). `onClicked`:
@@ -256,7 +266,8 @@ All inputs Zod-validated; unknown fields rejected.
     ```ts
     { mode: 'live' | 'backfill',
       bookmarks: Array<{ url: string; title: string; chromeId: string;
-                         dateAddedMs?: number; folderPath?: string }> }  // max 500
+                         dateAddedMs?: number; folderPath?: string;
+                         faviconUrl?: string }> }  // max 500
     ```
     Server normalizes URLs and applies §5 semantics. Returns `{inserted, bumped, skipped}`.
 -   `GET /api/bookmarks?q=&cursor=&archived=&tag=` — session auth, **or the extension's Bearer token** (m20; same scheme as `/api/sync`, resolved by `authenticateRequest` in `requestAuth.ts` — an `Authorization` header wins, otherwise the session). Both callers get the identical response shape and the same per-user scoping; the token grants READ only here (POST stays session-only). Unlike the other token endpoints this path stays INSIDE the proxy matcher: its prefix is shared with the session-authed POST and `/api/bookmarks/:id`, and matched `/api/*` is never redirected — harmless, exactly as for `/api/highlights`. No `q`: feed ordered `updated_at desc`, cursor-paginated (50/page), `archived_at is null` unless `archived=1` (`archived=1` returns ONLY archived rows — it is the archived view, not an "include archived" flag). The feed (no-`q`) branch includes pinned rows like any others since m22 (m13–m21 excluded them in favor of the shelf, which left a pinned row visible ONLY as a shelf card — uneditable in place and absent from the log's chronology; the shelf is quick access, not the row's new home). With `q`: FTS (`websearch_to_tsquery('simple', q)`) OR trgm similarity/substring on title + url_normalized, ordered by rank then recency; search returns a single page of 50 with no cursor, and INCLUDES pinned rows (they stay findable). (Recorded from implementation, 2026-08-01.) Since m10, `q` also matches note text via FTS + ILIKE substring (NOT trgm similarity — no trgm index on note; similarity over prose is noise). All bookmark responses carry `note: string | null`, `pinnedAt: string | null` (m13) and `faviconUrl: string | null` (m17).

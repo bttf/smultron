@@ -3,7 +3,9 @@
 // anywhere that bumps `updated_at` (AGENTS.md Hard rule #1).
 import { sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { z } from "zod";
 import { bookmarks } from "../db/schema";
+import { validFaviconUrl } from "./firecrawl";
 import { normalizeUrl } from "./normalizeUrl";
 
 /** Incoming bookmark shape from the extension (SPEC §8). URLs are RAW. */
@@ -13,7 +15,42 @@ export type SyncBookmark = {
 	chromeId: string;
 	dateAddedMs?: number;
 	folderPath?: string;
+	/**
+	 * The open tab's `favIconUrl` (SPEC §5) — live captures only. Untrusted:
+	 * anything that isn't an absolute http(s) URL is stored as null.
+	 */
+	faviconUrl?: string;
 };
+
+// Max representable JS Date timestamp — bounds dateAddedMs so `new Date()`
+// can never produce an Invalid Date.
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
+/**
+ * The `/api/sync` body schema (SPEC §8). It lives beside the semantics it
+ * feeds — like `browseEventsBodySchema` — so it can be unit-tested without
+ * importing a Next route module. Strict at every level: unknown fields are a
+ * 400, never silently dropped.
+ */
+export const syncBookmarkSchema = z.strictObject({
+	// URL must be non-empty; title MAY be empty (Chrome allows empty titles).
+	url: z.string().min(1),
+	title: z.string(),
+	chromeId: z.string().min(1),
+	dateAddedMs: z.number().int().min(0).max(MAX_DATE_MS).optional(),
+	folderPath: z.string().optional(),
+	// Length/scheme are NOT checked here: `validFaviconUrl` is the single
+	// implementation of that rule, and a junk icon must degrade to null rather
+	// than 400 a whole batch the outbox would then retry forever.
+	faviconUrl: z.string().optional(),
+});
+
+export const syncBodySchema = z.strictObject({
+	mode: z.enum(["live", "backfill"]),
+	// SPEC §8: max 500 per batch. Violation is a plain 400 (not 413) with a
+	// descriptive issue list, like every other validation failure.
+	bookmarks: z.array(syncBookmarkSchema).max(500),
+});
 
 export type SyncMode = "live" | "backfill";
 
@@ -102,6 +139,12 @@ export async function applySync(
 			// First element = leafmost folder name at insert (none for default
 			// root containers); site-owned afterwards.
 			tags: folderTags(b.folderPath),
+			// SPEC §5: the tab's favicon rides on LIVE captures only, validated
+			// by the same rule as the m17 metadata fill. Backfill ignores any
+			// favicon on the wire — null here is the column default, so a
+			// backfill insert is unchanged.
+			faviconUrl:
+				mode === "live" ? validFaviconUrl(b.faviconUrl ?? null) : null,
 			createdAt,
 			updatedAt: createdAt,
 		};
@@ -130,6 +173,9 @@ export async function applySync(
 	// (the normalized key matched, so this is the same page; keeping the
 	// latest raw spelling is consistent with overwriting title). tags and
 	// created_at are NOT touched — site-owned after insert / first-save time.
+	// favicon_url is FILL-WHEN-NULL (the m17 coalesce pattern): a resolved icon
+	// is site-owned and must survive a re-save, and a re-save that carries no
+	// favicon (no tab open on the page) must not erase one.
 	const returned = await db
 		.insert(bookmarks)
 		.values(values)
@@ -141,6 +187,7 @@ export async function applySync(
 				title: sql`excluded.title`,
 				chromeId: sql`excluded.chrome_id`,
 				url: sql`excluded.url`,
+				faviconUrl: sql`coalesce(bookmarks.favicon_url, excluded.favicon_url)`,
 			},
 		})
 		// xmax = 0 distinguishes a fresh insert from a conflict-update: an

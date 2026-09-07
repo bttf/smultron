@@ -7,13 +7,19 @@
 
 export type SyncMode = "live" | "backfill";
 
-/** One bookmark in a `/api/sync` payload (SPEC §8). */
+/**
+ * One bookmark in a `/api/sync` payload (SPEC §8).
+ *
+ * `faviconUrl` is the open tab's `favIconUrl` and rides ONLY on live captures
+ * (SPEC §5) — `flattenTree` never sets it, so backfill batches never carry it.
+ */
 export interface SyncBookmark {
 	url: string;
 	title: string;
 	chromeId: string;
 	dateAddedMs?: number;
 	folderPath?: string;
+	faviconUrl?: string;
 }
 
 /** Body of `POST {baseUrl}/api/sync`. Max SYNC_BATCH_LIMIT bookmarks. */

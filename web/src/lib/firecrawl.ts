@@ -279,8 +279,12 @@ const MAX_FAVICON_URL_CHARS = 2048;
  * Null in, null out, and null on anything rejected — callers must NOT fall
  * back to guessing `/favicon.ico`: a stored URL that 404s is worse than no URL
  * at all, since the UI's hostname-based fallback always renders something.
+ *
+ * Exported because the extension's live-capture favicon (SPEC §5, sent from
+ * `chrome.tabs.Tab.favIconUrl`) is untrusted in exactly the same ways and must
+ * be judged by exactly the same rule — one validator, not two.
  */
-function validFaviconUrl(value: string | null): string | null {
+export function validFaviconUrl(value: string | null): string | null {
 	if (!value) {
 		return null;
 	}
