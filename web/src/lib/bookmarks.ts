@@ -47,6 +47,7 @@ import {
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { bookmarks, highlights } from "../db/schema";
 import { normalizeUrl } from "./normalizeUrl";
+import { screenshotPublicBase } from "./storage";
 
 // Accept any Drizzle Postgres database or transaction (postgres-js in prod,
 // PGlite in tests) — same pattern as SyncDb (sync.ts) / PairingDb (pairing.ts).
@@ -83,24 +84,50 @@ export type Bookmark = {
 	 * serialized: the `pinned` array's order is the contract (SPEC §8).
 	 */
 	pinnedAt: Date | null;
+	/**
+	 * Public URL of the page screenshot (m23, SPEC §15.1), or null when the row
+	 * has none / Storage is unconfigured. Derived in SQL from
+	 * `screenshot_path`, which is itself never serialized.
+	 */
+	screenshotUrl: string | null;
 	/** Ordered `created_at asc` (SPEC §8); `[]` when none. */
 	highlights: BookmarkHighlight[];
 };
 
-/** The bookmark columns every route serializes (exported for `bookmarkMetadata.ts`). */
-export const BOOKMARK_COLUMNS = {
-	id: bookmarks.id,
-	url: bookmarks.url,
-	urlNormalized: bookmarks.urlNormalized,
-	title: bookmarks.title,
-	faviconUrl: bookmarks.faviconUrl,
-	tags: bookmarks.tags,
-	note: bookmarks.note,
-	createdAt: bookmarks.createdAt,
-	updatedAt: bookmarks.updatedAt,
-	archivedAt: bookmarks.archivedAt,
-	pinnedAt: bookmarks.pinnedAt,
-};
+/**
+ * The bookmark columns every route serializes (exported for
+ * `bookmarkMetadata.ts`).
+ *
+ * A FUNCTION, not a constant (m23, SPEC §15.1): `screenshotUrl` is the public
+ * Storage base concatenated onto `screenshot_path` in SQL, and the base is
+ * read from the environment at request time. Concatenation with a NULL path
+ * yields NULL, so a row with no screenshot serializes `screenshotUrl: null`
+ * with no per-route mapping — and when Storage is unconfigured the whole
+ * expression collapses to NULL. `screenshot_path` itself is deliberately
+ * absent: clients never build Storage URLs.
+ */
+export function BOOKMARK_COLUMNS() {
+	const base = screenshotPublicBase();
+	const screenshotUrl: SQL<string | null> =
+		base === null
+			? sql`null::text`
+			: sql`${base}::text || ${bookmarks.screenshotPath}`;
+
+	return {
+		id: bookmarks.id,
+		url: bookmarks.url,
+		urlNormalized: bookmarks.urlNormalized,
+		title: bookmarks.title,
+		faviconUrl: bookmarks.faviconUrl,
+		tags: bookmarks.tags,
+		note: bookmarks.note,
+		createdAt: bookmarks.createdAt,
+		updatedAt: bookmarks.updatedAt,
+		archivedAt: bookmarks.archivedAt,
+		pinnedAt: bookmarks.pinnedAt,
+		screenshotUrl,
+	};
+}
 
 export const PAGE_SIZE = 50;
 
@@ -372,7 +399,7 @@ export async function listBookmarks(
 		),
 		tagFacets(db, and(viewCond, matchCond)),
 		db
-			.select(BOOKMARK_COLUMNS)
+			.select(BOOKMARK_COLUMNS())
 			.from(bookmarks)
 			.where(and(eq(bookmarks.userId, userId), isNotNull(bookmarks.pinnedAt)))
 			.orderBy(asc(bookmarks.pinPosition), desc(bookmarks.id)),
@@ -404,7 +431,7 @@ export async function listBookmarks(
 		}
 
 		const rows = await db
-			.select(BOOKMARK_COLUMNS)
+			.select(BOOKMARK_COLUMNS())
 			.from(bookmarks)
 			.where(and(...conditions))
 			.orderBy(desc(bookmarks.updatedAt), desc(bookmarks.id))
@@ -424,7 +451,7 @@ export async function listBookmarks(
 	}
 
 	const rows = await db
-		.select(BOOKMARK_COLUMNS)
+		.select(BOOKMARK_COLUMNS())
 		.from(bookmarks)
 		.where(and(viewCond, matchCond, tagsCond))
 		.orderBy(
@@ -476,7 +503,10 @@ export async function addBookmark(
 		// xmax = 0 distinguishes a fresh insert from a conflict-update (same
 		// trick as applySync): an updated row carries the old version's
 		// locking txid in xmax, a brand-new row has xmax = 0.
-		.returning({ ...BOOKMARK_COLUMNS, wasInserted: sql<boolean>`(xmax = 0)` });
+		.returning({
+			...BOOKMARK_COLUMNS(),
+			wasInserted: sql<boolean>`(xmax = 0)`,
+		});
 
 	const { wasInserted, ...bookmark } = rows[0];
 	return { bookmark, created: wasInserted };
@@ -593,7 +623,7 @@ async function patchWhere(
 		// Nothing to change (callers should reject this earlier via Zod) —
 		// just report the current row, ownership-checked, or null.
 		const rows = await db
-			.select(BOOKMARK_COLUMNS)
+			.select(BOOKMARK_COLUMNS())
 			.from(bookmarks)
 			.where(cond)
 			.limit(1);
@@ -604,7 +634,7 @@ async function patchWhere(
 		.update(bookmarks)
 		.set(set)
 		.where(cond)
-		.returning(BOOKMARK_COLUMNS);
+		.returning(BOOKMARK_COLUMNS());
 
 	return rows[0] ?? null;
 }
@@ -713,7 +743,7 @@ export async function patchBookmark(
 				.update(bookmarks)
 				.set(set)
 				.where(cond)
-				.returning(BOOKMARK_COLUMNS);
+				.returning(BOOKMARK_COLUMNS());
 			return rows[0] ?? null;
 		});
 	} catch (err) {
@@ -723,7 +753,7 @@ export async function patchBookmark(
 		// The transaction rolled back, so this lookup runs on the outer
 		// connection: fetch the row that already owns the key for the 409 body.
 		const [conflict] = await db
-			.select(BOOKMARK_COLUMNS)
+			.select(BOOKMARK_COLUMNS())
 			.from(bookmarks)
 			.where(
 				and(
@@ -813,7 +843,7 @@ export async function reorderPinned(
 		}
 
 		const rows = await tx
-			.select(BOOKMARK_COLUMNS)
+			.select(BOOKMARK_COLUMNS())
 			.from(bookmarks)
 			.where(shelfCond)
 			.orderBy(asc(bookmarks.pinPosition), desc(bookmarks.id));
@@ -835,7 +865,7 @@ export async function getBookmarkByUrl(
 	rawUrl: string,
 ): Promise<BookmarkRow | null> {
 	const rows = await db
-		.select(BOOKMARK_COLUMNS)
+		.select(BOOKMARK_COLUMNS())
 		.from(bookmarks)
 		.where(
 			and(
@@ -867,4 +897,76 @@ export async function patchBookmarkByUrl(
 		),
 		input,
 	);
+}
+
+/**
+ * `getBookmarkByUrl` for the screenshot upload path (m23, SPEC §15.2), plus
+ * the one fact the route needs that the serialized row deliberately hides:
+ * whether `screenshot_path` is already set.
+ *
+ * One query rather than two, and `screenshot_path` never leaves this function
+ * — the route sees only `hasScreenshot`, which is what decides keep-first
+ * BEFORE any Storage call.
+ */
+export async function getBookmarkForScreenshot(
+	db: BookmarksDb,
+	userId: string,
+	rawUrl: string,
+): Promise<{ bookmark: BookmarkRow; hasScreenshot: boolean } | null> {
+	const rows = await db
+		.select({ ...BOOKMARK_COLUMNS(), screenshotPath: bookmarks.screenshotPath })
+		.from(bookmarks)
+		.where(
+			and(
+				eq(bookmarks.userId, userId),
+				eq(bookmarks.urlNormalized, normalizeUrl(rawUrl)),
+			),
+		)
+		.limit(1);
+
+	const row = rows[0];
+	if (!row) {
+		return null;
+	}
+
+	const { screenshotPath, ...bookmark } = row;
+	return { bookmark, hasScreenshot: screenshotPath !== null };
+}
+
+/**
+ * Claims a bookmark's screenshot slot (m23, SPEC §15.2): writes `path` into
+ * `screenshot_path` only if the row still has none. Returns whether a row was
+ * updated — false means either the row isn't the caller's (user-scoped, so
+ * another user's row is simply a miss), it's gone, or a concurrent upload
+ * already won, in which case the caller deletes the object it just uploaded.
+ *
+ * KEEP-FIRST is in the WHERE clause, not a read-then-write: two uploads racing
+ * for the same fresh row cannot both succeed, and the winner's path is never
+ * overwritten. There is no recapture path in m23.
+ *
+ * CRITICAL (Hard rule #1): `screenshot_path` is the ONLY column assigned.
+ * `updated_at`, `pinned_at`, `pin_position`, `archived_at`, `favicon_url` and
+ * `title` are byte-identical before and after — a screenshot upload is
+ * enrichment, not a live capture, on the save-time path and the backfill path
+ * alike.
+ */
+export async function setScreenshotIfMissing(
+	db: BookmarksDb,
+	userId: string,
+	bookmarkId: number,
+	path: string,
+): Promise<boolean> {
+	const rows = await db
+		.update(bookmarks)
+		.set({ screenshotPath: path })
+		.where(
+			and(
+				eq(bookmarks.id, bookmarkId),
+				eq(bookmarks.userId, userId),
+				isNull(bookmarks.screenshotPath),
+			),
+		)
+		.returning({ id: bookmarks.id });
+
+	return rows.length > 0;
 }

@@ -740,6 +740,8 @@ export function Feed() {
 			updatedAt: nowIso,
 			archivedAt: null,
 			pinnedAt: null,
+			// A web add never has a screenshot: only the extension captures.
+			screenshotUrl: null,
 			highlights: [],
 		};
 		closeComposer();

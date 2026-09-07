@@ -12,7 +12,8 @@
 //
 // /api/sync, /api/hello, /api/bookmarks/by-url and /api/tags are token-authed
 // by the extension and are excluded in the matcher below — they must NEVER hit
-// session/redirect logic. (/api/highlights is Bearer-authed too but shares
+// session/redirect logic. The by-url entry is a PREFIX, so the whole subtree is
+// excluded with it (m23's /api/bookmarks/by-url/screenshot included). (/api/highlights is Bearer-authed too but shares
 // its path prefix with the session-authed DELETE /api/highlights/:id, so it
 // stays matched — harmless, since matched /api/* is never redirected.)
 // Other /api/* routes are matched (so their sessions refresh) but are never

@@ -87,7 +87,7 @@ export async function enrichBookmarkMetadata(
 
 	try {
 		const existing = await db
-			.select(BOOKMARK_COLUMNS)
+			.select(BOOKMARK_COLUMNS())
 			.from(bookmarks)
 			.where(ownership)
 			.limit(1);
@@ -141,7 +141,7 @@ export async function enrichBookmarkMetadata(
 			.update(bookmarks)
 			.set(set)
 			.where(ownership)
-			.returning(BOOKMARK_COLUMNS);
+			.returning(BOOKMARK_COLUMNS());
 
 		return updated[0] ?? row;
 	} catch {
