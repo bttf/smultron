@@ -7,37 +7,66 @@
  * renderers fall back to a hostname-keyed icon service, which answers with the
  * DOMAIN's icon (calendar.google.com → the Google "G").
  *
+ * The tab is found by listing ALL tabs and comparing `tab.url` as a STRING —
+ * deliberately not `chrome.tabs.query({ url })`, whose argument is a MATCH
+ * PATTERN, not a URL:
+ *   - a pattern containing `#` matches nothing (Chromium matches the path
+ *     against `GURL::PathForRequest()`, which has no fragment), and returns
+ *     `[]` rather than throwing — so every SPA route bookmark
+ *     (`mail.google.com/mail/u/0/#inbox`, `docs.google.com/…/edit#gid=0`)
+ *     would silently get no favicon;
+ *   - a `*` in the URL would act as a wildcard and could pull an unrelated
+ *     tab's icon;
+ *   - userinfo (`https://u@host/`) is not a valid pattern at all.
+ * String equality has none of those semantics.
+ *
  * Pure and dependency-injected like every other `src/` helper — no Chrome
  * imports — and total: any failure is simply "no favicon", never a thrown
  * enqueue. Backfill never calls this (SPEC §5: backfill carries no favicon).
  */
 
-/** The one field of `chrome.tabs.Tab` this reads. */
+/** The fields of `chrome.tabs.Tab` this reads. */
 export interface TabFavicon {
+	url?: string;
 	favIconUrl?: string;
+	active?: boolean;
 }
 
-/** `chrome.tabs.query({ url })`, narrowed to what the lookup needs. */
-export type QueryTabsByUrl = (url: string) => Promise<TabFavicon[]>;
+/** `chrome.tabs.query({})` — every tab in every window. */
+export type QueryAllTabs = () => Promise<TabFavicon[]>;
 
 /**
- * The `favIconUrl` of the first tab open on `url`, or undefined when there is
- * no such tab, no icon, or the query failed. The URL goes out RAW (hard rule
- * #3) — no validation happens here beyond "non-empty string"; the server
- * decides what is storable.
+ * The favicon of an open tab showing exactly `url`, or undefined when there is
+ * no such tab, none of them has an icon, or the query failed. Active tabs are
+ * preferred when several tabs share the URL — the one the user is looking at
+ * is the one they just bookmarked.
+ *
+ * The value goes out RAW: no validation beyond "non-empty string" happens
+ * here (hard rule #3's spirit — the server decides what is storable).
  */
 export async function lookupTabFavicon(
-	queryTabsByUrl: QueryTabsByUrl,
+	queryAllTabs: QueryAllTabs,
 	url: string,
 ): Promise<string | undefined> {
 	try {
-		const tabs = await queryTabsByUrl(url);
-		const favicon = tabs[0]?.favIconUrl;
-		// Chrome reports an empty string for a page that declares no icon.
-		return typeof favicon === "string" && favicon !== "" ? favicon : undefined;
+		const tabs = await queryAllTabs();
+		const matches = tabs.filter((tab) => tab.url === url);
+		// Stable partition, active first; `filter` preserves tab order within
+		// each group so ties fall back to "first tab Chrome listed".
+		const ordered = [
+			...matches.filter((tab) => tab.active === true),
+			...matches.filter((tab) => tab.active !== true),
+		];
+		for (const tab of ordered) {
+			const favicon = tab.favIconUrl;
+			// Chrome reports an empty string for a page that declares no icon;
+			// another tab on the same URL may still have one.
+			if (typeof favicon === "string" && favicon !== "") return favicon;
+		}
+		return undefined;
 	} catch {
-		// `tabs.query` rejects on a URL Chrome won't take as a match pattern
-		// (fragments, `chrome://`, `javascript:`) and on a missing permission.
+		// `tabs.query` rejects when the permission is missing or the extension
+		// context is tearing down. No favicon, never a failure.
 		return undefined;
 	}
 }
