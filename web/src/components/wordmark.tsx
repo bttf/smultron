@@ -27,6 +27,11 @@ import {
 // between the glyph and the name.
 const FACE = "absolute inset-0 whitespace-nowrap";
 
+// Everything except the front face: `aria-hidden` keeps it out of the
+// accessibility tree, but a drag-select would still copy it out along with
+// the name, so it takes no pointer input and no selection either.
+const HIDDEN_TEXT = "select-none pointer-events-none";
+
 function FrontFace() {
 	return (
 		<>
@@ -45,6 +50,7 @@ function useReducedMotion(): boolean {
 
 	useEffect(() => {
 		setReduced(prefersReducedMotion());
+		if (typeof window.matchMedia !== "function") return;
 		const query = window.matchMedia(REDUCED_MOTION_QUERY);
 		const onChange = () => setReduced(query.matches);
 		query.addEventListener("change", onChange);
@@ -82,13 +88,13 @@ export function Wordmark() {
 			<span className="relative inline-grid align-bottom [perspective:600px]">
 				<span
 					aria-hidden
-					className="invisible col-start-1 row-start-1 whitespace-nowrap"
+					className={`invisible col-start-1 row-start-1 whitespace-nowrap ${HIDDEN_TEXT}`}
 				>
 					<FrontFace />
 				</span>
 				<span
 					aria-hidden
-					className="invisible col-start-1 row-start-1 whitespace-nowrap"
+					className={`invisible col-start-1 row-start-1 whitespace-nowrap ${HIDDEN_TEXT}`}
 				>
 					{WORDMARK_BACK}
 				</span>
@@ -103,7 +109,7 @@ export function Wordmark() {
 					</span>
 					<span
 						aria-hidden
-						className={`${FACE} [backface-visibility:hidden] [transform:rotateX(180deg)]`}
+						className={`${FACE} ${HIDDEN_TEXT} [backface-visibility:hidden] [transform:rotateX(180deg)]`}
 					>
 						{WORDMARK_BACK}
 					</span>

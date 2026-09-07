@@ -18,6 +18,11 @@ function stubMatchMedia(matches: boolean): { queries: string[] } {
 	return { queries };
 }
 
+/** Stands in for `document.visibilityState`. */
+function stubVisibility(state: "visible" | "hidden"): void {
+	vi.stubGlobal("document", { visibilityState: state });
+}
+
 afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.useRealTimers();
@@ -59,6 +64,7 @@ describe("flip geometry", () => {
 describe("startFlipping", () => {
 	it("flips once per interval", () => {
 		vi.useFakeTimers();
+		stubVisibility("visible");
 		const onFlip = vi.fn();
 		startFlipping(onFlip);
 
@@ -74,6 +80,7 @@ describe("startFlipping", () => {
 
 	it("toggles the face back and forth over successive intervals", () => {
 		vi.useFakeTimers();
+		stubVisibility("visible");
 		let flips = 0;
 		startFlipping(() => {
 			flips += 1;
@@ -87,8 +94,25 @@ describe("startFlipping", () => {
 		expect(faces).toEqual(["front", "back", "front", "back"]);
 	});
 
+	it("banks no flips while the tab is hidden", () => {
+		vi.useFakeTimers();
+		stubVisibility("hidden");
+		const onFlip = vi.fn();
+		startFlipping(onFlip);
+
+		// Chrome keeps the (throttled) timer running on a hidden tab but
+		// freezes rAF, so counting these would spend as one multi-spin later.
+		vi.advanceTimersByTime(FLIP_INTERVAL_MS * 5);
+		expect(onFlip).toHaveBeenCalledTimes(0);
+
+		stubVisibility("visible");
+		vi.advanceTimersByTime(FLIP_INTERVAL_MS * 2);
+		expect(onFlip).toHaveBeenCalledTimes(2);
+	});
+
 	it("stops when the returned stopper runs (unmount)", () => {
 		vi.useFakeTimers();
+		stubVisibility("visible");
 		const onFlip = vi.fn();
 		const stop = startFlipping(onFlip);
 

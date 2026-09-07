@@ -53,14 +53,29 @@ export function faceShowing(flips: number): "front" | "back" {
 	return flips % 2 === 0 ? "front" : "back";
 }
 
+/** False on the server and whenever the tab is hidden or prerendering. */
+export function isPageVisible(): boolean {
+	return (
+		typeof document !== "undefined" && document.visibilityState === "visible"
+	);
+}
+
 /**
  * Drives the flip on a fixed interval. Returns the stopper; the caller (an
  * effect) must run it on unmount, otherwise the timer outlives the component.
+ *
+ * Ticks on a hidden tab are dropped: Chrome keeps throttled timers running
+ * there but freezes rAF, so the spring cannot follow. Counting those flips
+ * would bank up a target of several turns and spend it in one multi-spin the
+ * moment the tab came back.
  */
 export function startFlipping(
 	onFlip: () => void,
 	intervalMs: number = FLIP_INTERVAL_MS,
 ): () => void {
-	const id = setInterval(onFlip, intervalMs);
+	const id = setInterval(() => {
+		if (!isPageVisible()) return;
+		onFlip();
+	}, intervalMs);
 	return () => clearInterval(id);
 }
