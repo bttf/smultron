@@ -1506,16 +1506,16 @@ function PinnedCard({
 	// it too. Tracked in React rather than by CSS because the scale is a
 	// spring; `onFocus`/`onBlur` bubble in React, and the containment check is
 	// what makes a move BETWEEN the card's own buttons not read as a blur.
+	// Tracked on EVERY card, screenshot or not: a card can gain a screenshot on
+	// a poll (the RED-209 backfill) or lose one to an error while the pointer
+	// is already on it, and a flag that only updated for screenshot cards would
+	// be stale at exactly those moments. The motion is gated on `shot` below
+	// instead, where it is applied.
 	const [hovered, setHovered] = useState(false);
-	const setHover = (next: boolean) => {
-		if (shot) {
-			setHovered(next);
-		}
-	};
 	// A lifted card holds still: dnd-kit is moving it, and a hover transform on
 	// top of that is noise. Reduced motion suppresses the motion but keeps the
 	// overlay and the white text — those are not motion.
-	const animating = hovered && !isDragging && !reduceMotion;
+	const animating = shot !== null && hovered && !isDragging && !reduceMotion;
 	const shotSpring = useSpring({
 		scale: animating ? 1.04 : 1,
 		immediate: reduceMotion || isDragging,
@@ -1563,14 +1563,14 @@ function PinnedCard({
 			onPointerDown={() => {
 				draggedRef.current = false;
 			}}
-			onPointerEnter={() => setHover(true)}
-			onPointerLeave={() => setHover(false)}
-			onFocus={() => setHover(true)}
+			onPointerEnter={() => setHovered(true)}
+			onPointerLeave={() => setHovered(false)}
+			onFocus={() => setHovered(true)}
 			// Focus moving to something still inside the card (✎ → ⋮⋮ → ✕) is
 			// not a blur as far as the screenshot is concerned.
 			onBlur={(e) => {
 				if (!e.currentTarget.contains(e.relatedTarget)) {
-					setHover(false);
+					setHovered(false);
 				}
 			}}
 			// …but NOT the keyboard: the card's own Enter/Space stay "open the
