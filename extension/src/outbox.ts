@@ -1,8 +1,12 @@
 /**
- * Storage-backed FIFO outbox for `/api/sync` and `/api/highlights` POSTs
- * (SPEC §6). Entries route by `kind`: highlight entries go to
- * `/api/highlights`; everything else — including legacy persisted entries
- * that predate the `kind` field — is a sync entry and goes to `/api/sync`.
+ * Storage-backed FIFO outbox for every POST the extension makes on its own
+ * behalf (SPEC §6). Entries route by `kind`:
+ *   - `sync`       → `/api/sync`                      (§5)
+ *   - `highlight`  → `/api/highlights`                (§6)
+ *   - `browse`     → `/api/browse-events`             (m19, §13)
+ *   - `screenshot` → `/api/bookmarks/by-url/screenshot?url=…` (m23, §15.3)
+ * Everything else — including legacy persisted entries that predate the
+ * `kind` field — is a sync entry.
  *
  * All dependencies (key/value storage, fetch) are injected so the module is
  * pure logic — unit tests run against an in-memory store and a mocked fetch,

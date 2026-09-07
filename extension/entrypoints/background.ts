@@ -22,6 +22,7 @@ import {
 } from "@/src/outbox";
 import {
 	base64ByteLength,
+	base64ToBytes,
 	captureForUrl,
 	dataUrlToBase64,
 	type EncodedJpeg,
@@ -158,12 +159,19 @@ async function enqueueLiveBookmark(node: TreeNode): Promise<void> {
  * A capture already within SCREENSHOT_MAX_WIDTH keeps Chrome's own JPEG bytes
  * (re-encoding would only lose quality) — but not on the reduced-quality
  * retry, whose entire purpose is to produce smaller bytes.
+ *
+ * The data URL is decoded with the pure helpers rather than `fetch(dataUrl)`:
+ * a `data:` fetch inside an MV3 service worker is untested ground here, and a
+ * rejection would be swallowed as "no screenshot" on every single capture.
  */
 async function downscaleJpeg(
 	dataUrl: string,
 	quality: number,
 ): Promise<EncodedJpeg> {
-	const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+	const source = new Blob([base64ToBytes(dataUrlToBase64(dataUrl))], {
+		type: "image/jpeg",
+	});
+	const bitmap = await createImageBitmap(source);
 	try {
 		const target = fitWidth(bitmap.width, bitmap.height, SCREENSHOT_MAX_WIDTH);
 		if (target.width === bitmap.width && quality >= SCREENSHOT_JPEG_QUALITY) {
