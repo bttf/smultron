@@ -231,7 +231,9 @@
         color: #fff;
       }
       .card.shot > .card-host {
-        color: rgb(255 255 255 / 78%);
+        /* 90%, not less: the worst case is a white page screenshot under the
+           0.55 overlay, where 78% fell to ~3.6:1. */
+        color: rgb(255 255 255 / 90%);
       }
       /* `:focus-within` too, so a keyboard user sees the same thing. */
       .card.shot:hover .card-shot,
