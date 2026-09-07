@@ -7,6 +7,9 @@ import {
 	fetchBookmarksPage,
 	NEWTAB_SNAPSHOT_RECENT_CAP,
 	type NewTabBookmark,
+	nextPan,
+	PAN_FULL_MS,
+	panPercent,
 	parseBookmarksResponse,
 	readSnapshot,
 	writeSnapshot,
@@ -399,5 +402,80 @@ describe("display helpers", () => {
 			"s2/favicons",
 		);
 		expect(faviconUrlFor(bookmark({ url: "not a url" }))).toBeUndefined();
+	});
+});
+
+// RED-206 (SPEC §15.5): the hover pan pauses where the pointer left it and
+// resumes on the next hover, reversing once it reaches an end.
+describe("nextPan", () => {
+	it("sweeps the full image from rest, taking the full duration", () => {
+		expect(nextPan({ current: 0, direction: "bottom" })).toEqual({
+			target: 100,
+			durationMs: PAN_FULL_MS,
+			direction: "bottom",
+		});
+	});
+
+	it("resumes from a paused position at the same speed", () => {
+		// 40% of the way to travel, so 40% of the time — the pan never restarts
+		// and never speeds up to make the deadline.
+		expect(nextPan({ current: 40, direction: "top" })).toEqual({
+			target: 0,
+			durationMs: 3200,
+			direction: "top",
+		});
+		expect(nextPan({ current: 40, direction: "bottom" })).toEqual({
+			target: 100,
+			durationMs: 4800,
+			direction: "bottom",
+		});
+	});
+
+	it("flips direction at either end, so a card is never stuck there", () => {
+		expect(nextPan({ current: 100, direction: "bottom" })).toEqual({
+			target: 0,
+			durationMs: PAN_FULL_MS,
+			direction: "top",
+		});
+		expect(nextPan({ current: 0, direction: "top" })).toEqual({
+			target: 100,
+			durationMs: PAN_FULL_MS,
+			direction: "bottom",
+		});
+	});
+
+	it("clamps a position outside the image before measuring", () => {
+		expect(nextPan({ current: 140, direction: "bottom" })?.direction).toBe(
+			"top",
+		);
+		expect(nextPan({ current: -20, direction: "top" })?.direction).toBe(
+			"bottom",
+		);
+	});
+
+	it("is a no-op under reduced motion, whatever the position", () => {
+		expect(
+			nextPan({ current: 0, direction: "bottom", reduced: true }),
+		).toBeNull();
+		expect(
+			nextPan({ current: 55, direction: "top", reduced: true }),
+		).toBeNull();
+	});
+});
+
+describe("panPercent", () => {
+	it("reads the vertical half of a computed object-position", () => {
+		expect(panPercent("50% 0%")).toBe(0);
+		expect(panPercent("50% 37.4%")).toBe(37.4);
+		expect(panPercent("50%  100%")).toBe(100);
+	});
+
+	it("clamps and degrades anything it cannot measure to the rest position", () => {
+		expect(panPercent("50% 140%")).toBe(100);
+		expect(panPercent("50% -10%")).toBe(0);
+		expect(panPercent("50px 12px")).toBe(0);
+		expect(panPercent("center bottom")).toBe(0);
+		expect(panPercent("")).toBe(0);
+		expect(panPercent("50%")).toBe(0);
 	});
 });

@@ -21,6 +21,9 @@ import {
 	type NewTabBookmark,
 	type NewTabConfig,
 	type NewTabPage,
+	nextPan,
+	type PanDirection,
+	panPercent,
 	readSnapshot,
 	writeSnapshot,
 } from "@/src/newtab";
@@ -123,7 +126,61 @@ function screenshotLayers(card: HTMLAnchorElement, src: string): HTMLElement[] {
 		shade.remove();
 		card.classList.remove("shot");
 	});
+	wirePan(card, shot);
 	return [shot, shade];
+}
+
+/** True while the user has asked the OS for less motion; re-read every time. */
+function reducedMotion(): boolean {
+	return (
+		window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+	);
+}
+
+/**
+ * RED-206 (SPEC §15.5): the hover pan across the screenshot.
+ *
+ * A plain CSS transition could only run to its endpoint or reverse, and
+ * reversing was the thing that looked wrong — the page slid back up the moment
+ * the pointer left. So the pan is driven from here: hovering starts a linear
+ * transition towards one end, and leaving reads the interpolated position back
+ * out of the computed style, pins it inline and kills the transition. The pan
+ * FREEZES; the next hover picks it up from there and, once an end is reached,
+ * heads back the other way (`nextPan`).
+ *
+ * Under reduced motion nothing is ever written inline — an inline value would
+ * outrank the `prefers-reduced-motion` block in the stylesheet.
+ */
+function wirePan(card: HTMLAnchorElement, shot: HTMLImageElement): void {
+	let direction: PanDirection = "bottom";
+	const start = () => {
+		const step = nextPan({
+			current: panPercent(getComputedStyle(shot).objectPosition),
+			direction,
+			reduced: reducedMotion(),
+		});
+		if (step === null) return;
+		direction = step.direction;
+		// Both properties change in the same style recalc, and a transition
+		// takes its timing from the after-change style — so this animates.
+		shot.style.transition = `object-position ${step.durationMs}ms linear`;
+		shot.style.objectPosition = `50% ${step.target}%`;
+	};
+	const freeze = () => {
+		if (reducedMotion()) return;
+		const current = panPercent(getComputedStyle(shot).objectPosition);
+		shot.style.transition = "none";
+		shot.style.objectPosition = `50% ${current}%`;
+	};
+	card.addEventListener("pointerenter", start);
+	card.addEventListener("pointerleave", freeze);
+	// `:focus-within`'s equivalent, so a keyboard user sees the same motion.
+	card.addEventListener("focusin", start);
+	card.addEventListener("focusout", freeze);
+	// A lifted card holds still. `pointerleave` does not fire during a native
+	// HTML5 drag, so the freeze has to be asked for explicitly; the pan resumes
+	// on the next hover like any other pause.
+	card.addEventListener("dragstart", freeze);
 }
 
 function renderCard(bookmark: NewTabBookmark): HTMLAnchorElement {
