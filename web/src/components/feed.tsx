@@ -1464,6 +1464,17 @@ function PinnedShelf({
 	);
 }
 
+// RED-206 hover motion (SPEC §15.5). The scale is small — the card should
+// lift towards the reader, not jump — and the spring is under-damped so it
+// settles with one soft overshoot instead of easing flatly into place.
+const CARD_HOVER_SCALE = 1.03;
+const CARD_HOVER_SPRING = { mass: 1, tension: 280, friction: 18 };
+/** `object-position: 50% <y>%`; 0 = top of the page, 100 = bottom. */
+const PAN_END = 100;
+/** How long a full top-to-bottom sweep takes. */
+const PAN_FULL_MS = 8000;
+const linear = (t: number) => t;
+
 function PinnedCard({
 	bookmark,
 	onUnpin,
@@ -1509,17 +1520,59 @@ function PinnedCard({
 	// Tracked on EVERY card, screenshot or not: a card can gain a screenshot on
 	// a poll (the RED-209 backfill) or lose one to an error while the pointer
 	// is already on it, and a flag that only updated for screenshot cards would
-	// be stale at exactly those moments. The motion is gated on `shot` below
-	// instead, where it is applied.
+	// be stale at exactly those moments. The pan is gated on `shot` below
+	// instead, where it is applied; the growth is not — every card grows.
 	const [hovered, setHovered] = useState(false);
-	// A lifted card holds still: dnd-kit is moving it, and a hover transform on
-	// top of that is noise. Reduced motion suppresses the motion but keeps the
-	// overlay and the white text — those are not motion.
-	const animating = shot !== null && hovered && !isDragging && !reduceMotion;
-	const shotSpring = useSpring({
-		scale: animating ? 1.04 : 1,
+	// RED-206: the whole card grows, not just the screenshot — the growth is the
+	// card's, so a plain card does it too. A lifted card holds still: dnd-kit is
+	// moving it, and a hover transform on top of that is noise. Reduced motion
+	// suppresses the motion but keeps the overlay and the white text — those are
+	// not motion.
+	const growing = hovered && !isDragging && !reduceMotion;
+	const cardSpring = useSpring({
+		scale: growing ? CARD_HOVER_SCALE : 1,
+		config: CARD_HOVER_SPRING,
 		immediate: reduceMotion || isDragging,
 	});
+
+	// RED-206: the pan is a spring value rather than a CSS transition so that
+	// hover-out can FREEZE it where it stands. A CSS transition can only run to
+	// its endpoint or reverse, and reversing was the thing that looked wrong:
+	// the page slid back up the moment the pointer left.
+	const [pan, panApi] = useSpring(() => ({ y: 0 }));
+	// Which end the next hover heads for. Flipped when the pan is already
+	// sitting at an end, so a card that reached the bottom pans back up instead
+	// of being stuck there (ping-pong).
+	const panDown = useRef(true);
+	const panning = shot !== null && hovered && !isDragging && !reduceMotion;
+	useEffect(() => {
+		if (reduceMotion) {
+			// No pan at all: back to the rest position with no animation.
+			panApi.start({ y: 0, immediate: true });
+			return;
+		}
+		if (!panning) {
+			// `stop()` leaves the value exactly where it is — the pan holds its
+			// position until the next hover picks it up. (`pause()` would too,
+			// but it also refuses a later `start()` until `resume()`, and the
+			// ping-pong needs a fresh target and duration anyway.)
+			panApi.stop();
+			return;
+		}
+		const current = pan.y.get();
+		if (panDown.current ? current >= PAN_END : current <= 0) {
+			panDown.current = !panDown.current;
+		}
+		const target = panDown.current ? PAN_END : 0;
+		const distance = Math.abs(target - current);
+		if (distance === 0) return;
+		panApi.start({
+			y: target,
+			// Constant speed, so a resumed pan continues at the rate it left
+			// off at: the full sweep is PAN_FULL_MS, a partial one is pro rata.
+			config: { duration: (PAN_FULL_MS * distance) / PAN_END, easing: linear },
+		});
+	}, [panning, reduceMotion, panApi, pan.y]);
 
 	// m21: a COMPLETED drag must never open the bookmark — the pointerup that
 	// ends a lift still fires a trailing click on the card. The flag is armed
@@ -1597,26 +1650,31 @@ function PinnedCard({
 				openBookmark();
 			}}
 			className={cn(
-				"flex cursor-pointer flex-col gap-1.5 rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-2 hover:border-[var(--log-strong-border)]",
+				// RED-206: the root is a bare positioning shell. Everything
+				// visual — border, background, padding, layers — moved to the
+				// wrapper below so the hover scale can live there, leaving the
+				// root free for dnd-kit's own transform/transition (m21). Two
+				// transforms on one element would fight.
+				"relative cursor-pointer",
 				// Grid items honour z-index without positioning; the lifted
-				// card rides over the ones sliding past it.
-				isDragging && "z-10 opacity-50",
-				// m23: the screenshot and its overlay are absolute layers, and
-				// the scaled image must be clipped to the m21 radius.
-				shot && "relative overflow-hidden",
+				// card rides over the ones sliding past it, and a GROWN card
+				// rides over its neighbours instead of being clipped by them.
+				isDragging ? "z-10 opacity-50" : hovered && "z-[2]",
 			)}
 		>
-			{shot ? (
-				<Fragment>
-					{/* The scale lives on this wrapper and NEVER on the card
-					    root, which carries dnd-kit's own transform/transition
-					    (m21) — two transforms on one element would fight. */}
-					<animated.div
-						className="pointer-events-none absolute inset-0"
-						style={{ scale: shotSpring.scale }}
-					>
+			<animated.div
+				style={{ scale: cardSpring.scale }}
+				className={cn(
+					"flex h-full flex-col gap-1.5 rounded-md border border-[var(--log-card-border)] bg-card px-2.5 py-2 hover:border-[var(--log-strong-border)]",
+					// m23: the screenshot and its overlay are absolute layers,
+					// and the image must be clipped to the m21 radius.
+					shot && "relative overflow-hidden",
+				)}
+			>
+				{shot ? (
+					<Fragment>
 						{/* biome-ignore lint/performance/noImgElement: a Storage-hosted screenshot behind a card doesn't warrant next/image's optimizer. */}
-						<img
+						<animated.img
 							// Keyed like Favicon: a new screenshot URL remounts
 							// rather than reusing an errored <img>, which would
 							// not re-fire onError.
@@ -1630,119 +1688,119 @@ function PinnedCard({
 							// starting a native image drag.
 							draggable={false}
 							onError={() => setBrokenShot(shot)}
-							className="h-full w-full object-cover"
+							// Sized by its own insets, so the box is definite
+							// whatever the image's intrinsic aspect ratio is and
+							// `cover` always fills the card in both directions.
+							className="pointer-events-none absolute inset-0 h-full w-full object-cover"
 							style={{
-								// The top of the page is the recognizable part,
-								// so that is the rest position; hover pans to
-								// the bottom over 8s. The transition is on the
-								// base style, not only the hovered one, so
-								// hover-OUT animates back.
-								objectPosition: animating ? "50% 100%" : "50% 0%",
-								transition:
-									reduceMotion || isDragging
-										? "none"
-										: "object-position 8s linear",
+								// The top of the page is the recognizable part, so
+								// that is the rest position; hover pans towards the
+								// bottom and back (RED-206), pausing wherever the
+								// pointer left it.
+								objectPosition: pan.y.to((y) => `50% ${y}%`),
 							}}
 						/>
-					</animated.div>
-					<div className="pointer-events-none absolute inset-0 bg-black/55" />
-				</Fragment>
-			) : null}
-			<div
-				className={cn(
-					"flex items-center gap-1.5",
-					// Above both layers. The affordances stay clickable because
-					// only the img/overlay are pointer-events:none.
-					shot && "relative z-[1]",
-				)}
-			>
-				{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
-				<span
+						<div className="pointer-events-none absolute inset-0 bg-black/45" />
+					</Fragment>
+				) : null}
+				<div
 					className={cn(
-						"min-w-0 flex-1 truncate font-mono text-[10px]",
-						// 90%, not less: the worst case is a white page under
-						// the 0.55 overlay, where 78% fell to ~3.6:1.
-						shot ? "text-white/90" : "text-muted-foreground",
+						"flex items-center gap-1.5",
+						// Above both layers. The affordances stay clickable because
+						// only the img/overlay are pointer-events:none.
+						shot && "relative z-[1]",
 					)}
 				>
-					{host ?? bookmark.url}
-				</span>
-				{/* m22: opens the shared editor panel under the grid. Like ✕ it
+					{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
+					<span
+						className={cn(
+							"min-w-0 flex-1 truncate font-mono text-[10px]",
+							// 90%, not less. RED-206 lightened the overlay to 0.45,
+							// so the worst case — a white page — now reads ~3.1:1
+							// rather than ~4.2:1; 90% is what keeps the host line
+							// from dropping further still.
+							shot ? "text-white/90" : "text-muted-foreground",
+						)}
+					>
+						{host ?? bookmark.url}
+					</span>
+					{/* m22: opens the shared editor panel under the grid. Like ✕ it
 				    is a button inside a sortable card, not a drag surface — the
 				    same mousedown/touchstart swallow keeps a press on it from
 				    lifting — and its keydown is ignored at the card below. */}
-				<button
-					type="button"
-					aria-label={`Edit ${label}`}
-					onMouseDown={(e) => e.stopPropagation()}
-					onTouchStart={(e) => e.stopPropagation()}
-					onClick={(e) => {
-						e.stopPropagation();
-						onEdit();
-					}}
-					className={cn(
-						"shrink-0 font-mono text-[10px]",
-						// `editing` keeps the accent on a screenshot card too:
-						// it is a state marker, and swapping it for white would
-						// erase the only signal that this card's editor is the
-						// open one.
-						editing
-							? "text-[var(--log-accent)]"
-							: shot
+					<button
+						type="button"
+						aria-label={`Edit ${label}`}
+						onMouseDown={(e) => e.stopPropagation()}
+						onTouchStart={(e) => e.stopPropagation()}
+						onClick={(e) => {
+							e.stopPropagation();
+							onEdit();
+						}}
+						className={cn(
+							"shrink-0 font-mono text-[10px]",
+							// `editing` keeps the accent on a screenshot card too:
+							// it is a state marker, and swapping it for white would
+							// erase the only signal that this card's editor is the
+							// open one.
+							editing
+								? "text-[var(--log-accent)]"
+								: shot
+									? "text-white/90 hover:text-white"
+									: "text-[var(--log-ghost)] hover:text-[var(--log-accent)]",
+						)}
+					>
+						✎
+					</button>
+					<button
+						type="button"
+						ref={setActivatorNodeRef}
+						aria-label={`Reorder ${label}`}
+						{...gripAttributes}
+						{...listeners}
+						// The grip drags; it never opens the bookmark.
+						onClick={(e) => e.stopPropagation()}
+						className={cn(
+							"shrink-0 cursor-grab touch-none font-mono text-[10px] active:cursor-grabbing",
+							shot
+								? "text-white/90 hover:text-white"
+								: "text-[var(--log-ghost)] hover:text-[var(--log-fg)]",
+						)}
+					>
+						⋮⋮
+					</button>
+					<button
+						type="button"
+						aria-label={`Unpin ${label}`}
+						// m21: a button inside a sortable card is not a drag
+						// surface. The Mouse/Touch sensors activate on the native
+						// mousedown/touchstart (NOT pointerdown), so those are the
+						// events to swallow — a press that starts on ✕ never lifts.
+						onMouseDown={(e) => e.stopPropagation()}
+						onTouchStart={(e) => e.stopPropagation()}
+						onClick={(e) => {
+							e.stopPropagation();
+							onUnpin();
+						}}
+						className={cn(
+							"shrink-0 font-mono text-[10px]",
+							shot
 								? "text-white/90 hover:text-white"
 								: "text-[var(--log-ghost)] hover:text-[var(--log-accent)]",
-					)}
-				>
-					✎
-				</button>
-				<button
-					type="button"
-					ref={setActivatorNodeRef}
-					aria-label={`Reorder ${label}`}
-					{...gripAttributes}
-					{...listeners}
-					// The grip drags; it never opens the bookmark.
-					onClick={(e) => e.stopPropagation()}
+						)}
+					>
+						✕
+					</button>
+				</div>
+				<span
 					className={cn(
-						"shrink-0 cursor-grab touch-none font-mono text-[10px] active:cursor-grabbing",
-						shot
-							? "text-white/90 hover:text-white"
-							: "text-[var(--log-ghost)] hover:text-[var(--log-fg)]",
+						"line-clamp-2 text-[12.5px] font-medium leading-[1.4]",
+						shot && "relative z-[1] text-white",
 					)}
 				>
-					⋮⋮
-				</button>
-				<button
-					type="button"
-					aria-label={`Unpin ${label}`}
-					// m21: a button inside a sortable card is not a drag
-					// surface. The Mouse/Touch sensors activate on the native
-					// mousedown/touchstart (NOT pointerdown), so those are the
-					// events to swallow — a press that starts on ✕ never lifts.
-					onMouseDown={(e) => e.stopPropagation()}
-					onTouchStart={(e) => e.stopPropagation()}
-					onClick={(e) => {
-						e.stopPropagation();
-						onUnpin();
-					}}
-					className={cn(
-						"shrink-0 font-mono text-[10px]",
-						shot
-							? "text-white/90 hover:text-white"
-							: "text-[var(--log-ghost)] hover:text-[var(--log-accent)]",
-					)}
-				>
-					✕
-				</button>
-			</div>
-			<span
-				className={cn(
-					"line-clamp-2 text-[12.5px] font-medium leading-[1.4]",
-					shot && "relative z-[1] text-white",
-				)}
-			>
-				{bookmark.title || "(untitled)"}
-			</span>
+					{bookmark.title || "(untitled)"}
+				</span>
+			</animated.div>
 		</div>
 	);
 }

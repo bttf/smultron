@@ -274,3 +274,76 @@ export function faviconUrlFor(bookmark: NewTabBookmark): string | undefined {
 	if (hostname === "") return undefined;
 	return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=32`;
 }
+
+// Screenshot pan (RED-206, SPEC §15.5).
+
+/**
+ * Which end of the screenshot the pan is heading for. `"bottom"` walks
+ * `object-position` towards `50% 100%`, `"top"` back towards `50% 0%`.
+ */
+export type PanDirection = "bottom" | "top";
+
+/** `object-position: 50% <y>%` — 0 is the top of the page, 100 the bottom. */
+export const PAN_END = 100;
+
+/** How long a full top-to-bottom sweep takes. */
+export const PAN_FULL_MS = 8000;
+
+/** One leg of the pan: where to go, over how long, and heading which way. */
+export interface PanStep {
+	target: number;
+	durationMs: number;
+	direction: PanDirection;
+}
+
+/**
+ * The next leg of a screenshot pan, computed when a card is hovered.
+ *
+ * The pan does not restart from the top each time: it picks up from wherever
+ * the last hover left it (`current`) and runs at a constant speed, so a
+ * half-finished sweep takes half as long. When it is already sitting at the
+ * end it was heading for, the direction flips and it walks back — a card is
+ * never stuck against one edge.
+ *
+ * Returns `null` when there is nothing to animate: under reduced motion (the
+ * caller must then leave the image alone entirely — an inline write would
+ * outrank the `prefers-reduced-motion` rule in the stylesheet) or when the pan
+ * already sits on its target.
+ */
+export function nextPan(state: {
+	current: number;
+	direction: PanDirection;
+	reduced?: boolean;
+}): PanStep | null {
+	if (state.reduced === true) return null;
+	const current = Math.min(PAN_END, Math.max(0, state.current));
+	const atEnd =
+		state.direction === "bottom" ? current >= PAN_END : current <= 0;
+	const direction: PanDirection = !atEnd
+		? state.direction
+		: state.direction === "bottom"
+			? "top"
+			: "bottom";
+	const target = direction === "bottom" ? PAN_END : 0;
+	const distance = Math.abs(target - current);
+	if (distance === 0) return null;
+	return { target, durationMs: (PAN_FULL_MS * distance) / PAN_END, direction };
+}
+
+/**
+ * The vertical half of a computed `object-position`, as a percentage.
+ *
+ * Chrome reports the interpolated value mid-transition, which is the whole
+ * point: it is how a pan learns where it was frozen. Anything that is not a
+ * two-part percentage pair — a `px` offset, a keyword, an empty string from a
+ * detached node — reads as the rest position rather than throwing, so a card
+ * that cannot be measured simply starts its next sweep from the top.
+ */
+export function panPercent(objectPosition: string): number {
+	const parts = objectPosition.trim().split(/\s+/);
+	const vertical = parts.length === 2 ? parts[1] : undefined;
+	if (vertical === undefined) return 0;
+	const match = /^(-?\d+(?:\.\d+)?)%$/.exec(vertical);
+	if (match === null) return 0;
+	return Math.min(PAN_END, Math.max(0, Number(match[1])));
+}

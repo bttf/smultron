@@ -144,9 +144,19 @@
         background: var(--card);
         color: inherit;
         text-decoration: none;
+        /* RED-206: the whole card grows on hover, screenshot or not — the
+           growth belongs to the card, not to the image. `relative` is what
+           lets the grown card sit over its neighbours rather than under
+           them. */
+        position: relative;
+        transform: scale(1);
+        transition: transform 250ms ease-out;
       }
-      .card:hover {
+      .card:hover,
+      .card:focus-within {
         border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+        transform: scale(1.03);
+        z-index: 2;
       }
       /* The shelf is drag-sortable (m21, SPEC §6) — native HTML5 DnD, so the
          reflow is instant DOM moves rather than an animated transform. */
@@ -158,6 +168,11 @@
       }
       .card.dragging {
         opacity: 0.4;
+        /* A lifted card holds still; the drag itself is the motion. Dropped
+           instantly rather than eased out, so the drag image Chrome snapshots
+           at `dragstart` is the card at its true size. */
+        transform: none;
+        transition: none;
       }
       .card-host {
         display: flex;
@@ -193,32 +208,28 @@
          absolutely positioned layers under the card's own content; a card
          without a screenshot never gets the `shot` class and is unchanged. */
       .card.shot {
-        position: relative;
         overflow: hidden;
       }
       .card-shot {
         position: absolute;
         inset: 0;
+        /* Sized by its own insets, so the box is definite whatever the JPEG's
+           aspect ratio is and `cover` fills the card in both directions. */
         width: 100%;
         height: 100%;
-        /* The top of the page is the recognizable part, so that is the rest
-           position; hover pans down to the bottom. */
         object-fit: cover;
+        /* The top of the page is the recognizable part, so that is the rest
+           position; hover pans towards the bottom. RED-206 drives the pan from
+           `main.ts` (inline `object-position` + an inline transition) so that
+           hover-off can FREEZE it where it stands instead of sliding back. */
         object-position: 50% 0%;
-        transform: scale(1);
-        /* The scale lives HERE and never on the card root: the root is the
-           native drag source (m21) and a transform on it would fight the drag
-           image. */
-        transition:
-          object-position 8s linear,
-          transform 400ms ease;
         pointer-events: none;
       }
       .card-shade {
         position: absolute;
         inset: 0;
         background: #000;
-        opacity: 0.55;
+        opacity: 0.45;
         pointer-events: none;
       }
       /* The card's existing content, lifted above both layers. */
@@ -231,31 +242,24 @@
         color: #fff;
       }
       .card.shot > .card-host {
-        /* 90%, not less: the worst case is a white page screenshot under the
-           0.55 overlay, where 78% fell to ~3.6:1. */
+        /* 90%, not less. RED-206 lightened the overlay to 0.45, so the worst
+           case — a white page — now reads ~3.1:1 rather than ~4.2:1; 90% is
+           what keeps the host line from dropping further still. */
         color: rgb(255 255 255 / 90%);
       }
-      /* `:focus-within` too, so a keyboard user sees the same thing. */
-      .card.shot:hover .card-shot,
-      .card.shot:focus-within .card-shot {
-        object-position: 50% 100%;
-        transform: scale(1.04);
-      }
-      /* Suppressed mid-drag — after the hover rules, so it wins at equal
-         specificity. */
-      .card.shot.dragging .card-shot {
-        object-position: 50% 0%;
-        transform: none;
-        transition: none;
-      }
-      /* No pan, no scale. The overlay and the white text stay: they are not
-         motion. */
+      /* No pan, no growth. The overlay and the white text stay: they are not
+         motion. The pan is JS-driven, so `main.ts` checks the same query and
+         writes no inline `object-position` at all — an inline value would
+         outrank this block. */
       @media (prefers-reduced-motion: reduce) {
-        .card-shot,
-        .card.shot:hover .card-shot,
-        .card.shot:focus-within .card-shot {
-          object-position: 50% 0%;
+        .card,
+        .card:hover,
+        .card:focus-within {
           transform: none;
+          transition: none;
+        }
+        .card-shot {
+          object-position: 50% 0%;
           transition: none;
         }
       }
