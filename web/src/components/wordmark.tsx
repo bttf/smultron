@@ -22,9 +22,7 @@ import {
 	WORDMARK_GLYPH,
 } from "../lib/wordmark";
 
-// Both faces sit on top of each other, so each needs the full box. Normal
-// inline flow inside (not flex): a flex container would swallow the space
-// between the glyph and the name.
+// Both faces sit on top of each other, so each needs the full box.
 const FACE = "absolute inset-0 whitespace-nowrap";
 
 // Everything except the front face: `aria-hidden` keeps it out of the
@@ -32,12 +30,10 @@ const FACE = "absolute inset-0 whitespace-nowrap";
 // the name, so it takes no pointer input and no selection either.
 const HIDDEN_TEXT = "select-none pointer-events-none";
 
-function FrontFace() {
-	return (
-		<>
-			<span aria-hidden>{WORDMARK_GLYPH}</span> {WORDMARK_FRONT}
-		</>
-	);
+// The glyph stays put on both sides of the turn: it sits outside the flipping
+// box, so only the text turns.
+function Glyph() {
+	return <span aria-hidden>{WORDMARK_GLYPH}</span>;
 }
 
 /**
@@ -76,13 +72,14 @@ export function Wordmark() {
 	if (reduced) {
 		return (
 			<span className="text-sm font-semibold tracking-tight">
-				<FrontFace />
+				<Glyph /> {WORDMARK_FRONT}
 			</span>
 		);
 	}
 
 	return (
 		<span className="text-sm font-semibold tracking-tight">
+			<Glyph />{" "}
 			{/* Grid-stacked copies of both faces, invisible: the container ends up
 			    as wide as the LONGER string, so a flip never moves the header. */}
 			<span className="relative inline-grid align-bottom [perspective:600px]">
@@ -90,7 +87,7 @@ export function Wordmark() {
 					aria-hidden
 					className={`invisible col-start-1 row-start-1 whitespace-nowrap ${HIDDEN_TEXT}`}
 				>
-					<FrontFace />
+					{WORDMARK_FRONT}
 				</span>
 				<span
 					aria-hidden
@@ -105,7 +102,7 @@ export function Wordmark() {
 					}}
 				>
 					<span className={`${FACE} [backface-visibility:hidden]`}>
-						<FrontFace />
+						{WORDMARK_FRONT}
 					</span>
 					<span
 						aria-hidden
