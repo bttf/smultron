@@ -99,6 +99,33 @@ function titleOf(bookmark: NewTabBookmark): string {
 		: bookmark.title;
 }
 
+/**
+ * The m23 screenshot layers (SPEC §15.5), bottom to top: the image, then a
+ * black overlay; the card's own content is lifted above both by the CSS. The
+ * image is decorative — the title beside it already names the page — so it is
+ * hidden from assistive tech, and `draggable=false` keeps a press on it lifting
+ * the CARD rather than the image (m21's drag source is the card root).
+ *
+ * A broken image takes the overlay and the white-text class with it, leaving
+ * exactly the plain card.
+ */
+function screenshotLayers(card: HTMLAnchorElement, src: string): HTMLElement[] {
+	const shot = el("img", "card-shot");
+	shot.src = src;
+	shot.alt = "";
+	shot.setAttribute("aria-hidden", "true");
+	shot.loading = "lazy";
+	shot.decoding = "async";
+	shot.draggable = false;
+	const shade = el("div", "card-shade");
+	shot.addEventListener("error", () => {
+		shot.remove();
+		shade.remove();
+		card.classList.remove("shot");
+	});
+	return [shot, shade];
+}
+
 function renderCard(bookmark: NewTabBookmark): HTMLAnchorElement {
 	const card = el("a", "card");
 	card.href = bookmark.url;
@@ -111,6 +138,10 @@ function renderCard(bookmark: NewTabBookmark): HTMLAnchorElement {
 		favicon(bookmark),
 		el("span", undefined, displayHost(bookmark.url)),
 	);
+	if (bookmark.screenshotUrl !== null) {
+		card.classList.add("shot");
+		card.append(...screenshotLayers(card, bookmark.screenshotUrl));
+	}
 	card.append(host, el("div", "card-title", titleOf(bookmark)));
 	return card;
 }

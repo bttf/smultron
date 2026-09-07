@@ -8,6 +8,7 @@ function bookmark(over: Partial<NewTabBookmark> = {}): NewTabBookmark {
 		url: "https://example.com/a",
 		title: "A",
 		faviconUrl: null,
+		screenshotUrl: null,
 		tags: [],
 		updatedAt: "2026-08-30T10:00:00.000Z",
 		pinnedAt: null,
