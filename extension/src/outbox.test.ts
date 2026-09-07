@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createEventFactory } from "./attention";
 import {
+	type BlobKeyValueStorage,
 	createBrowseEntry,
 	createEntry,
 	createHighlightEntry,
 	createOutbox,
 	type FetchLike,
-	type KeyValueStorage,
 	type MinimalResponse,
 	toBrowseEventInput,
 } from "./outbox";
@@ -15,25 +15,47 @@ import type {
 	BrowseOutboxEntry,
 	HighlightOutboxEntry,
 	OutboxEntry,
+	ScreenshotOutboxEntry,
 	SyncOutboxEntry,
 } from "./types";
-import { BROWSE_OUTBOX_ENTRY_CAP, CONFIG_KEY, OUTBOX_KEY } from "./types";
+import {
+	BROWSE_OUTBOX_ENTRY_CAP,
+	CONFIG_KEY,
+	OUTBOX_KEY,
+	SCREENSHOT_BLOB_PREFIX,
+	SCREENSHOT_MAX_ATTEMPTS,
+	SCREENSHOT_OUTBOX_ENTRY_CAP,
+} from "./types";
 
 const OK: MinimalResponse = { ok: true, status: 200 };
 
-interface FakeStorage extends KeyValueStorage {
+interface FakeStorage extends BlobKeyValueStorage {
 	data: Record<string, unknown>;
+	/** Every key written or removed, in order — the write-order assertions. */
+	writes: string[];
 }
 
 function fakeStorage(initial: Record<string, unknown> = {}): FakeStorage {
 	const data: Record<string, unknown> = structuredClone(initial);
+	const writes: string[] = [];
 	return {
 		data,
+		writes,
 		get: async (key) => structuredClone(data[key]),
 		set: async (key, value) => {
+			writes.push(`set:${key}`);
 			data[key] = structuredClone(value);
 		},
+		remove: async (key) => {
+			writes.push(`remove:${key}`);
+			delete data[key];
+		},
 	};
+}
+
+/** JSON bodies only — a screenshot entry's body is raw bytes. */
+function jsonBody(body: string | Uint8Array<ArrayBuffer> | undefined): unknown {
+	return JSON.parse(typeof body === "string" ? body : "null");
 }
 
 function entry(
@@ -147,11 +169,11 @@ describe("flush", () => {
 			Authorization: "Bearer tok-123",
 		});
 		// Body is the SPEC §8 payload — mode + bookmarks only, no outbox id.
-		expect(JSON.parse(init?.body ?? "")).toEqual({
+		expect(jsonBody(init?.body)).toEqual({
 			mode: "live",
 			bookmarks: entry("a").bookmarks,
 		});
-		expect(JSON.parse(fetchFn.mock.calls[1]?.[1].body ?? "")).toEqual({
+		expect(jsonBody(fetchFn.mock.calls[1]?.[1].body)).toEqual({
 			mode: "backfill",
 			bookmarks: entry("b").bookmarks,
 		});
@@ -213,7 +235,9 @@ describe("flush", () => {
 		expect(queueIds(storage)).toEqual([]);
 		// Call 1 = failed "a"; calls 2 and 3 = retried "a" then "b".
 		const posted = fetchFn.mock.calls.map(
-			([, init]) => JSON.parse(init.body).bookmarks[0].chromeId,
+			([, init]) =>
+				(jsonBody(init.body) as { bookmarks: Array<{ chromeId: string }> })
+					.bookmarks[0]?.chromeId,
 		);
 		expect(posted).toEqual(["chrome-a", "chrome-a", "chrome-b"]);
 	});
@@ -264,7 +288,9 @@ describe("flush", () => {
 
 		expect(fetchFn).toHaveBeenCalledTimes(2);
 		const posted = fetchFn.mock.calls.map(
-			([, init]) => JSON.parse(init.body).bookmarks[0].chromeId,
+			([, init]) =>
+				(jsonBody(init.body) as { bookmarks: Array<{ chromeId: string }> })
+					.bookmarks[0]?.chromeId,
 		);
 		expect(posted).toEqual(["chrome-a", "chrome-b"]);
 		expect(queueIds(storage)).toEqual([]);
@@ -288,7 +314,9 @@ describe("flush", () => {
 		await createOutbox({ storage, fetchFn: freshFetch }).flush();
 		expect(queueIds(storage)).toEqual([]);
 		const posted = freshFetch.mock.calls.map(
-			([, init]) => JSON.parse(init.body).bookmarks[0].chromeId,
+			([, init]) =>
+				(jsonBody(init.body) as { bookmarks: Array<{ chromeId: string }> })
+					.bookmarks[0]?.chromeId,
 		);
 		// "a" was already acked and persisted — never re-sent.
 		expect(posted).toEqual(["chrome-b", "chrome-c"]);
@@ -324,7 +352,7 @@ describe("flush kind-routing (SPEC §6)", () => {
 		expect(fetchFn).toHaveBeenCalledTimes(2);
 		const [syncUrl, syncInit] = fetchFn.mock.calls[0] ?? [];
 		expect(syncUrl).toBe("https://api.test/api/sync");
-		expect(JSON.parse(syncInit?.body ?? "")).toEqual({
+		expect(jsonBody(syncInit?.body)).toEqual({
 			mode: "live",
 			bookmarks: entry("a").bookmarks,
 		});
@@ -335,7 +363,7 @@ describe("flush kind-routing (SPEC §6)", () => {
 			Authorization: "Bearer tok-123",
 		});
 		// Body is exactly SPEC §8 — url + text only; no outbox id, no kind.
-		expect(JSON.parse(hlInit?.body ?? "")).toEqual({
+		expect(jsonBody(hlInit?.body)).toEqual({
 			url: "https://example.com/h",
 			text: "Highlight h",
 		});
@@ -617,7 +645,7 @@ describe("browse flush routing + poison rule (SPEC §13)", () => {
 		});
 		// Exactly SPEC §8/§13: {events} with clientEventId keys, no outbox id,
 		// no `kind` wrapper, and no undefined-valued keys anywhere.
-		const body = JSON.parse(init?.body ?? "") as Record<string, unknown>;
+		const body = jsonBody(init?.body) as Record<string, unknown>;
 		expect(body).toEqual({
 			events: [
 				{
@@ -666,7 +694,7 @@ describe("browse flush routing + poison rule (SPEC §13)", () => {
 		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
 		await createOutbox({ storage, fetchFn }).flush();
 
-		const body = fetchFn.mock.calls[0]?.[1].body ?? "";
+		const body = String(fetchFn.mock.calls[0]?.[1].body ?? "");
 		expect(body).not.toContain('"url"');
 		expect(body).not.toContain('"title"');
 		expect(JSON.parse(body)).toEqual({
@@ -735,5 +763,295 @@ describe("browse flush routing + poison rule (SPEC §13)", () => {
 			"https://api.test/api/highlights",
 		]);
 		expect(queueIds(storage)).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// m23 screenshot entries (SPEC §15.3).
+
+/** "/9j/" decodes to the JPEG SOI marker bytes the server checks for. */
+const JPEG_B64 = "/9j/";
+const JPEG_BYTES = [0xff, 0xd8, 0xff];
+
+function screenshot(
+	id: string,
+	overrides: Partial<ScreenshotOutboxEntry> = {},
+): ScreenshotOutboxEntry {
+	return {
+		id,
+		kind: "screenshot",
+		url: `https://example.com/${id}`,
+		blobKey: `${SCREENSHOT_BLOB_PREFIX}${id}`,
+		attempts: 0,
+		...overrides,
+	};
+}
+
+/** Queue + the matching blob side-store for a set of entries. */
+function withBlobs(
+	entries: OutboxEntry[],
+	blob = JPEG_B64,
+): Record<string, unknown> {
+	const store: Record<string, unknown> = {
+		...configured,
+		[OUTBOX_KEY]: entries,
+	};
+	for (const item of entries) {
+		if (item.kind === "screenshot") store[item.blobKey] = blob;
+	}
+	return store;
+}
+
+function queueEntries(storage: FakeStorage): OutboxEntry[] {
+	return (storage.data[OUTBOX_KEY] as OutboxEntry[] | undefined) ?? [];
+}
+
+function attemptsOfFirst(storage: FakeStorage): number {
+	return (queueEntries(storage)[0] as ScreenshotOutboxEntry).attempts;
+}
+
+describe("screenshot enqueue + blob side-store (SPEC §15.3)", () => {
+	it("appends the entry to the tail and stores the JPEG under its own key", async () => {
+		const storage = fakeStorage({ [OUTBOX_KEY]: [entry("sync-a")] });
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueScreenshot("https://example.com/x", JPEG_B64);
+
+		const queued = queueEntries(storage);
+		expect(queued[0]?.id).toBe("sync-a");
+		const added = queued[1] as ScreenshotOutboxEntry;
+		expect(added.kind).toBe("screenshot");
+		// RAW url (hard rule #3) — the server normalizes it to find the row.
+		expect(added.url).toBe("https://example.com/x");
+		expect(added.blobKey).toBe(`${SCREENSHOT_BLOB_PREFIX}${added.id}`);
+		expect(added.attempts).toBe(0);
+		// The bytes are NOT in the queue array.
+		expect(JSON.stringify(queued)).not.toContain(JPEG_B64);
+		expect(storage.data[added.blobKey]).toBe(JPEG_B64);
+	});
+
+	it("writes the ENTRY first and the blob second", async () => {
+		// A death between the two leaves an entry whose blob is missing, which
+		// the next flush drops — the recoverable half of the window (§15.3).
+		const storage = fakeStorage();
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueScreenshot("https://example.com/x", JPEG_B64);
+		const { blobKey } = queueEntries(storage)[0] as ScreenshotOutboxEntry;
+		expect(storage.writes).toEqual([`set:${OUTBOX_KEY}`, `set:${blobKey}`]);
+	});
+
+	it("is a no-op for empty bytes", async () => {
+		const storage = fakeStorage();
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueScreenshot("https://example.com/x", "");
+		expect(queueEntries(storage)).toEqual([]);
+		expect(storage.writes).toEqual([]);
+	});
+});
+
+describe("screenshot backlog cap (SPEC §15.3)", () => {
+	it("drops the OLDEST screenshot entry with its blob, never touching other kinds", async () => {
+		const existing: OutboxEntry[] = [
+			entry("sync-first"),
+			...Array.from({ length: SCREENSHOT_OUTBOX_ENTRY_CAP }, (_, i) =>
+				screenshot(`old-${i}`),
+			),
+			highlight("hl"),
+			browse("br"),
+			entry("sync-last"),
+		];
+		const storage = fakeStorage(withBlobs(existing));
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueScreenshot("https://example.com/new", JPEG_B64);
+
+		const queue = queueEntries(storage);
+		const shots = queue.filter((e) => e.kind === "screenshot");
+		expect(shots).toHaveLength(SCREENSHOT_OUTBOX_ENTRY_CAP);
+		expect(shots.map((e) => e.id)).not.toContain("old-0");
+		expect(shots[0]?.id).toBe("old-1");
+		// The evicted entry's blob went with it; the survivors' blobs remain.
+		expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}old-0`]).toBeUndefined();
+		expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}old-1`]).toBe(JPEG_B64);
+		// Bookmark + telemetry traffic untouched, in its original relative order.
+		expect(
+			queue.filter((e) => e.kind !== "screenshot").map((e) => e.id),
+		).toEqual(["sync-first", "hl", "br", "sync-last"]);
+	});
+
+	it("removes an evicted blob BEFORE persisting the shrunken queue", async () => {
+		const existing = Array.from(
+			{ length: SCREENSHOT_OUTBOX_ENTRY_CAP },
+			(_, i) => screenshot(`old-${i}`),
+		);
+		const storage = fakeStorage(withBlobs(existing));
+		const outbox = createOutbox({ storage, fetchFn: vi.fn<FetchLike>() });
+		await outbox.enqueueScreenshot("https://example.com/new", JPEG_B64);
+		// Blob first, then the queue: the reverse order would leak a blob
+		// nothing references any more.
+		expect(storage.writes[0]).toBe(`remove:${SCREENSHOT_BLOB_PREFIX}old-0`);
+		expect(storage.writes[1]).toBe(`set:${OUTBOX_KEY}`);
+	});
+});
+
+describe("screenshot flush routing (SPEC §15.3)", () => {
+	it("POSTs the raw JPEG to the by-url screenshot route with a Bearer token", async () => {
+		const storage = fakeStorage(
+			withBlobs([
+				createEntry("live", entry("a").bookmarks),
+				screenshot("s", { url: "https://example.com/a b#frag" }),
+			]),
+		);
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		const [url, init] = fetchFn.mock.calls[1] ?? [];
+		expect(url).toBe(
+			"https://api.test/api/bookmarks/by-url/screenshot?url=https%3A%2F%2Fexample.com%2Fa%20b%23frag",
+		);
+		expect(init?.method).toBe("POST");
+		expect(init?.headers).toEqual({
+			"Content-Type": "image/jpeg",
+			Authorization: "Bearer tok-123",
+		});
+		// The body is the decoded bytes — not base64, not JSON.
+		expect(init?.body).toBeInstanceOf(Uint8Array);
+		expect(Array.from(init?.body as Uint8Array)).toEqual(JPEG_BYTES);
+		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("removes the blob BEFORE the entry on a 2xx", async () => {
+		const storage = fakeStorage(withBlobs([screenshot("s")]));
+		await createOutbox({
+			storage,
+			fetchFn: vi.fn<FetchLike>().mockResolvedValue(OK),
+		}).flush();
+		expect(storage.writes).toEqual([
+			`remove:${SCREENSHOT_BLOB_PREFIX}s`,
+			`set:${OUTBOX_KEY}`,
+		]);
+		expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}s`]).toBeUndefined();
+		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("drops an entry whose blob is missing and CONTINUES the flush", async () => {
+		// The worker died between the queue write and the blob write.
+		const storage = fakeStorage({
+			...configured,
+			[OUTBOX_KEY]: [screenshot("orphan"), entry("after")],
+		});
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		expect(fetchFn.mock.calls[0]?.[0]).toBe("https://api.test/api/sync");
+		expect(queueIds(storage)).toEqual([]);
+	});
+
+	it("drops an entry whose blob is corrupt rather than retrying it forever", async () => {
+		const storage = fakeStorage(withBlobs([screenshot("bad")], "not base64!!"));
+		const fetchFn = vi.fn<FetchLike>().mockResolvedValue(OK);
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).not.toHaveBeenCalled();
+		expect(queueIds(storage)).toEqual([]);
+		expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}bad`]).toBeUndefined();
+	});
+});
+
+describe("screenshot poison rule + attempt counter (SPEC §15.3)", () => {
+	it("drops on a definitive 4xx, blob first, and continues the flush", async () => {
+		for (const status of [400, 404, 413, 415, 422]) {
+			const storage = fakeStorage(
+				withBlobs([screenshot("bad"), entry("after")]),
+			);
+			const fetchFn = vi
+				.fn<FetchLike>()
+				.mockResolvedValueOnce({ ok: false, status })
+				.mockResolvedValue(OK);
+			await createOutbox({ storage, fetchFn }).flush();
+			expect(fetchFn).toHaveBeenCalledTimes(2);
+			expect(storage.writes.slice(0, 2)).toEqual([
+				`remove:${SCREENSHOT_BLOB_PREFIX}bad`,
+				`set:${OUTBOX_KEY}`,
+			]);
+			expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}bad`]).toBeUndefined();
+			expect(queueIds(storage)).toEqual([]);
+		}
+	});
+
+	it("counts a 5xx, persists the count, and halts the flush", async () => {
+		const storage = fakeStorage(withBlobs([screenshot("s"), entry("after")]));
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValue({ ok: false, status: 503 });
+		const outbox = createOutbox({ storage, fetchFn });
+		await outbox.flush();
+
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		expect(queueIds(storage)).toEqual(["s", "after"]);
+		expect(attemptsOfFirst(storage)).toBe(1);
+		// The blob survives for the retry.
+		expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}s`]).toBe(JPEG_B64);
+
+		await outbox.flush();
+		expect(attemptsOfFirst(storage)).toBe(2);
+	});
+
+	it("drops the entry on the FIFTH 5xx and continues the flush", async () => {
+		const storage = fakeStorage(withBlobs([screenshot("s"), entry("after")]));
+		const fetchFn = vi.fn<FetchLike>(async (url) =>
+			url.includes("screenshot") ? { ok: false, status: 500 } : OK,
+		);
+		const outbox = createOutbox({ storage, fetchFn });
+
+		for (let i = 1; i < SCREENSHOT_MAX_ATTEMPTS; i += 1) {
+			await outbox.flush();
+			expect(attemptsOfFirst(storage)).toBe(i);
+			expect(queueIds(storage)).toEqual(["s", "after"]);
+		}
+
+		// The fifth 5xx: the screenshot is abandoned and the sync behind it ships.
+		await outbox.flush();
+		expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}s`]).toBeUndefined();
+		expect(queueIds(storage)).toEqual([]);
+		expect(fetchFn.mock.calls.at(-1)?.[0]).toBe("https://api.test/api/sync");
+	});
+
+	it("does NOT count a 401 — a revoked token is not the screenshot's fault", async () => {
+		const storage = fakeStorage(withBlobs([screenshot("s"), entry("after")]));
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValue({ ok: false, status: 401 });
+		const outbox = createOutbox({ storage, fetchFn });
+		await outbox.flush();
+		await outbox.flush();
+		expect(fetchFn).toHaveBeenCalledTimes(2);
+		expect(attemptsOfFirst(storage)).toBe(0);
+		expect(queueIds(storage)).toEqual(["s", "after"]);
+		expect(storage.data[`${SCREENSHOT_BLOB_PREFIX}s`]).toBe(JPEG_B64);
+	});
+
+	it("does NOT count a network error — an offline stretch is not a failure", async () => {
+		const storage = fakeStorage(withBlobs([screenshot("s"), entry("after")]));
+		const fetchFn = vi.fn<FetchLike>().mockRejectedValue(new Error("offline"));
+		const outbox = createOutbox({ storage, fetchFn });
+		await outbox.flush();
+		await outbox.flush();
+		await outbox.flush();
+		expect(attemptsOfFirst(storage)).toBe(0);
+		expect(queueIds(storage)).toEqual(["s", "after"]);
+	});
+
+	it("keeps a queued screenshot behind a halted sync entry (FIFO)", async () => {
+		const storage = fakeStorage(
+			withBlobs([createEntry("live", entry("a").bookmarks), screenshot("s")]),
+		);
+		const fetchFn = vi
+			.fn<FetchLike>()
+			.mockResolvedValue({ ok: false, status: 500 });
+		await createOutbox({ storage, fetchFn }).flush();
+		expect(fetchFn).toHaveBeenCalledTimes(1);
+		expect(queueEntries(storage)).toHaveLength(2);
+		expect((queueEntries(storage)[1] as ScreenshotOutboxEntry).attempts).toBe(
+			0,
+		);
 	});
 });

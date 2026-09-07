@@ -57,6 +57,29 @@ export interface HighlightOutboxEntry {
 	text: string;
 }
 
+/**
+ * One outbox entry = one future POST to
+ * `/api/bookmarks/by-url/screenshot?url=…` (m23, SPEC §15.3).
+ *
+ * `url` is the RAW bookmark URL (hard rule #3 — the server normalizes it to
+ * find the row). The JPEG itself is deliberately NOT in the entry: it lives
+ * base64-encoded (no `data:` prefix) under `blobKey` as its own
+ * `chrome.storage.local` key, so the outbox array stays small — every sync
+ * enqueue and every flush step re-reads the whole queue, and dragging
+ * megabytes of image data through those reads would tax bookmark capture.
+ *
+ * `attempts` counts 5xx responses only (§15.3): at SCREENSHOT_MAX_ATTEMPTS the
+ * entry is dropped so a persistent Storage-side failure cannot hold bookmark
+ * syncs behind it forever.
+ */
+export interface ScreenshotOutboxEntry {
+	id: string;
+	kind: "screenshot";
+	url: string;
+	blobKey: string;
+	attempts: number;
+}
+
 // ---------------------------------------------------------------------------
 // Attention tracking (m19, SPEC §13).
 
@@ -137,16 +160,31 @@ export interface AttentionSettings {
 export type OutboxEntry =
 	| SyncOutboxEntry
 	| HighlightOutboxEntry
-	| BrowseOutboxEntry;
+	| BrowseOutboxEntry
+	| ScreenshotOutboxEntry;
 
 /**
  * Minimal async key/value storage (`chrome.storage.local` — or
  * `chrome.storage.session` for the capture session — in production).
  * Injected everywhere so `src/` stays Chrome-free and unit-testable.
+ *
+ * `remove` (m23, SPEC §15.3) is optional here because most consumers only
+ * read and write; the outbox, which owns the screenshot blob side-store,
+ * demands it through `BlobKeyValueStorage` below.
  */
 export interface KeyValueStorage {
 	get(key: string): Promise<unknown>;
 	set(key: string, value: unknown): Promise<void>;
+	remove?(key: string): Promise<void>;
+}
+
+/**
+ * Storage that can also DELETE a key — what the outbox needs for the
+ * screenshot blob side-store (SPEC §15.3), where an orphan blob must never
+ * outlive its entry.
+ */
+export interface BlobKeyValueStorage extends KeyValueStorage {
+	remove(key: string): Promise<void>;
 }
 
 /** Config persisted from the options page. */
@@ -172,6 +210,26 @@ export const BROWSE_BATCH_LIMIT = 500;
  */
 export const BROWSE_BUFFER_CAP = 2_000;
 export const BROWSE_OUTBOX_ENTRY_CAP = 20;
+
+/**
+ * Screenshot backlog cap (m23, SPEC §15.3): drop-oldest among `screenshot`
+ * entries ONLY, applied at enqueue time exactly like the browse cap — sync,
+ * highlight and browse entries and their relative order are never touched, and
+ * a dropped entry's blob is removed with it. Worst case queued image data is
+ * 10 × 1 MiB × 4/3 (base64) ≈ 13.3 MiB, which is why the manifest asks for
+ * `unlimitedStorage` (SPEC §6).
+ */
+export const SCREENSHOT_OUTBOX_ENTRY_CAP = 10;
+
+/**
+ * 5xx responses a screenshot entry may collect before it is dropped
+ * (SPEC §15.3). 401s and network errors never count — a revoked token or an
+ * offline stretch is not the screenshot's fault.
+ */
+export const SCREENSHOT_MAX_ATTEMPTS = 5;
+
+/** Prefix of the `chrome.storage.local` key holding one entry's JPEG bytes. */
+export const SCREENSHOT_BLOB_PREFIX = "screenshot:";
 
 /** Buffered-event count that triggers a drain right after an append (§13). */
 export const BROWSE_DRAIN_THRESHOLD = 50;

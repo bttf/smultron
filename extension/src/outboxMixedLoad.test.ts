@@ -12,9 +12,9 @@
 import { describe, expect, it } from "vitest";
 import { createBrowseBuffer, createEventFactory } from "./attention";
 import {
+	type BlobKeyValueStorage,
 	createOutbox,
 	type FetchLike,
-	type KeyValueStorage,
 	type MinimalResponse,
 } from "./outbox";
 import type {
@@ -28,7 +28,7 @@ import { BROWSE_OUTBOX_ENTRY_CAP, CONFIG_KEY, OUTBOX_KEY } from "./types";
 
 const OK: MinimalResponse = { ok: true, status: 200 };
 
-interface FakeStorage extends KeyValueStorage {
+interface FakeStorage extends BlobKeyValueStorage {
 	data: Record<string, unknown>;
 }
 
@@ -39,6 +39,9 @@ function fakeStorage(initial: Record<string, unknown> = {}): FakeStorage {
 		get: async (key) => structuredClone(data[key]),
 		set: async (key, value) => {
 			data[key] = structuredClone(value);
+		},
+		remove: async (key) => {
+			delete data[key];
 		},
 	};
 }
@@ -93,7 +96,9 @@ function scriptedFetch(
 	calls: Array<{ endpoint: string; id: string }>,
 ): FetchLike {
 	return async (url, init) => {
-		const body = JSON.parse(init.body) as {
+		const body = JSON.parse(
+			typeof init.body === "string" ? init.body : "{}",
+		) as {
 			bookmarks?: Array<{ title: string }>;
 			text?: string;
 			events?: Array<{ clientEventId: string }>;
@@ -292,7 +297,9 @@ describe("browse caps under mixed backlog (halted flush)", () => {
 		const outbox = createOutbox({
 			storage,
 			fetchFn: async (_url, init) => {
-				const body = JSON.parse(init.body) as {
+				const body = JSON.parse(
+					typeof init.body === "string" ? init.body : "{}",
+				) as {
 					events: Array<{ clientEventId: string }>;
 				};
 				const ids = body.events.map((event) => event.clientEventId);
