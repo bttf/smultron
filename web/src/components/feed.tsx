@@ -24,6 +24,7 @@ import {
 	useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { animated, useSpring } from "@react-spring/web";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { moveItem, orderShelf } from "../lib/shelfOrder";
@@ -1491,6 +1492,35 @@ function PinnedCard({
 	const openBookmark = () =>
 		window.open(bookmark.url, "_blank", "noopener,noreferrer");
 
+	// m23 screenshot card (SPEC §15.5). A broken image is remembered BY URL —
+	// like Favicon — so a screenshot that lands on a later poll is tried
+	// without any state to reset, and `shot === null` puts the card back to
+	// exactly the m21/m22 rendering.
+	const [brokenShot, setBrokenShot] = useState<string | null>(null);
+	const shot =
+		bookmark.screenshotUrl !== null && bookmark.screenshotUrl !== brokenShot
+			? bookmark.screenshotUrl
+			: null;
+
+	// Hover AND `:focus-within` drive the same motion, so a keyboard user sees
+	// it too. Tracked in React rather than by CSS because the scale is a
+	// spring; `onFocus`/`onBlur` bubble in React, and the containment check is
+	// what makes a move BETWEEN the card's own buttons not read as a blur.
+	const [hovered, setHovered] = useState(false);
+	const setHover = (next: boolean) => {
+		if (shot) {
+			setHovered(next);
+		}
+	};
+	// A lifted card holds still: dnd-kit is moving it, and a hover transform on
+	// top of that is noise. Reduced motion suppresses the motion but keeps the
+	// overlay and the white text — those are not motion.
+	const animating = hovered && !isDragging && !reduceMotion;
+	const shotSpring = useSpring({
+		scale: animating ? 1.04 : 1,
+		immediate: reduceMotion || isDragging,
+	});
+
 	// m21: a COMPLETED drag must never open the bookmark — the pointerup that
 	// ends a lift still fires a trailing click on the card. The flag is armed
 	// the moment the card starts dragging and disarmed by whichever comes
@@ -1533,6 +1563,16 @@ function PinnedCard({
 			onPointerDown={() => {
 				draggedRef.current = false;
 			}}
+			onPointerEnter={() => setHover(true)}
+			onPointerLeave={() => setHover(false)}
+			onFocus={() => setHover(true)}
+			// Focus moving to something still inside the card (✎ → ⋮⋮ → ✕) is
+			// not a blur as far as the screenshot is concerned.
+			onBlur={(e) => {
+				if (!e.currentTarget.contains(e.relatedTarget)) {
+					setHover(false);
+				}
+			}}
 			// …but NOT the keyboard: the card's own Enter/Space stay "open the
 			// bookmark", and the ⋮⋮ grip below is the keyboard drag affordance.
 			// This override deliberately replaces the KeyboardSensor's
@@ -1561,11 +1601,70 @@ function PinnedCard({
 				// Grid items honour z-index without positioning; the lifted
 				// card rides over the ones sliding past it.
 				isDragging && "z-10 opacity-50",
+				// m23: the screenshot and its overlay are absolute layers, and
+				// the scaled image must be clipped to the m21 radius.
+				shot && "relative overflow-hidden",
 			)}
 		>
-			<div className="flex items-center gap-1.5">
+			{shot ? (
+				<Fragment>
+					{/* The scale lives on this wrapper and NEVER on the card
+					    root, which carries dnd-kit's own transform/transition
+					    (m21) — two transforms on one element would fight. */}
+					<animated.div
+						className="pointer-events-none absolute inset-0"
+						style={{ scale: shotSpring.scale }}
+					>
+						{/* biome-ignore lint/performance/noImgElement: a Storage-hosted screenshot behind a card doesn't warrant next/image's optimizer. */}
+						<img
+							// Keyed like Favicon: a new screenshot URL remounts
+							// rather than reusing an errored <img>, which would
+							// not re-fire onError.
+							key={shot}
+							src={shot}
+							alt=""
+							aria-hidden
+							loading="lazy"
+							decoding="async"
+							// So a press on the image lifts the CARD instead of
+							// starting a native image drag.
+							draggable={false}
+							onError={() => setBrokenShot(shot)}
+							className="h-full w-full object-cover"
+							style={{
+								// The top of the page is the recognizable part,
+								// so that is the rest position; hover pans to
+								// the bottom over 8s. The transition is on the
+								// base style, not only the hovered one, so
+								// hover-OUT animates back.
+								objectPosition: animating ? "50% 100%" : "50% 0%",
+								transition:
+									reduceMotion || isDragging
+										? "none"
+										: "object-position 8s linear",
+							}}
+						/>
+					</animated.div>
+					<div className="pointer-events-none absolute inset-0 bg-black/55" />
+				</Fragment>
+			) : null}
+			<div
+				className={cn(
+					"flex items-center gap-1.5",
+					// Above both layers. The affordances stay clickable because
+					// only the img/overlay are pointer-events:none.
+					shot && "relative z-[1]",
+				)}
+			>
 				{host ? <Favicon host={host} src={bookmark.faviconUrl} /> : null}
-				<span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
+				<span
+					className={cn(
+						"min-w-0 flex-1 truncate font-mono text-[10px]",
+						// 90%, not less: the worst case is a white page under
+						// the 0.55 overlay, where 78% fell to ~3.6:1.
+						shot ? "text-white/90" : "text-muted-foreground",
+					)}
+				>
 					{host ?? bookmark.url}
 				</span>
 				{/* m22: opens the shared editor panel under the grid. Like ✕ it
@@ -1583,9 +1682,15 @@ function PinnedCard({
 					}}
 					className={cn(
 						"shrink-0 font-mono text-[10px]",
+						// `editing` keeps the accent on a screenshot card too:
+						// it is a state marker, and swapping it for white would
+						// erase the only signal that this card's editor is the
+						// open one.
 						editing
 							? "text-[var(--log-accent)]"
-							: "text-[var(--log-ghost)] hover:text-[var(--log-accent)]",
+							: shot
+								? "text-white/90 hover:text-white"
+								: "text-[var(--log-ghost)] hover:text-[var(--log-accent)]",
 					)}
 				>
 					✎
@@ -1598,7 +1703,12 @@ function PinnedCard({
 					{...listeners}
 					// The grip drags; it never opens the bookmark.
 					onClick={(e) => e.stopPropagation()}
-					className="shrink-0 cursor-grab touch-none font-mono text-[10px] text-[var(--log-ghost)] hover:text-[var(--log-fg)] active:cursor-grabbing"
+					className={cn(
+						"shrink-0 cursor-grab touch-none font-mono text-[10px] active:cursor-grabbing",
+						shot
+							? "text-white/90 hover:text-white"
+							: "text-[var(--log-ghost)] hover:text-[var(--log-fg)]",
+					)}
 				>
 					⋮⋮
 				</button>
@@ -1615,12 +1725,22 @@ function PinnedCard({
 						e.stopPropagation();
 						onUnpin();
 					}}
-					className="shrink-0 font-mono text-[10px] text-[var(--log-ghost)] hover:text-[var(--log-accent)]"
+					className={cn(
+						"shrink-0 font-mono text-[10px]",
+						shot
+							? "text-white/90 hover:text-white"
+							: "text-[var(--log-ghost)] hover:text-[var(--log-accent)]",
+					)}
 				>
 					✕
 				</button>
 			</div>
-			<span className="line-clamp-2 text-[12.5px] font-medium leading-[1.4]">
+			<span
+				className={cn(
+					"line-clamp-2 text-[12.5px] font-medium leading-[1.4]",
+					shot && "relative z-[1] text-white",
+				)}
+			>
 				{bookmark.title || "(untitled)"}
 			</span>
 		</div>
