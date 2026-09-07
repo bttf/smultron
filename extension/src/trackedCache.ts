@@ -8,6 +8,11 @@
  * (cache freshness, the never-glow-on-uncertainty rule, message validation)
  * so the background entrypoint is left with nothing but Chrome glue.
  *
+ * m23 (SPEC §15.4) widened the cached VALUE from a bare boolean to
+ * `{ tracked, bookmarkId?, hasScreenshot? }` so the screenshot backfill can
+ * reuse the lookup the icon already performs. The icon's own logic is
+ * untouched: it reads `tracked` and nothing else.
+ *
  * No Chrome imports here: the clock is injected, so tests drive TTL expiry
  * by hand (extension/AGENTS.md).
  *
@@ -54,7 +59,11 @@ export function isTrackableUrl(url: string | undefined | null): url is string {
 
 /** Minimal shape the watcher reads off `GET /api/bookmarks/by-url`. */
 export interface TrackedBookmark {
+	/** Row id — m23 (§15.4) keys the backfill's one-attempt set on it. */
+	id?: string;
 	archivedAt: string | null;
+	/** m23 (§15.1): the public screenshot URL, null when there is none. */
+	screenshotUrl?: string | null;
 }
 
 /** Tracked = a bookmark row exists AND it is not archived (SPEC §6). */
@@ -64,6 +73,47 @@ export function isTrackedBookmark(
 	return (
 		bookmark !== null && bookmark !== undefined && bookmark.archivedAt === null
 	);
+}
+
+/**
+ * What the cache remembers about one URL (SPEC §15.4).
+ *
+ * `tracked` is the m15 verdict and the ONLY field the icon reads. The other
+ * two exist for the m23 backfill and are OPTIONAL by design: an optimistic
+ * override (`onCreated`, a popup ping) knows the page is tracked but knows
+ * nothing about its row id or its screenshot, and `hasScreenshot === undefined`
+ * must never trigger a backfill — the never-glow-on-uncertainty rule's sibling.
+ */
+export interface TrackedEntry {
+	tracked: boolean;
+	bookmarkId?: string;
+	hasScreenshot?: boolean;
+}
+
+/**
+ * Build the cache entry for a `GET /api/bookmarks/by-url` response body.
+ *
+ * A row that is absent yields `{ tracked: false }` and nothing else — there is
+ * no id to remember. A row that exists contributes its id and its screenshot
+ * state even when archived (the backfill's `tracked === true` test already
+ * rules archived rows out, and storing the extra fields keeps "a lookup stores
+ * all three" true of every lookup).
+ *
+ * `screenshotUrl` missing from the body (a server older than §15.1) leaves
+ * `hasScreenshot` undefined rather than guessing `true` from `!== null` — an
+ * absent field is uncertainty, and uncertainty does nothing.
+ */
+export function trackedEntryFor(
+	bookmark: TrackedBookmark | null | undefined,
+): TrackedEntry {
+	const entry: TrackedEntry = { tracked: isTrackedBookmark(bookmark) };
+	if (bookmark === null || bookmark === undefined) return entry;
+	const id = bookmark.id;
+	if (typeof id === "string" && id !== "") entry.bookmarkId = id;
+	const screenshotUrl = bookmark.screenshotUrl;
+	if (screenshotUrl === null) entry.hasScreenshot = false;
+	else if (typeof screenshotUrl === "string") entry.hasScreenshot = true;
+	return entry;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,15 +155,17 @@ export function parseTrackedChangedMessage(
 // TTL cache.
 
 export interface TrackedCache {
-	/** Fresh value, or undefined when unknown/expired. */
-	get(url: string): boolean | undefined;
-	/** Same as get, shaped for `resolveIconState` (miss → `unknown`). */
+	/** Fresh entry, or undefined when unknown/expired. */
+	get(url: string): TrackedEntry | undefined;
+	/** Just `tracked`, shaped for `resolveIconState` (miss → `unknown`). */
 	statusFor(url: string): TrackedStatus;
 	/**
 	 * Store a resolved lookup OR an optimistic override — identical writes,
-	 * because a fresh write always wins until it expires.
+	 * because a fresh write always wins until it expires. A lookup passes all
+	 * three fields; an override passes `{ tracked }` alone, which is what makes
+	 * a post-save entry unable to trigger a backfill (SPEC §15.4).
 	 */
-	set(url: string, tracked: boolean): void;
+	set(url: string, entry: TrackedEntry): void;
 	/** Forget one URL (next read is a miss). */
 	invalidate(url: string): void;
 	/** Forget everything. */
@@ -133,38 +185,40 @@ export function createTrackedCache(opts: {
 	now: () => number;
 }): TrackedCache {
 	const { ttlMs, now } = opts;
-	/** url → { tracked, expiresAt } */
-	const entries = new Map<string, { tracked: boolean; expiresAt: number }>();
+	/** url → { entry, expiresAt } */
+	const entries = new Map<string, { entry: TrackedEntry; expiresAt: number }>();
 
-	function read(url: string): boolean | undefined {
-		const entry = entries.get(url);
-		if (entry === undefined) return undefined;
-		if (now() >= entry.expiresAt) {
+	function read(url: string): TrackedEntry | undefined {
+		const held = entries.get(url);
+		if (held === undefined) return undefined;
+		if (now() >= held.expiresAt) {
 			entries.delete(url);
 			return undefined;
 		}
-		return entry.tracked;
+		return held.entry;
 	}
 
 	return {
 		get: read,
 		statusFor(url) {
-			const tracked = read(url);
-			return tracked === undefined
+			const entry = read(url);
+			return entry === undefined
 				? { status: "unknown" }
-				: { status: "tracked", tracked };
+				: { status: "tracked", tracked: entry.tracked };
 		},
-		set(url, tracked) {
+		set(url, entry) {
 			if (entries.size >= SWEEP_THRESHOLD) {
 				const at = now();
-				for (const [key, entry] of entries) {
-					if (at >= entry.expiresAt) entries.delete(key);
+				for (const [key, held] of entries) {
+					if (at >= held.expiresAt) entries.delete(key);
 				}
 			}
 			// A fresh write always wins and restarts the clock — that is what
 			// makes optimistic overrides (onCreated, popup pings) truthful
-			// ahead of the previous entry's TTL.
-			entries.set(url, { tracked, expiresAt: now() + ttlMs });
+			// ahead of the previous entry's TTL. It REPLACES rather than merges:
+			// an override deliberately drops any remembered screenshot state,
+			// since a save may have just changed it.
+			entries.set(url, { entry, expiresAt: now() + ttlMs });
 		},
 		invalidate(url) {
 			entries.delete(url);
