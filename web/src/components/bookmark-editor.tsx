@@ -42,6 +42,10 @@ export type ApiBookmark = {
 	// m13: null = not pinned. Pinned rows are the shelf; since m22 they ALSO
 	// render in the feed log like any other row, marked by the `★` below.
 	pinnedAt: string | null;
+	// m23 (SPEC §15): public URL of the page screenshot the extension captured,
+	// or null when the row has none yet. The server derives it; nothing here
+	// ever builds a Storage URL. Rendering it is RED-210's job.
+	screenshotUrl: string | null;
 	highlights: ApiHighlight[];
 };
 

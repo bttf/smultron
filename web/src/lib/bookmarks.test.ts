@@ -23,11 +23,13 @@ import {
 	addBookmark,
 	DuplicateUrlError,
 	getBookmarkByUrl,
+	getBookmarkForScreenshot,
 	InvalidCursorError,
 	listBookmarks,
 	patchBookmark,
 	patchBookmarkByUrl,
 	reorderPinned,
+	setScreenshotIfMissing,
 } from "./bookmarks";
 import { normalizeUrl } from "./normalizeUrl";
 
@@ -2085,5 +2087,218 @@ describe("migration 0012_pin-position data transform", () => {
 				[unpinned],
 			),
 		).rejects.toThrow(/bookmarks_pin_position_check/);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// m23 (SPEC §15): the screenshot column, its derived public URL, and the
+// keep-first write. Everything here runs against the REAL 0014 migration on
+// PGlite — the hard-rule-#1 claim ("writes screenshot_path and NOTHING else")
+// is only worth anything if Postgres agrees.
+// ---------------------------------------------------------------------------
+
+const SUPABASE_URL = "https://project.supabase.co";
+const SHOT_BASE = `${SUPABASE_URL}/storage/v1/object/public/bookmark-screenshots/`;
+const SHOT_PATH = `${USER_A}/1/0123456789abcdef0123456789abcdef.jpg`;
+
+const envBefore = { ...process.env };
+
+/** Seeds one row and returns its id. */
+async function seedOne(
+	overrides: Partial<SeedRow> & { url: string },
+): Promise<number> {
+	const now = new Date("2026-05-01T00:00:00.000Z");
+	const [row] = await db
+		.insert(bookmarks)
+		.values({
+			userId: overrides.userId ?? USER_A,
+			url: overrides.url,
+			urlNormalized: normalizeUrl(overrides.url),
+			title: overrides.title ?? "seed",
+			tags: overrides.tags ?? [],
+			note: overrides.note ?? null,
+			faviconUrl: overrides.faviconUrl ?? null,
+			createdAt: overrides.createdAt ?? now,
+			updatedAt: overrides.updatedAt ?? now,
+			archivedAt: overrides.archivedAt ?? null,
+			pinnedAt: overrides.pinnedAt ?? null,
+			pinPosition: overrides.pinnedAt ? (overrides.pinPosition ?? 0) : null,
+		})
+		.returning({ id: bookmarks.id });
+	return row.id;
+}
+
+function useStorageEnv() {
+	beforeEach(() => {
+		process.env.NEXT_PUBLIC_SUPABASE_URL = SUPABASE_URL;
+		delete process.env.BOOKMARK_SCREENSHOT_BUCKET;
+	});
+
+	afterEach(() => {
+		process.env = { ...envBefore };
+	});
+}
+
+describe("setScreenshotIfMissing (m23)", () => {
+	useStorageEnv();
+
+	it("sets the path on a row that has none", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+
+		expect(await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH)).toBe(true);
+		expect((await rawRow(id)).screenshotPath).toBe(SHOT_PATH);
+	});
+
+	it("is keep-first: a second write is refused and the first path stands", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		expect(await setScreenshotIfMissing(db, USER_A, id, "other/path.jpg")).toBe(
+			false,
+		);
+		expect((await rawRow(id)).screenshotPath).toBe(SHOT_PATH);
+	});
+
+	it("is user-scoped: another user's row is a miss, not a write", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+
+		expect(await setScreenshotIfMissing(db, USER_B, id, SHOT_PATH)).toBe(false);
+		expect((await rawRow(id)).screenshotPath).toBeNull();
+	});
+
+	it("reports a miss for an id that doesn't exist", async () => {
+		expect(await setScreenshotIfMissing(db, USER_A, 999_999, SHOT_PATH)).toBe(
+			false,
+		);
+	});
+
+	it("accepts an archived row (the server can't tell save from backfill)", async () => {
+		const archivedAt = new Date("2026-04-01T00:00:00.000Z");
+		const id = await seedOne({ url: "https://a.com/1", archivedAt });
+
+		expect(await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH)).toBe(true);
+		expect((await rawRow(id)).archivedAt).toEqual(archivedAt);
+	});
+
+	// Hard rule #1: a screenshot is enrichment, never a live capture.
+	it("leaves every other column byte-identical", async () => {
+		const id = await seedOne({
+			url: "https://a.com/1",
+			title: "Title",
+			tags: ["t"],
+			note: "note",
+			faviconUrl: "https://a.com/icon.png",
+			createdAt: new Date("2026-01-01T00:00:00.000Z"),
+			updatedAt: new Date("2026-02-02T03:04:05.678Z"),
+			pinnedAt: new Date("2026-03-03T00:00:00.000Z"),
+			pinPosition: 0,
+		});
+		const before = await rawRow(id);
+
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		const after = await rawRow(id);
+		expect({ ...after, screenshotPath: null }).toEqual({
+			...before,
+			screenshotPath: null,
+		});
+		expect(after.screenshotPath).toBe(SHOT_PATH);
+	});
+});
+
+describe("screenshotUrl serialization (m23)", () => {
+	useStorageEnv();
+
+	it("is null while the row has no screenshot", async () => {
+		await seedOne({ url: "https://a.com/1" });
+
+		const found = await getBookmarkByUrl(db, USER_A, "https://a.com/1");
+		expect(found?.screenshotUrl).toBeNull();
+	});
+
+	it("is the base concatenated with the stored path", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		const found = await getBookmarkByUrl(db, USER_A, "https://a.com/1");
+		expect(found?.screenshotUrl).toBe(`${SHOT_BASE}${SHOT_PATH}`);
+		// The path itself is never serialized.
+		expect(found).not.toHaveProperty("screenshotPath");
+	});
+
+	it("follows BOOKMARK_SCREENSHOT_BUCKET", async () => {
+		process.env.BOOKMARK_SCREENSHOT_BUCKET = "shots";
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		const found = await getBookmarkByUrl(db, USER_A, "https://a.com/1");
+		expect(found?.screenshotUrl).toBe(
+			`${SUPABASE_URL}/storage/v1/object/public/shots/${SHOT_PATH}`,
+		);
+	});
+
+	it("is null when Storage is unconfigured, even with a stored path", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+		delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+		const found = await getBookmarkByUrl(db, USER_A, "https://a.com/1");
+		expect(found?.screenshotUrl).toBeNull();
+	});
+
+	it("rides along on the listing, its pinned array, and every patched row", async () => {
+		const id = await seedOne({
+			url: "https://a.com/1",
+			pinnedAt: new Date("2026-03-03T00:00:00.000Z"),
+		});
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		const result = await listBookmarks(db, USER_A);
+		expect(result.bookmarks[0].screenshotUrl).toBe(`${SHOT_BASE}${SHOT_PATH}`);
+		expect(result.pinned[0].screenshotUrl).toBe(`${SHOT_BASE}${SHOT_PATH}`);
+
+		const patched = await patchBookmark(db, USER_A, id, { title: "New" });
+		expect(patched?.screenshotUrl).toBe(`${SHOT_BASE}${SHOT_PATH}`);
+
+		const shelf = await reorderPinned(db, USER_A, [id]);
+		expect(shelf[0].screenshotUrl).toBe(`${SHOT_BASE}${SHOT_PATH}`);
+	});
+});
+
+describe("getBookmarkForScreenshot (m23)", () => {
+	useStorageEnv();
+
+	it("resolves through normalizeUrl and reports the empty slot", async () => {
+		await seedOne({ url: "https://a.com/1" });
+
+		const target = await getBookmarkForScreenshot(
+			db,
+			USER_A,
+			"HTTPS://A.com/1?utm_source=x",
+		);
+		expect(target?.hasScreenshot).toBe(false);
+		expect(target?.bookmark.url).toBe("https://a.com/1");
+		expect(target?.bookmark).not.toHaveProperty("screenshotPath");
+	});
+
+	it("reports a filled slot", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		const target = await getBookmarkForScreenshot(
+			db,
+			USER_A,
+			"https://a.com/1",
+		);
+		expect(target?.hasScreenshot).toBe(true);
+		expect(target?.bookmark.screenshotUrl).toBe(`${SHOT_BASE}${SHOT_PATH}`);
+	});
+
+	it("is user-scoped — another user's row is simply absent", async () => {
+		await seedOne({ url: "https://a.com/1" });
+
+		expect(
+			await getBookmarkForScreenshot(db, USER_B, "https://a.com/1"),
+		).toBeNull();
 	});
 });

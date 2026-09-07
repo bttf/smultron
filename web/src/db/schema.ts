@@ -62,6 +62,13 @@ export const bookmarks = smultron
 			// re-densifies every slot to 0..n-1. Writing it NEVER bumps
 			// updated_at (Hard rule #1) and never touches pinned_at.
 			pinPosition: integer("pin_position"),
+			// m23 (SPEC §15): object path of the page screenshot inside the
+			// PUBLIC screenshot bucket (`<userId>/<bookmarkId>/<hex>.jpg`);
+			// null = none captured yet. Written ONCE, keep-first
+			// (`setScreenshotIfMissing`) — never overwritten, and writing it
+			// NEVER bumps updated_at (Hard rule #1). Never serialized: routes
+			// return the derived public URL (`screenshotUrl`) instead.
+			screenshotPath: text("screenshot_path"),
 		},
 		(table) => [
 			unique().on(table.userId, table.urlNormalized),
