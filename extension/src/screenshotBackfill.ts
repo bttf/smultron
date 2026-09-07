@@ -45,13 +45,14 @@ export interface TabCompleteEvent {
 	tabId: number;
 	url?: string;
 	active?: boolean;
-	windowId?: number;
 }
 
 /** The `chrome.tabs.Tab` fields the post-settle re-check reads. */
 export interface TabState {
 	url?: string;
 	active?: boolean;
+	/** `"loading"` | `"complete"` — a navigation started during the settle. */
+	status?: string;
 }
 
 export interface ScreenshotBackfillDeps {
@@ -132,11 +133,18 @@ export function createScreenshotBackfill(
 
 		// 7. Re-verify: during the settle the user may have switched tabs or
 		//    navigated on. Capturing then would file another page's pixels under
-		//    this bookmark. Raw-URL string equality — the extension never
+		//    this bookmark — permanently, since the server keeps the FIRST
+		//    screenshot (§15.2). Raw-URL string equality — the extension never
 		//    normalizes (hard rule #3).
+		//
+		//    `status` matters as much as the URL: a navigation that STARTED
+		//    inside the settle is reported as the old URL with
+		//    `status: "loading"`, and the page under it is already being torn
+		//    down. Only a tab that is still complete is worth photographing.
 		const tab = await deps.getTab(event.tabId);
 		if (tab === undefined) return;
 		if (tab.active !== true || tab.url !== url) return;
+		if (tab.status !== "complete") return;
 
 		// 8. The §15.3 capture path, then a flush.
 		const base64 = await deps.capture(url);

@@ -691,7 +691,7 @@ const screenshotBackfill = createScreenshotBackfill({
 	getTab: async (tabId) => {
 		try {
 			const tab = await browser.tabs.get(tabId);
-			return { url: tab.url, active: tab.active };
+			return { url: tab.url, active: tab.active, status: tab.status };
 		} catch {
 			return undefined; // Tab closed during the settle.
 		}
@@ -776,7 +776,6 @@ export default defineBackground(() => {
 			tabId,
 			url: tab.url,
 			active: tab.active,
-			windowId: tab.windowId,
 		});
 	});
 

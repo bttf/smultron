@@ -33,7 +33,9 @@ function harness(
 	// `{ captured: undefined }` are the "tab gone" / "capture refused" cases,
 	// which a default parameter would silently overwrite.
 	const tab: TabState | undefined =
-		"tab" in options ? options.tab : { url: URL_A, active: true };
+		"tab" in options
+			? options.tab
+			: { url: URL_A, active: true, status: "complete" };
 	const captured = "captured" in options ? options.captured : "BASE64";
 
 	const deps = {
@@ -66,7 +68,6 @@ function harness(
 				tabId: TAB_ID,
 				url: URL_A,
 				active: true,
-				windowId: 1,
 				...overrides,
 			}),
 	};
@@ -220,7 +221,11 @@ describe("createScreenshotBackfill — the settle re-check", () => {
 	it("abandons when the tab navigated away during the settle", async () => {
 		const { deps, complete } = harness({
 			cached: NEEDS_SHOT,
-			tab: { url: "https://example.com/somewhere-else", active: true },
+			tab: {
+				url: "https://example.com/somewhere-else",
+				active: true,
+				status: "complete",
+			},
 		});
 		await complete();
 		expect(deps.capture).not.toHaveBeenCalled();
@@ -230,10 +235,23 @@ describe("createScreenshotBackfill — the settle re-check", () => {
 	it("abandons when the tab is no longer active after the settle", async () => {
 		const { deps, complete } = harness({
 			cached: NEEDS_SHOT,
-			tab: { url: URL_A, active: false },
+			tab: { url: URL_A, active: false, status: "complete" },
 		});
 		await complete();
 		expect(deps.capture).not.toHaveBeenCalled();
+	});
+
+	it("abandons when a navigation started during the settle (still loading)", async () => {
+		// Chrome reports the OLD url until the new one commits, so the url and
+		// `active` both still match — only `status` reveals the teardown.
+		const { deps, backfill, complete } = harness({
+			cached: NEEDS_SHOT,
+			tab: { url: URL_A, active: true, status: "loading" },
+		});
+		await complete();
+		expect(deps.capture).not.toHaveBeenCalled();
+		expect(deps.enqueue).not.toHaveBeenCalled();
+		expect(backfill.attemptedCount()).toBe(1); // the attempt is still spent
 	});
 
 	it("abandons when the tab is gone", async () => {
@@ -247,7 +265,7 @@ describe("createScreenshotBackfill — the settle re-check", () => {
 			cached: NEEDS_SHOT,
 			// The same page after Chrome dropped the tracking param: a different
 			// raw string, so the capture is abandoned.
-			tab: { url: "https://example.com/a", active: true },
+			tab: { url: "https://example.com/a", active: true, status: "complete" },
 		});
 		await complete();
 		expect(deps.capture).not.toHaveBeenCalled();
@@ -273,11 +291,57 @@ describe("createScreenshotBackfill — one attempt per bookmark", () => {
 		expect(backfill.attemptedCount()).toBe(1);
 	});
 
-	it("two overlapping complete events never double-capture", async () => {
+	it("two overlapping complete events never double-capture (cache hit)", async () => {
 		const { deps, complete } = harness({ cached: NEEDS_SHOT });
 		await Promise.all([complete(), complete()]);
 		expect(deps.capture).toHaveBeenCalledTimes(1);
 		expect(deps.enqueue).toHaveBeenCalledTimes(1);
+	});
+
+	it("two overlapping complete events never double-capture (cache MISS)", async () => {
+		// Both events get past the cache and issue their own lookup; neither
+		// resolves until both are in flight, so the `attempted` set — not luck
+		// with the microtask order — is what stops the second capture.
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let started = 0;
+		const capture = vi.fn(async (_url: string) => "BASE64");
+		const enqueue = vi.fn(async (_url: string, _base64: string) => {});
+		const backfill = createScreenshotBackfill({
+			isCaptureEnabled: async () => true,
+			getCached: () => undefined,
+			lookupTracked: async () => {
+				started += 1;
+				await gate;
+				return NEEDS_SHOT;
+			},
+			sleep: async () => {},
+			getTab: async () => ({ url: URL_A, active: true, status: "complete" }),
+			capture,
+			enqueue,
+			flush: async () => {},
+		});
+
+		const first = backfill.onTabComplete({
+			tabId: TAB_ID,
+			url: URL_A,
+			active: true,
+		});
+		const second = backfill.onTabComplete({
+			tabId: TAB_ID,
+			url: URL_A,
+			active: true,
+		});
+		await Promise.resolve();
+		expect(started).toBe(2); // both lookups are genuinely in flight
+		release?.();
+		await Promise.all([first, second]);
+
+		expect(capture).toHaveBeenCalledTimes(1);
+		expect(enqueue).toHaveBeenCalledTimes(1);
+		expect(backfill.attemptedCount()).toBe(1);
 	});
 
 	it("a refused capture SPENDS the attempt", async () => {
@@ -309,7 +373,11 @@ describe("createScreenshotBackfill — one attempt per bookmark", () => {
 	it("a tab that navigated away SPENDS the attempt", async () => {
 		const { deps, backfill, complete } = harness({
 			cached: NEEDS_SHOT,
-			tab: { url: "https://example.com/elsewhere", active: true },
+			tab: {
+				url: "https://example.com/elsewhere",
+				active: true,
+				status: "complete",
+			},
 		});
 		await complete();
 		expect(backfill.attemptedCount()).toBe(1);
@@ -321,7 +389,7 @@ describe("createScreenshotBackfill — one attempt per bookmark", () => {
 	it("a tab inactive after the settle SPENDS the attempt", async () => {
 		const { deps, complete } = harness({
 			cached: NEEDS_SHOT,
-			tab: { url: URL_A, active: false },
+			tab: { url: URL_A, active: false, status: "complete" },
 		});
 		await complete();
 		await complete();
@@ -362,7 +430,11 @@ describe("createScreenshotBackfill — one attempt per bookmark", () => {
 			getCached: () => entry,
 			lookupTracked: async () => undefined,
 			sleep: async () => {},
-			getTab: async () => ({ url: current, active: true }),
+			getTab: async () => ({
+				url: current,
+				active: true,
+				status: "complete",
+			}),
 			capture,
 			enqueue: async () => {},
 			flush: async () => {},
