@@ -14,11 +14,22 @@ import {
 import { captureHighlight, type HighlightCaptureDeps } from "@/src/capture";
 import { lookupTabFavicon, type QueryAllTabs } from "@/src/favicon";
 import {
+	type BlobKeyValueStorage,
 	createEntry,
 	createHighlightEntry,
 	createOutbox,
 	type KeyValueStorage,
 } from "@/src/outbox";
+import {
+	base64ByteLength,
+	captureForUrl,
+	dataUrlToBase64,
+	type EncodedJpeg,
+	fitWidth,
+	SCREENSHOT_JPEG_QUALITY,
+	SCREENSHOT_MAX_WIDTH,
+	type ScreenshotCaptureDeps,
+} from "@/src/screenshot";
 import {
 	createTrackedCache,
 	type IconState,
@@ -46,10 +57,15 @@ import {
 	type SyncBookmark,
 } from "@/src/types";
 
-const storage: KeyValueStorage = {
+const storage: BlobKeyValueStorage = {
 	get: async (key) => (await browser.storage.local.get(key))[key],
 	set: async (key, value) => {
 		await browser.storage.local.set({ [key]: value });
+	},
+	// m23: the screenshot blob side-store deletes one key per retired entry
+	// (SPEC §15.3) — the outbox is the only caller.
+	remove: async (key) => {
+		await browser.storage.local.remove(key);
 	},
 };
 
@@ -127,12 +143,100 @@ async function enqueueLiveBookmark(node: TreeNode): Promise<void> {
 	await outbox.enqueue(createEntry("live", [bookmark]));
 }
 
-/** Live capture: enqueue the 1-bookmark live entry, then flush. */
+// ---------------------------------------------------------------------------
+// Page screenshots (m23, SPEC §15.3).
+//
+// Chrome glue only: the tab match, the capture gate and the byte-cap policy
+// live in `src/screenshot.ts`, where they are unit-tested.
+
+/**
+ * Decode Chrome's capture, downscale it, and hand back base64 + byte length.
+ * The ONE piece needing DOM APIs — `createImageBitmap` / `OffscreenCanvas` —
+ * so it lives here and is injected into the pure helper, exactly like the m15
+ * grey-icon render.
+ *
+ * A capture already within SCREENSHOT_MAX_WIDTH keeps Chrome's own JPEG bytes
+ * (re-encoding would only lose quality) — but not on the reduced-quality
+ * retry, whose entire purpose is to produce smaller bytes.
+ */
+async function downscaleJpeg(
+	dataUrl: string,
+	quality: number,
+): Promise<EncodedJpeg> {
+	const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+	try {
+		const target = fitWidth(bitmap.width, bitmap.height, SCREENSHOT_MAX_WIDTH);
+		if (target.width === bitmap.width && quality >= SCREENSHOT_JPEG_QUALITY) {
+			const base64 = dataUrlToBase64(dataUrl);
+			return { base64, byteLength: base64ByteLength(base64) };
+		}
+		const canvas = new OffscreenCanvas(target.width, target.height);
+		const ctx = canvas.getContext("2d");
+		if (ctx === null) throw new Error("no 2d context");
+		ctx.drawImage(bitmap, 0, 0, target.width, target.height);
+		const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
+		const bytes = new Uint8Array(await blob.arrayBuffer());
+		return { base64: bytesToBase64(bytes), byteLength: bytes.length };
+	} finally {
+		bitmap.close();
+	}
+}
+
+/**
+ * Bytes → base64, chunked: `String.fromCharCode(...bytes)` on a megabyte
+ * blows the argument limit. `FileReader` is not available in a service
+ * worker, so `btoa` over a binary string is the route.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+	const CHUNK = 0x8000;
+	let binary = "";
+	for (let i = 0; i < bytes.length; i += CHUNK) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+	}
+	return btoa(binary);
+}
+
+const screenshotDeps: ScreenshotCaptureDeps = {
+	// Every tab, matched by exact `tab.url` string — never `query({ url })`,
+	// which is a match pattern (src/favicon.ts records why).
+	queryAllTabs: () => browser.tabs.query({}),
+	captureVisibleTab: (windowId, options) =>
+		browser.tabs.captureVisibleTab(windowId, options),
+	encodeJpeg: downscaleJpeg,
+};
+
+/**
+ * Capture the page being bookmarked and queue it BEHIND its sync entry.
+ * Total: a failed capture or a full storage quota must never cost the
+ * bookmark its sync.
+ */
+async function captureScreenshot(url: string): Promise<void> {
+	try {
+		const base64 = await captureForUrl(screenshotDeps, url);
+		if (base64 === undefined) return;
+		await outbox.enqueueScreenshot(url, base64);
+	} catch {
+		// Storage rejected the blob (quota) — the bookmark still syncs.
+	}
+}
+
+/**
+ * Live capture: enqueue the 1-bookmark live entry, add the screenshot entry
+ * behind it, then flush.
+ *
+ * Order is the contract (§15.3): FIFO delivery of the sync entry first means
+ * the server has the row by the time the upload addresses it by URL — the
+ * same argument `/api/highlights` rests on (§5). Only this listener captures;
+ * `enqueueLiveBookmark` does not, so the highlight flow's direct enqueue
+ * yields one capture, not two. The m19 attention toggle does NOT gate it:
+ * saving is an explicit act (§13).
+ */
 async function handleCreated(
 	node: Browser.bookmarks.BookmarkTreeNode,
 ): Promise<void> {
 	if (node.url === undefined) return; // Folder creation — nothing to sync.
 	await enqueueLiveBookmark(node);
+	await captureScreenshot(node.url);
 	await outbox.flush();
 }
 
