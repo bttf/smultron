@@ -3,13 +3,12 @@
 // sign-out server action's form directly.
 import Link from "next/link";
 import { signOutAction } from "../lib/authActions";
+import { Wordmark } from "./wordmark";
 
 export function SiteHeader({ current }: { current: "feed" | "events" }) {
 	return (
 		<header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2.5">
-			<span className="text-sm font-semibold tracking-tight">
-				<span aria-hidden>🍓</span> Smultronstället
-			</span>
+			<Wordmark />
 			<nav className="flex items-center gap-3.5 text-[13px]">
 				{/* Two-way link between the log views (SPEC §9): the feed points at
 				    the event log, the event log points back. Deliberately small and
