@@ -31,14 +31,16 @@ import {
 	SCREENSHOT_MAX_WIDTH,
 	type ScreenshotCaptureDeps,
 } from "@/src/screenshot";
+import { createScreenshotBackfill } from "@/src/screenshotBackfill";
 import {
 	createTrackedCache,
 	type IconState,
 	isTrackableUrl,
-	isTrackedBookmark,
 	parseTrackedChangedMessage,
 	resolveIconState,
 	type TrackedBookmark,
+	type TrackedEntry,
+	trackedEntryFor,
 } from "@/src/trackedCache";
 import {
 	chunk,
@@ -442,11 +444,14 @@ async function loadWatcherConfig(): Promise<
  * `GET /api/bookmarks/by-url` with the raw URL (hard rule #3 — the server
  * normalizes). Returns undefined on ANY failure so the caller can paint the
  * default icon WITHOUT caching the failure (the next event retries).
+ *
+ * m23 (§15.4): the row's `id` and screenshot state ride along, so the
+ * opportunistic backfill reuses this one request instead of issuing its own.
  */
 async function lookupTracked(
 	config: { token: string; baseUrl: string },
 	rawUrl: string,
-): Promise<boolean | undefined> {
+): Promise<TrackedEntry | undefined> {
 	try {
 		const response = await fetch(
 			`${config.baseUrl}/api/bookmarks/by-url?url=${encodeURIComponent(rawUrl)}`,
@@ -456,10 +461,25 @@ async function lookupTracked(
 		const body = (await response.json()) as {
 			bookmark?: TrackedBookmark | null;
 		};
-		return isTrackedBookmark(body?.bookmark ?? null);
+		return trackedEntryFor(body?.bookmark ?? null);
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Look a raw URL up and cache the result — the shared path for the m15 icon
+ * and the m23 backfill, so a page load costs at most ONE by-url request.
+ * Undefined when unpaired or the lookup failed; failures are never cached.
+ */
+async function resolveTracked(
+	rawUrl: string,
+): Promise<TrackedEntry | undefined> {
+	const config = await loadWatcherConfig();
+	if (config === undefined) return undefined;
+	const entry = await lookupTracked(config, rawUrl);
+	if (entry !== undefined) trackedCache.set(rawUrl, entry);
+	return entry;
 }
 
 /**
@@ -512,14 +532,16 @@ function refreshActiveTabIcon(
 				await paint(resolveIconState(cached));
 				return;
 			}
-			const tracked = await lookupTracked(config, url);
-			if (tracked === undefined) {
+			const entry = await lookupTracked(config, url);
+			if (entry === undefined) {
 				// Failures are NOT cached: the next event retries.
 				await paint(resolveIconState({ status: "error" }));
 				return;
 			}
-			trackedCache.set(url, tracked);
-			await paint(resolveIconState({ status: "tracked", tracked }));
+			trackedCache.set(url, entry);
+			await paint(
+				resolveIconState({ status: "tracked", tracked: entry.tracked }),
+			);
 		} catch {
 			// A listener must never throw; an unpainted icon is just the
 			// default one.
@@ -650,6 +672,35 @@ function handleNavigation(details: NavDetails): void {
 	);
 }
 
+// ---------------------------------------------------------------------------
+// Opportunistic screenshot backfill (m23, SPEC §15.4).
+//
+// Chrome glue only: the gate order, the one-attempt rule and the settle
+// re-check live in `src/screenshotBackfill.ts`, where they are unit-tested.
+
+const screenshotBackfill = createScreenshotBackfill({
+	// The m19 toggle — the same read the browse-event listeners gate on, so a
+	// storage failure reads as OFF here too (SPEC §13).
+	isCaptureEnabled: attentionEnabled,
+	getCached: (url) => trackedCache.get(url),
+	lookupTracked: resolveTracked,
+	sleep: (ms) =>
+		new Promise((resolve) => {
+			setTimeout(resolve, ms);
+		}),
+	getTab: async (tabId) => {
+		try {
+			const tab = await browser.tabs.get(tabId);
+			return { url: tab.url, active: tab.active, status: tab.status };
+		} catch {
+			return undefined; // Tab closed during the settle.
+		}
+	},
+	capture: (url) => captureForUrl(screenshotDeps, url),
+	enqueue: (url, base64) => outbox.enqueueScreenshot(url, base64),
+	flush: () => outbox.flush(),
+});
+
 export default defineBackground(() => {
 	// MV3: all listeners must be registered synchronously at the top level of
 	// the service worker so Chrome can re-deliver events after worker death.
@@ -658,8 +709,11 @@ export default defineBackground(() => {
 		void handleCreated(node);
 		// m15: a fresh bookmark is tracked by definition — record it optimistically
 		// (ahead of any lookup) and repaint if it is the active tab's page.
+		// `{ tracked }` alone — the optimistic override deliberately says nothing
+		// about the screenshot, so the m23 backfill can't fire for a page whose
+		// save-time capture is still in the outbox (SPEC §15.4).
 		if (node.url !== undefined && isTrackableUrl(node.url)) {
-			trackedCache.set(node.url, true);
+			trackedCache.set(node.url, { tracked: true });
 			refreshActiveTabIcon({ url: node.url });
 		}
 	});
@@ -715,6 +769,14 @@ export default defineBackground(() => {
 		// updates from the active tab of a window that isn't focused.
 		if (tab.active !== true) return;
 		refreshActiveTabIcon({ tabId });
+		// m23 (§15.4): a FINISHED load in the active tab is the only backfill
+		// trigger — nothing else photographs a page the user didn't just load.
+		if (changeInfo.status !== "complete") return;
+		void screenshotBackfill.onTabComplete({
+			tabId,
+			url: tab.url,
+			active: tab.active,
+		});
 	});
 
 	browser.windows.onFocusChanged.addListener((windowId) => {
@@ -729,7 +791,8 @@ export default defineBackground(() => {
 	browser.runtime.onMessage.addListener((message) => {
 		const ping = parseTrackedChangedMessage(message);
 		if (ping === undefined) return;
-		trackedCache.set(ping.url, ping.tracked);
+		// An override: `{ tracked }` only (see onCreated above).
+		trackedCache.set(ping.url, { tracked: ping.tracked });
 		refreshActiveTabIcon({ url: ping.url });
 	});
 
