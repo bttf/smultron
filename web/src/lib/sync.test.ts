@@ -11,7 +11,7 @@ import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
-import { applySync } from "./sync";
+import { applySync, syncBodySchema } from "./sync";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -428,6 +428,158 @@ describe("applySync", () => {
 		});
 	});
 
+	// RED-205: the extension sends the open tab's `favIconUrl` on live
+	// captures so a row shows the PAGE's icon instead of the hostname-keyed
+	// domain icon both renderers fall back to.
+	describe("faviconUrl (SPEC §5)", () => {
+		const FAVICON = "https://calendar.google.com/googlecalendar/images/f.ico";
+		const OTHER = "https://example.com/other.ico";
+
+		it("live insert stores a valid favicon", async () => {
+			await applySync(db, USER_A, "live", [
+				{
+					url: "https://calendar.google.com/calendar/u/0/r",
+					title: "Calendar",
+					chromeId: "c1",
+					faviconUrl: FAVICON,
+				},
+			]);
+			const [row] = await allRows();
+			expect(row.faviconUrl).toBe(FAVICON);
+		});
+
+		it("live insert without a favicon leaves the column null", async () => {
+			await applySync(db, USER_A, "live", [
+				{ url: "https://a.com/x", title: "t", chromeId: "c1" },
+			]);
+			const [row] = await allRows();
+			expect(row.faviconUrl).toBeNull();
+		});
+
+		it.each([
+			["relative", "/favicon.ico"],
+			["data:", "data:image/png;base64,AAA"],
+			["chrome-extension:", "chrome-extension://abc/icon.png"],
+			["ftp:", "ftp://a.com/favicon.ico"],
+			["malformed", "not a url"],
+			["empty", ""],
+			["oversized", `https://a.com/${"x".repeat(2100)}.ico`],
+		])(
+			"live insert rejects a %s favicon (stored null)",
+			async (_label, bad) => {
+				await applySync(db, USER_A, "live", [
+					{
+						url: "https://a.com/x",
+						title: "t",
+						chromeId: "c1",
+						faviconUrl: bad,
+					},
+				]);
+				const [row] = await allRows();
+				expect(row.faviconUrl).toBeNull();
+			},
+		);
+
+		it("live re-save does NOT overwrite an existing favicon", async () => {
+			await applySync(db, USER_A, "live", [
+				{
+					url: "https://a.com/x",
+					title: "t",
+					chromeId: "c1",
+					faviconUrl: FAVICON,
+				},
+			]);
+			await applySync(db, USER_A, "live", [
+				{
+					url: "https://a.com/x",
+					title: "t2",
+					chromeId: "c2",
+					faviconUrl: OTHER,
+				},
+			]);
+			const [row] = await allRows();
+			expect(row.faviconUrl).toBe(FAVICON);
+			// The rest of the live re-save semantics still apply.
+			expect(row.title).toBe("t2");
+		});
+
+		it("live re-save without a favicon does NOT erase an existing one", async () => {
+			await applySync(db, USER_A, "live", [
+				{
+					url: "https://a.com/x",
+					title: "t",
+					chromeId: "c1",
+					faviconUrl: FAVICON,
+				},
+			]);
+			await applySync(db, USER_A, "live", [
+				{ url: "https://a.com/x", title: "t2", chromeId: "c2" },
+			]);
+			const [row] = await allRows();
+			expect(row.faviconUrl).toBe(FAVICON);
+		});
+
+		it("live re-save fills a null favicon", async () => {
+			await applySync(db, USER_A, "live", [
+				{ url: "https://a.com/x", title: "t", chromeId: "c1" },
+			]);
+			expect((await allRows())[0].faviconUrl).toBeNull();
+
+			await applySync(db, USER_A, "live", [
+				{
+					url: "https://a.com/x",
+					title: "t",
+					chromeId: "c1",
+					faviconUrl: FAVICON,
+				},
+			]);
+			const [row] = await allRows();
+			expect(row.faviconUrl).toBe(FAVICON);
+		});
+
+		it("backfill insert never writes a favicon, even if one is on the wire", async () => {
+			await applySync(db, USER_A, "backfill", [
+				{
+					url: "https://a.com/x",
+					title: "t",
+					chromeId: "c1",
+					dateAddedMs: PAST.getTime(),
+					faviconUrl: FAVICON,
+				},
+			]);
+			const [row] = await allRows();
+			expect(row.faviconUrl).toBeNull();
+			// Hard rule #1: backfill is byte-identical on the timestamps.
+			expect(row.updatedAt).toEqual(PAST);
+			expect(row.createdAt).toEqual(PAST);
+		});
+
+		it("backfill conflict leaves the row (and updated_at) untouched", async () => {
+			await applySync(db, USER_A, "live", [
+				{
+					url: "https://a.com/x",
+					title: "t",
+					chromeId: "c1",
+					dateAddedMs: PAST.getTime(),
+					faviconUrl: FAVICON,
+				},
+			]);
+			const [before] = await allRows();
+			expect(before.faviconUrl).toBe(FAVICON);
+
+			const result = await applySync(db, USER_A, "backfill", [
+				{
+					url: "https://a.com/x",
+					title: "t",
+					chromeId: "c1",
+					faviconUrl: OTHER,
+				},
+			]);
+			expect(result).toEqual({ inserted: 0, bumped: 0, skipped: 1 });
+			expect((await allRows())[0]).toEqual(before);
+		});
+	});
+
 	describe("multi-user isolation", () => {
 		it("same url_normalized for two users creates two independent rows", async () => {
 			await applySync(db, USER_A, "live", [
@@ -451,5 +603,62 @@ describe("applySync", () => {
 			expect(rowA.updatedAt).toEqual(PAST); // untouched by B's sync
 			expect(rowB.title).toBe("B's title");
 		});
+	});
+});
+
+// The `/api/sync` body schema (SPEC §8) — the route does nothing but auth,
+// parse with this, and delegate to applySync.
+describe("syncBodySchema", () => {
+	const item = { url: "https://a.com/x", title: "t", chromeId: "c1" };
+
+	it("accepts faviconUrl", () => {
+		const parsed = syncBodySchema.safeParse({
+			mode: "live",
+			bookmarks: [{ ...item, faviconUrl: "https://a.com/favicon.ico" }],
+		});
+		expect(parsed.success).toBe(true);
+		expect(parsed.data?.bookmarks[0].faviconUrl).toBe(
+			"https://a.com/favicon.ico",
+		);
+	});
+
+	it("accepts a body with no faviconUrl", () => {
+		expect(
+			syncBodySchema.safeParse({ mode: "backfill", bookmarks: [item] }).success,
+		).toBe(true);
+	});
+
+	it("rejects unknown fields on an item", () => {
+		expect(
+			syncBodySchema.safeParse({
+				mode: "live",
+				bookmarks: [{ ...item, favicon: "https://a.com/favicon.ico" }],
+			}).success,
+		).toBe(false);
+	});
+
+	it("rejects unknown top-level fields", () => {
+		expect(
+			syncBodySchema.safeParse({ mode: "live", bookmarks: [], extra: 1 })
+				.success,
+		).toBe(false);
+	});
+
+	it("rejects a non-string faviconUrl", () => {
+		expect(
+			syncBodySchema.safeParse({
+				mode: "live",
+				bookmarks: [{ ...item, faviconUrl: 42 }],
+			}).success,
+		).toBe(false);
+	});
+
+	it("still caps a batch at 500", () => {
+		expect(
+			syncBodySchema.safeParse({
+				mode: "backfill",
+				bookmarks: Array.from({ length: 501 }, () => item),
+			}).success,
+		).toBe(false);
 	});
 });

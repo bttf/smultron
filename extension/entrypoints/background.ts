@@ -12,6 +12,7 @@ import {
 	type TabInfo,
 } from "@/src/attentionCapture";
 import { captureHighlight, type HighlightCaptureDeps } from "@/src/capture";
+import { lookupTabFavicon, type QueryTabsByUrl } from "@/src/favicon";
 import {
 	createEntry,
 	createHighlightEntry,
@@ -93,11 +94,18 @@ async function getNode(id: string): Promise<TreeNode | undefined> {
 	}
 }
 
+/** `chrome.tabs.query` for the live-capture favicon lookup (src/favicon.ts). */
+const queryTabsByUrl: QueryTabsByUrl = (url) => browser.tabs.query({ url });
+
 /**
  * Enqueue a single-bookmark `mode:'live'` entry for a node (no flush —
  * callers flush). Shared by the onCreated listener and the highlight
  * capture flow, which enqueues its created bookmark directly instead of
  * relying on onCreated's timing.
+ *
+ * Live entries carry the open tab's `favIconUrl` when there is one (SPEC §5):
+ * the page's OWN icon, which the server stores in place of the hostname-keyed
+ * fallback. A missing tab or a failed query just omits the field.
  */
 async function enqueueLiveBookmark(node: TreeNode): Promise<void> {
 	if (node.url === undefined) return; // Folder — nothing to sync.
@@ -110,6 +118,8 @@ async function enqueueLiveBookmark(node: TreeNode): Promise<void> {
 	if (node.dateAdded !== undefined) bookmark.dateAddedMs = node.dateAdded;
 	const folderPath = await resolveFolderPath(getNode, node.parentId);
 	if (folderPath !== undefined) bookmark.folderPath = folderPath;
+	const faviconUrl = await lookupTabFavicon(queryTabsByUrl, node.url);
+	if (faviconUrl !== undefined) bookmark.faviconUrl = faviconUrl;
 	await outbox.enqueue(createEntry("live", [bookmark]));
 }
 
