@@ -36,6 +36,7 @@ function bookmark(over: Partial<NewTabBookmark> = {}): NewTabBookmark {
 		url: "https://example.com/a",
 		title: "A",
 		faviconUrl: null,
+		screenshotUrl: null,
 		tags: [],
 		updatedAt: "2026-08-30T10:00:00.000Z",
 		pinnedAt: null,
@@ -98,10 +99,40 @@ describe("parseBookmarksResponse", () => {
 			url: "https://ok.test/",
 			title: "",
 			faviconUrl: null,
+			screenshotUrl: null,
 			tags: ["a"],
 			updatedAt: "",
 			pinnedAt: null,
 		});
+	});
+
+	it("carries the m23 screenshot URL the shelf card renders", () => {
+		const page = parseBookmarksResponse({
+			pinned: [
+				{
+					id: 9,
+					url: "https://p.test/",
+					screenshotUrl: "https://s.test/o/pub/b/9.jpg",
+				},
+			],
+			bookmarks: [{ id: 1, url: "https://a.test/", screenshotUrl: null }],
+		});
+		expect(page.pinned[0]?.screenshotUrl).toBe("https://s.test/o/pub/b/9.jpg");
+		expect(page.recent[0]?.screenshotUrl).toBeNull();
+	});
+
+	it.each([
+		["null", null],
+		["a number", 7],
+		["absent", undefined],
+		["an object", { url: "x" }],
+	])("reads a %s screenshotUrl as no screenshot", (_label, value) => {
+		// A row is never dropped over this field: uncertainty is "plain card".
+		const page = parseBookmarksResponse({
+			pinned: [{ id: 9, url: "https://p.test/", screenshotUrl: value }],
+		});
+		expect(page.pinned).toHaveLength(1);
+		expect(page.pinned[0]?.screenshotUrl).toBeNull();
 	});
 
 	it("carries the pin timestamp the log's ★ reads (m22)", () => {
@@ -211,6 +242,37 @@ describe("new tab snapshot", () => {
 			recent: page.recent,
 			fetchedAtMs: 1_700_000_000_000,
 		});
+	});
+
+	it("round-trips the m23 screenshot URL (SPEC §15.5)", async () => {
+		const storage = memoryStorage();
+		const page = {
+			pinned: [bookmark({ id: 9, screenshotUrl: "https://s.test/o/9.jpg" })],
+			recent: [bookmark({ id: 2, screenshotUrl: "https://s.test/o/2.jpg" })],
+		};
+
+		await writeSnapshot(storage, page, 1);
+
+		const snapshot = await readSnapshot(storage);
+		expect(snapshot?.pinned[0]?.screenshotUrl).toBe("https://s.test/o/9.jpg");
+		expect(snapshot?.recent[0]?.screenshotUrl).toBe("https://s.test/o/2.jpg");
+	});
+
+	it("parses a pre-m23 snapshot with no screenshot rather than dropping it", async () => {
+		// The field simply doesn't exist in a snapshot an older build wrote; the
+		// shelf must still paint, as plain cards.
+		const storage = memoryStorage({
+			[NEWTAB_KEY]: {
+				pinned: [{ id: 9, url: "https://p.test/", title: "P", tags: [] }],
+				recent: [{ id: 2, url: "https://a.test/", title: "A", tags: [] }],
+				fetchedAtMs: 5,
+			},
+		});
+
+		const snapshot = await readSnapshot(storage);
+		expect(snapshot?.pinned.map((b) => b.id)).toEqual([9]);
+		expect(snapshot?.pinned[0]?.screenshotUrl).toBeNull();
+		expect(snapshot?.recent[0]?.screenshotUrl).toBeNull();
 	});
 
 	it("caps the recent rows it stores, keeping the newest", async () => {

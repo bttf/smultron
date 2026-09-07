@@ -20,6 +20,12 @@ export interface NewTabBookmark {
 	title: string;
 	/** m17 stored favicon; null → the page falls back to a hostname icon. */
 	faviconUrl: string | null;
+	/**
+	 * m23 page screenshot (SPEC §15): the public Storage URL the server computed,
+	 * or null when the row has none. A shelf card with one renders it as its
+	 * background; a card without one is the m21/m22 card unchanged.
+	 */
+	screenshotUrl: string | null;
 	tags: string[];
 	updatedAt: string;
 	/**
@@ -76,6 +82,11 @@ function asBookmark(raw: unknown): NewTabBookmark | undefined {
 		url: row.url,
 		title: typeof row.title === "string" ? row.title : "",
 		faviconUrl: typeof row.faviconUrl === "string" ? row.faviconUrl : null,
+		// Anything that isn't a string is "no screenshot" — which is also how a
+		// snapshot written by a pre-m23 build, where the field is simply absent,
+		// parses: with no screenshot rather than being discarded (SPEC §15.5).
+		screenshotUrl:
+			typeof row.screenshotUrl === "string" ? row.screenshotUrl : null,
 		tags: Array.isArray(row.tags)
 			? row.tags.filter((tag): tag is string => typeof tag === "string")
 			: [],

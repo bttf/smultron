@@ -189,6 +189,74 @@
         width: 14px;
         height: 14px;
       }
+      /* m23 screenshot cards (SPEC §15.5). The image and the black overlay are
+         absolutely positioned layers under the card's own content; a card
+         without a screenshot never gets the `shot` class and is unchanged. */
+      .card.shot {
+        position: relative;
+        overflow: hidden;
+      }
+      .card-shot {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        /* The top of the page is the recognizable part, so that is the rest
+           position; hover pans down to the bottom. */
+        object-fit: cover;
+        object-position: 50% 0%;
+        transform: scale(1);
+        /* The scale lives HERE and never on the card root: the root is the
+           native drag source (m21) and a transform on it would fight the drag
+           image. */
+        transition:
+          object-position 8s linear,
+          transform 400ms ease;
+        pointer-events: none;
+      }
+      .card-shade {
+        position: absolute;
+        inset: 0;
+        background: #000;
+        opacity: 0.55;
+        pointer-events: none;
+      }
+      /* The card's existing content, lifted above both layers. */
+      .card.shot > .card-host,
+      .card.shot > .card-title {
+        position: relative;
+        z-index: 1;
+      }
+      .card.shot > .card-title {
+        color: #fff;
+      }
+      .card.shot > .card-host {
+        color: rgb(255 255 255 / 78%);
+      }
+      /* `:focus-within` too, so a keyboard user sees the same thing. */
+      .card.shot:hover .card-shot,
+      .card.shot:focus-within .card-shot {
+        object-position: 50% 100%;
+        transform: scale(1.04);
+      }
+      /* Suppressed mid-drag — after the hover rules, so it wins at equal
+         specificity. */
+      .card.shot.dragging .card-shot {
+        object-position: 50% 0%;
+        transform: none;
+        transition: none;
+      }
+      /* No pan, no scale. The overlay and the white text stay: they are not
+         motion. */
+      @media (prefers-reduced-motion: reduce) {
+        .card-shot,
+        .card.shot:hover .card-shot,
+        .card.shot:focus-within .card-shot {
+          object-position: 50% 0%;
+          transform: none;
+          transition: none;
+        }
+      }
       /* Log rows — the feed's dense line (SPEC §9). */
       .log {
         display: flex;
