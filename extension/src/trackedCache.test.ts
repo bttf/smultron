@@ -220,16 +220,24 @@ describe("createTrackedCache", () => {
 
 describe("trackedEntryFor", () => {
 	it("keeps the row's id and screenshot state alongside tracked", () => {
+		// The server serializes the integer id as a JSON number (the real
+		// by-url shape); the key is its decimal string.
+		expect(
+			trackedEntryFor({ id: 90453, archivedAt: null, screenshotUrl: null }),
+		).toEqual({ tracked: true, bookmarkId: "90453", hasScreenshot: false });
+		expect(
+			trackedEntryFor({
+				id: 90453,
+				archivedAt: null,
+				screenshotUrl: "https://cdn.example/s/u/90453/abc.jpg",
+			}),
+		).toEqual({ tracked: true, bookmarkId: "90453", hasScreenshot: true });
+	});
+
+	it("a string id is accepted as-is", () => {
 		expect(
 			trackedEntryFor({ id: "bm-1", archivedAt: null, screenshotUrl: null }),
 		).toEqual({ tracked: true, bookmarkId: "bm-1", hasScreenshot: false });
-		expect(
-			trackedEntryFor({
-				id: "bm-1",
-				archivedAt: null,
-				screenshotUrl: "https://cdn.example/s/u/bm-1/abc.jpg",
-			}),
-		).toEqual({ tracked: true, bookmarkId: "bm-1", hasScreenshot: true });
 	});
 
 	it("an archived row is untracked but still identifiable", () => {
@@ -254,13 +262,16 @@ describe("trackedEntryFor", () => {
 		expect(entry.hasScreenshot).toBeUndefined();
 	});
 
-	it("a missing or empty id leaves bookmarkId undefined", () => {
+	it("a missing, empty or non-integer id leaves bookmarkId undefined", () => {
 		expect(trackedEntryFor({ archivedAt: null, screenshotUrl: null })).toEqual({
 			tracked: true,
 			hasScreenshot: false,
 		});
 		expect(
 			trackedEntryFor({ id: "", archivedAt: null, screenshotUrl: null }),
+		).toEqual({ tracked: true, hasScreenshot: false });
+		expect(
+			trackedEntryFor({ id: 1.5, archivedAt: null, screenshotUrl: null }),
 		).toEqual({ tracked: true, hasScreenshot: false });
 	});
 });

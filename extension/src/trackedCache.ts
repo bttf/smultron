@@ -59,8 +59,12 @@ export function isTrackableUrl(url: string | undefined | null): url is string {
 
 /** Minimal shape the watcher reads off `GET /api/bookmarks/by-url`. */
 export interface TrackedBookmark {
-	/** Row id — m23 (§15.4) keys the backfill's one-attempt set on it. */
-	id?: string;
+	/**
+	 * Row id — m23 (§15.4) keys the backfill's one-attempt set on it. The
+	 * server sends the integer column as a JSON number; a string is accepted
+	 * too so the key type never depends on the serializer.
+	 */
+	id?: number | string;
 	archivedAt: string | null;
 	/** m23 (§15.1): the public screenshot URL, null when there is none. */
 	screenshotUrl?: string | null;
@@ -109,7 +113,11 @@ export function trackedEntryFor(
 	const entry: TrackedEntry = { tracked: isTrackedBookmark(bookmark) };
 	if (bookmark === null || bookmark === undefined) return entry;
 	const id = bookmark.id;
-	if (typeof id === "string" && id !== "") entry.bookmarkId = id;
+	if (typeof id === "number" && Number.isInteger(id)) {
+		entry.bookmarkId = String(id);
+	} else if (typeof id === "string" && id !== "") {
+		entry.bookmarkId = id;
+	}
 	const screenshotUrl = bookmark.screenshotUrl;
 	if (screenshotUrl === null) entry.hasScreenshot = false;
 	else if (typeof screenshotUrl === "string") entry.hasScreenshot = true;
