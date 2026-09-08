@@ -985,11 +985,11 @@ export async function setScreenshotIfMissing(
  * IDEMPOTENT, since a double click must not turn into an error.
  *
  * Read-then-write inside one transaction, because RETURNING reports the NEW
- * row and the OLD path is what Storage needs. No upload can slip in between:
- * `setScreenshotIfMissing` only ever writes a row whose path is NULL, and the
- * path read here is not. A concurrent CLEAR can — its UPDATE wins, ours
- * matches nothing, and both hand the same object to a delete that is
- * idempotent anyway.
+ * row and the OLD path is what Storage needs. The read takes `FOR UPDATE`, so
+ * a concurrent clear of the same row waits rather than interleaving: without
+ * it, two clears racing an upload could leave the row NULL with the SECOND
+ * object never deleted. The lock costs nothing on a single-row read and makes
+ * the sequence "read the path, null it, delete that object" atomic per row.
  *
  * CRITICAL (Hard rule #1): `screenshot_path` is the ONLY column assigned.
  * `updated_at`, `pinned_at`, `pin_position` and `archived_at` are
@@ -1011,7 +1011,8 @@ export async function clearScreenshot(
 			})
 			.from(bookmarks)
 			.where(cond)
-			.limit(1);
+			.limit(1)
+			.for("update");
 		if (!current) {
 			return null;
 		}
@@ -1027,8 +1028,8 @@ export async function clearScreenshot(
 			.where(and(cond, isNotNull(bookmarks.screenshotPath)))
 			.returning(BOOKMARK_COLUMNS());
 
-		// `rows` is empty only when a concurrent clear got there first, in which
-		// case the row has no screenshot either way.
+		// `rows` is empty only if the row lost its screenshot despite the lock —
+		// it cannot happen through this function, so it is pure belt-and-braces.
 		return {
 			bookmark: rows[0] ?? { ...bookmark, screenshotUrl: null },
 			clearedPath: screenshotPath,

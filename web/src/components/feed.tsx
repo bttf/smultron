@@ -27,6 +27,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { animated, useSpring } from "@react-spring/web";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
+import { releaseClearedScreenshots } from "../lib/screenshotOverride";
 import { moveItem, orderShelf } from "../lib/shelfOrder";
 import { cn } from "../lib/utils";
 import {
@@ -336,6 +337,25 @@ export function Feed() {
 		}
 	}, [data, orderOverride]);
 
+	// RED-206 (SPEC §9): release a cleared-screenshot override once the server
+	// agrees the row has none. Same released-on-confirmation contract as the
+	// overlays above, and it matters for the same reason: the extension
+	// backfills a screenshot for any row that has none, so an override held
+	// past its confirmation would spread `null` over the new URL on every later
+	// poll and the card would stay plain until a reload. The log page and the
+	// shelf are both authorities — a cleared row can be in either.
+	useEffect(() => {
+		if (!data) {
+			return;
+		}
+		setOverrides((prev) =>
+			releaseClearedScreenshots(prev, [
+				...data.bookmarks,
+				...(data.pinned ?? []),
+			]),
+		);
+	}, [data]);
+
 	const items = useMemo(() => {
 		const base = [...(data?.bookmarks ?? []), ...morePages.flat()];
 		return base
@@ -627,10 +647,14 @@ export function Feed() {
 		mutate();
 	}
 
-	// RED-206 (SPEC §15.2): drop this row's page screenshot. The response is the
-	// updated bare row, so it lands in `overrides` exactly like a PATCH — which
-	// is what makes the shelf card revert to the plain style at once, since the
-	// shelf applies `overrides` too.
+	// RED-206 (SPEC §15.2): drop this row's page screenshot. The overlay is a
+	// PARTIAL override — `screenshotUrl: null` merged onto whatever the row
+	// already has pending — which is what makes the shelf card revert to the
+	// plain style at once, since the shelf applies `overrides` too. The DELETE
+	// changes nothing else about the row, so the rest of the response would
+	// only be the fields the client already holds; and a full-row override
+	// would be a second, unreleasable copy of them. The release effect above
+	// drops the `screenshotUrl` key as soon as the server agrees.
 	async function clearScreenshot(id: number) {
 		const res = await fetch(`/api/bookmarks/${id}/screenshot`, {
 			method: "DELETE",
@@ -638,8 +662,9 @@ export function Feed() {
 		if (!res.ok) {
 			throw new Error(`request failed (${res.status})`);
 		}
-		const { bookmark } = (await res.json()) as { bookmark: ApiBookmark };
-		setOverrides((prev) => new Map(prev).set(id, bookmark));
+		setOverrides((prev) =>
+			new Map(prev).set(id, { ...prev.get(id), screenshotUrl: null }),
+		);
 		// Background revalidate page 1, same as patchRow above.
 		mutate();
 	}
