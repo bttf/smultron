@@ -627,6 +627,23 @@ export function Feed() {
 		mutate();
 	}
 
+	// RED-206 (SPEC §15.2): drop this row's page screenshot. The response is the
+	// updated bare row, so it lands in `overrides` exactly like a PATCH — which
+	// is what makes the shelf card revert to the plain style at once, since the
+	// shelf applies `overrides` too.
+	async function clearScreenshot(id: number) {
+		const res = await fetch(`/api/bookmarks/${id}/screenshot`, {
+			method: "DELETE",
+		});
+		if (!res.ok) {
+			throw new Error(`request failed (${res.status})`);
+		}
+		const { bookmark } = (await res.json()) as { bookmark: ApiBookmark };
+		setOverrides((prev) => new Map(prev).set(id, bookmark));
+		// Background revalidate page 1, same as patchRow above.
+		mutate();
+	}
+
 	async function deleteHighlight(bookmarkId: number, highlightId: number) {
 		const res = await fetch(`/api/highlights/${highlightId}`, {
 			method: "DELETE",
@@ -1174,6 +1191,7 @@ export function Feed() {
 								tagSuggestions={tagSuggestions}
 								onPatch={patchRow}
 								onDeleteHighlight={deleteHighlight}
+								onClearScreenshot={clearScreenshot}
 								className="pl-4"
 							/>
 						</Fragment>
@@ -1231,6 +1249,7 @@ export function Feed() {
 									onToggleTag={toggleTag}
 									onPatch={patchRow}
 									onDeleteHighlight={deleteHighlight}
+									onClearScreenshot={clearScreenshot}
 								/>
 							))}
 						</div>

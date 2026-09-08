@@ -128,6 +128,7 @@ export function BookmarkEditor({
 	tagSuggestions,
 	onPatch,
 	onDeleteHighlight,
+	onClearScreenshot,
 	className,
 }: {
 	bookmark: ApiBookmark;
@@ -136,6 +137,11 @@ export function BookmarkEditor({
 	tagSuggestions: string[];
 	onPatch: PatchFn;
 	onDeleteHighlight: (bookmarkId: number, highlightId: number) => Promise<void>;
+	/**
+	 * RED-206 (SPEC §15.2): drop the row's page screenshot. Rendered only for a
+	 * row that HAS one, so the panel never offers to remove nothing.
+	 */
+	onClearScreenshot: (bookmarkId: number) => Promise<void>;
 	/**
 	 * m22: the ONE thing the two mount points differ on — the log indents the
 	 * panel past its gutter (`pl-11`), the shelf runs it full-width (`pl-4`).
@@ -228,8 +234,53 @@ export function BookmarkEditor({
 				>
 					{archivedView ? "Restore" : "Archive"}
 				</button>
+				{/* RED-206: only a row that HAS a screenshot can lose one. */}
+				{bookmark.screenshotUrl !== null ? (
+					<ClearScreenshotButton
+						onClear={() => onClearScreenshot(bookmark.id)}
+					/>
+				) : null}
 			</div>
 		</div>
+	);
+}
+
+// "Clear screenshot" (RED-206, SPEC §15.2). No confirm dialog: the capture is
+// re-takeable — the row goes back to being eligible for an upload the moment
+// its path is null — so a mis-click costs one page visit, not data.
+//
+// In-flight the button goes readOnly-ish (disabled) so a double click cannot
+// fire two DELETEs; a failure says so inline rather than silently leaving the
+// card unchanged.
+function ClearScreenshotButton({ onClear }: { onClear: () => Promise<void> }) {
+	const [busy, setBusy] = useState(false);
+	const [failed, setFailed] = useState(false);
+
+	async function run() {
+		if (busy) {
+			return;
+		}
+		setBusy(true);
+		setFailed(false);
+		try {
+			await onClear();
+		} catch {
+			setFailed(true);
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	return (
+		<button
+			type="button"
+			onClick={run}
+			disabled={busy}
+			title="Remove the page screenshot from this bookmark"
+			className="rounded-md border border-border bg-card px-3 py-1 text-[11.5px] text-[var(--log-chip-fg)] hover:bg-[var(--log-soft)] disabled:opacity-60"
+		>
+			{failed ? "Couldn't clear" : "Clear screenshot"}
+		</button>
 	);
 }
 

@@ -37,8 +37,16 @@ import { isTrackableUrl, type TrackedEntry } from "./trackedCache";
  * photographing it. `complete` fires at the load event; late layout, web
  * fonts and above-the-fold images routinely land after it, and a screenshot
  * of a half-painted page is worse than none.
+ *
+ * 2500 ms, not the 1000 ms this shipped with (RED-206): a client-rendered app
+ * — Linear is the case that forced this — reports `complete` with nothing but
+ * an empty shell on screen, and the shorter settle filed a blank page
+ * PERMANENTLY, since the upload endpoint keeps the first screenshot it gets.
+ * The cost of waiting longer is only a lost attempt when the user navigates
+ * on within the window; the cost of not waiting is a card that stays blank.
+ * The byte-floor guard in `screenshot.ts` catches what still slips through.
  */
-export const SCREENSHOT_SETTLE_MS = 1000;
+export const SCREENSHOT_SETTLE_MS = 2500;
 
 /** The `tabs.onUpdated` facts the handler needs. */
 export interface TabCompleteEvent {

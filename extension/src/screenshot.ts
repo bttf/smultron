@@ -38,6 +38,24 @@ export const SCREENSHOT_RETRY_QUALITY = 0.6;
 /** Byte cap on the encoded JPEG (1 MiB), well under the server's 2 MiB. */
 export const SCREENSHOT_MAX_BYTES = 1_048_576;
 
+/**
+ * Byte FLOOR (12 KiB) below which a wide capture is treated as a blank page
+ * (RED-206). A JPEG of a real page at ≥ 1000 px carries text, chrome and
+ * imagery and does not compress this far; an empty shell — a client-rendered
+ * app photographed before it paints — encodes to a few KB of flat colour.
+ * Since the server keeps the FIRST screenshot it is given, a blank one is
+ * permanent, so the floor is worth the occasional genuinely plain page.
+ */
+export const SCREENSHOT_MIN_BYTES = 12_288;
+
+/**
+ * Width at which the floor applies. A small viewport (a narrow window, a
+ * side-by-side split) legitimately encodes small, and there is no blank-page
+ * inference to draw from it — so the guard only judges captures wide enough
+ * for the reasoning to hold.
+ */
+export const SCREENSHOT_MIN_BYTES_WIDTH = 1000;
+
 /** The fields of `chrome.tabs.Tab` this reads. */
 export interface TabSnapshot {
 	url?: string;
@@ -63,6 +81,13 @@ export type CaptureVisibleTab = (
 export interface EncodedJpeg {
 	base64: string;
 	byteLength: number;
+	/**
+	 * Pixel width of the image these bytes encode — the downscale target, or the
+	 * source bitmap's own width when Chrome's bytes were kept as they are. Read
+	 * by the blank-page floor, which only judges captures at least
+	 * SCREENSHOT_MIN_BYTES_WIDTH wide.
+	 */
+	width: number;
 }
 
 /**
@@ -125,11 +150,25 @@ export function dataUrlToBase64(dataUrl: string): string {
 }
 
 /**
+ * Whether an encode looks like a photograph of a blank page (RED-206): under
+ * the byte floor AND wide enough for that to mean something. Both halves are
+ * required — a narrow viewport encodes small for honest reasons, and a wide
+ * capture of a real page does not encode this small.
+ */
+export function looksBlank(encoded: EncodedJpeg): boolean {
+	return (
+		encoded.byteLength < SCREENSHOT_MIN_BYTES &&
+		encoded.width >= SCREENSHOT_MIN_BYTES_WIDTH
+	);
+}
+
+/**
  * The base64 JPEG (no `data:` prefix) of the tab showing exactly `url`, or
  * undefined when there is nothing to capture: a non-http(s) URL, no ACTIVE tab
  * on that URL (a bookmark made from the manager, a drag, or another device's
- * sync has no visible page to photograph), a capture Chrome refused, or an
- * image that stays over the byte cap even at reduced quality.
+ * sync has no visible page to photograph), a capture Chrome refused, an image
+ * that stays over the byte cap even at reduced quality, or one that falls under
+ * the blank-page byte floor.
  *
  * Never throws — a screenshot is a nicety and must not disturb the sync entry
  * it rides behind.
@@ -154,14 +193,18 @@ export async function captureForUrl(
 		});
 		if (typeof dataUrl !== "string" || dataUrl === "") return undefined;
 
-		const encoded = await deps.encodeJpeg(dataUrl, SCREENSHOT_JPEG_QUALITY);
-		if (encoded.byteLength <= SCREENSHOT_MAX_BYTES)
-			return encoded.base64 === "" ? undefined : encoded.base64;
+		let encoded = await deps.encodeJpeg(dataUrl, SCREENSHOT_JPEG_QUALITY);
+		if (encoded.byteLength > SCREENSHOT_MAX_BYTES) {
+			// Over the cap: one retry at reduced quality, then give up.
+			encoded = await deps.encodeJpeg(dataUrl, SCREENSHOT_RETRY_QUALITY);
+			if (encoded.byteLength > SCREENSHOT_MAX_BYTES) return undefined;
+		}
 
-		// Over the cap: one retry at reduced quality, then give up.
-		const retried = await deps.encodeJpeg(dataUrl, SCREENSHOT_RETRY_QUALITY);
-		if (retried.byteLength > SCREENSHOT_MAX_BYTES) return undefined;
-		return retried.base64 === "" ? undefined : retried.base64;
+		// The floor is checked on whichever encode we settled on, so a blank
+		// page is refused on the save-time path and the backfill path alike.
+		if (looksBlank(encoded)) return undefined;
+
+		return encoded.base64 === "" ? undefined : encoded.base64;
 	} catch {
 		// A rejected query/capture/encode, or a torn-down extension context.
 		return undefined;

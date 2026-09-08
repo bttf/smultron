@@ -21,6 +21,7 @@ import * as schema from "../db/schema";
 import { bookmarks } from "../db/schema";
 import {
 	addBookmark,
+	clearScreenshot,
 	DuplicateUrlError,
 	getBookmarkByUrl,
 	getBookmarkForScreenshot,
@@ -2300,5 +2301,101 @@ describe("getBookmarkForScreenshot (m23)", () => {
 		expect(
 			await getBookmarkForScreenshot(db, USER_B, "https://a.com/1"),
 		).toBeNull();
+	});
+});
+
+describe("clearScreenshot (RED-206)", () => {
+	useStorageEnv();
+
+	it("nulls the path and hands back the object to delete", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		const result = await clearScreenshot(db, USER_A, id);
+
+		expect(result?.clearedPath).toBe(SHOT_PATH);
+		expect(result?.bookmark.id).toBe(id);
+		expect(result?.bookmark.screenshotUrl).toBeNull();
+		expect(result?.bookmark).not.toHaveProperty("screenshotPath");
+		expect((await rawRow(id)).screenshotPath).toBeNull();
+	});
+
+	it("is idempotent: a row with no screenshot succeeds with nothing to delete", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+
+		const first = await clearScreenshot(db, USER_A, id);
+		expect(first?.clearedPath).toBeNull();
+		expect(first?.bookmark.screenshotUrl).toBeNull();
+
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+		await clearScreenshot(db, USER_A, id);
+		const second = await clearScreenshot(db, USER_A, id);
+
+		expect(second?.clearedPath).toBeNull();
+		expect((await rawRow(id)).screenshotPath).toBeNull();
+	});
+
+	it("is user-scoped: another user's row is a miss, not a write", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		expect(await clearScreenshot(db, USER_B, id)).toBeNull();
+		expect((await rawRow(id)).screenshotPath).toBe(SHOT_PATH);
+	});
+
+	it("reports a miss for an id that doesn't exist", async () => {
+		expect(await clearScreenshot(db, USER_A, 999_999)).toBeNull();
+	});
+
+	it("frees the slot for a later upload (keep-first sees an empty row again)", async () => {
+		const id = await seedOne({ url: "https://a.com/1" });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+		await clearScreenshot(db, USER_A, id);
+
+		expect(await setScreenshotIfMissing(db, USER_A, id, "next/shot.jpg")).toBe(
+			true,
+		);
+		expect((await rawRow(id)).screenshotPath).toBe("next/shot.jpg");
+	});
+
+	// Hard rule #1: removing a screenshot is no more a live capture than
+	// adding one was.
+	it("leaves every other column byte-identical", async () => {
+		const id = await seedOne({
+			url: "https://a.com/1",
+			title: "Title",
+			tags: ["t"],
+			note: "note",
+			faviconUrl: "https://a.com/icon.png",
+			createdAt: new Date("2026-01-01T00:00:00.000Z"),
+			updatedAt: new Date("2026-02-02T03:04:05.678Z"),
+			pinnedAt: new Date("2026-03-03T00:00:00.000Z"),
+			pinPosition: 0,
+		});
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+		const before = await rawRow(id);
+
+		await clearScreenshot(db, USER_A, id);
+
+		const after = await rawRow(id);
+		expect({ ...after, screenshotPath: null }).toEqual({
+			...before,
+			screenshotPath: null,
+		});
+		expect(after.screenshotPath).toBeNull();
+		expect(after.updatedAt).toEqual(new Date("2026-02-02T03:04:05.678Z"));
+		expect(after.pinnedAt).toEqual(new Date("2026-03-03T00:00:00.000Z"));
+		expect(after.pinPosition).toBe(0);
+	});
+
+	it("clears an archived row without disturbing archived_at", async () => {
+		const archivedAt = new Date("2026-04-01T00:00:00.000Z");
+		const id = await seedOne({ url: "https://a.com/1", archivedAt });
+		await setScreenshotIfMissing(db, USER_A, id, SHOT_PATH);
+
+		expect((await clearScreenshot(db, USER_A, id))?.clearedPath).toBe(
+			SHOT_PATH,
+		);
+		expect((await rawRow(id)).archivedAt).toEqual(archivedAt);
 	});
 });

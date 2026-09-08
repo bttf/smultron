@@ -14,9 +14,12 @@ import {
 	dataUrlToBase64,
 	type EncodeJpeg,
 	fitWidth,
+	looksBlank,
 	type QueryAllTabs,
 	SCREENSHOT_MAX_BYTES,
 	SCREENSHOT_MAX_WIDTH,
+	SCREENSHOT_MIN_BYTES,
+	SCREENSHOT_MIN_BYTES_WIDTH,
 	type ScreenshotCaptureDeps,
 	type TabSnapshot,
 } from "./screenshot";
@@ -28,14 +31,20 @@ function tabs(...list: TabSnapshot[]): QueryAllTabs {
 	return async () => list;
 }
 
-/** An encoder that reports whatever byte length the test asks for. */
+/**
+ * An encoder that reports whatever byte length the test asks for, at a width
+ * wide enough to keep the blank-page floor out of the byte-cap tests (the
+ * floor's own tests set the width deliberately).
+ */
 function fakeEncoder(
 	sizes: Record<number, number>,
 	base64 = "AAAA",
+	width = SCREENSHOT_MAX_WIDTH,
 ): ReturnType<typeof vi.fn<EncodeJpeg>> {
 	return vi.fn<EncodeJpeg>(async (_dataUrl, quality) => ({
 		base64,
 		byteLength: sizes[quality] ?? 0,
+		width,
 	}));
 }
 
@@ -47,7 +56,7 @@ function deps(overrides: Partial<ScreenshotCaptureDeps> = {}) {
 			windowId: 1,
 		}),
 		captureVisibleTab: vi.fn(async () => DATA_URL),
-		encodeJpeg: fakeEncoder({ 0.8: 1000 }),
+		encodeJpeg: fakeEncoder({ 0.8: 100_000 }),
 		...overrides,
 	} satisfies ScreenshotCaptureDeps;
 }
@@ -209,7 +218,7 @@ describe("captureForUrl failure paths (never throws)", () => {
 		).resolves.toBeUndefined();
 		await expect(
 			captureForUrl(
-				deps({ encodeJpeg: fakeEncoder({ 0.8: 1000 }, "") }),
+				deps({ encodeJpeg: fakeEncoder({ 0.8: 100_000 }, "") }),
 				URL_UNDER_TEST,
 			),
 		).resolves.toBeUndefined();
@@ -253,5 +262,70 @@ describe("captureForUrl byte cap (SPEC §15.3)", () => {
 	it("keeps the downscale bound and the cap in the documented shape", () => {
 		expect(SCREENSHOT_MAX_WIDTH).toBe(1280);
 		expect(SCREENSHOT_MAX_BYTES).toBe(1_048_576);
+	});
+});
+
+describe("captureForUrl blank-page floor (RED-206)", () => {
+	it("gives up on a wide capture that encodes under the floor", async () => {
+		// A client-rendered app photographed before it paints: 1280 px of flat
+		// colour compresses to a few KB. The server keeps the FIRST screenshot,
+		// so filing this one would make the blank permanent.
+		const encodeJpeg = fakeEncoder({ 0.8: 7_000 }, "AAAA", 1280);
+
+		expect(
+			await captureForUrl(deps({ encodeJpeg }), URL_UNDER_TEST),
+		).toBeUndefined();
+		// The floor is not a size problem: no reduced-quality retry is spent.
+		expect(encodeJpeg).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a wide capture that carries real content", async () => {
+		const encodeJpeg = fakeEncoder({ 0.8: 30_000 }, "AAAA", 1280);
+
+		expect(await captureForUrl(deps({ encodeJpeg }), URL_UNDER_TEST)).toBe(
+			"AAAA",
+		);
+	});
+
+	it("keeps a small capture at the same byte count (narrow viewports encode small)", async () => {
+		const encodeJpeg = fakeEncoder({ 0.8: 7_000 }, "AAAA", 640);
+
+		expect(await captureForUrl(deps({ encodeJpeg }), URL_UNDER_TEST)).toBe(
+			"AAAA",
+		);
+	});
+
+	it("applies the floor to the reduced-quality encode too", async () => {
+		// Contrived — a capture over 1 MiB does not re-encode to 7 KB — but the
+		// guard must judge whatever bytes are actually about to be uploaded.
+		const encodeJpeg = fakeEncoder({}, "AAAA", 1280);
+		encodeJpeg.mockImplementation(async (_dataUrl, quality) => ({
+			base64: "AAAA",
+			byteLength: quality === 0.8 ? SCREENSHOT_MAX_BYTES + 1 : 7_000,
+			width: 1280,
+		}));
+
+		expect(
+			await captureForUrl(deps({ encodeJpeg }), URL_UNDER_TEST),
+		).toBeUndefined();
+		expect(encodeJpeg).toHaveBeenCalledTimes(2);
+	});
+
+	it("judges bytes and width together", () => {
+		const at = (byteLength: number, width: number) =>
+			looksBlank({ base64: "AAAA", byteLength, width });
+
+		// Exactly at the floor is content; one byte under it is not.
+		expect(at(SCREENSHOT_MIN_BYTES, SCREENSHOT_MIN_BYTES_WIDTH)).toBe(false);
+		expect(at(SCREENSHOT_MIN_BYTES - 1, SCREENSHOT_MIN_BYTES_WIDTH)).toBe(true);
+		// Exactly at the width bound is judged; one pixel under it is exempt.
+		expect(at(SCREENSHOT_MIN_BYTES - 1, SCREENSHOT_MIN_BYTES_WIDTH - 1)).toBe(
+			false,
+		);
+	});
+
+	it("keeps the floor in the documented shape", () => {
+		expect(SCREENSHOT_MIN_BYTES).toBe(12_288);
+		expect(SCREENSHOT_MIN_BYTES_WIDTH).toBe(1000);
 	});
 });

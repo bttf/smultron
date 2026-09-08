@@ -80,6 +80,7 @@ export function LogRow({
 	onToggleTag,
 	onPatch,
 	onDeleteHighlight,
+	onClearScreenshot,
 }: {
 	bookmark: ApiBookmark;
 	archivedView: boolean;
@@ -105,6 +106,8 @@ export function LogRow({
 	onToggleTag: (tag: string) => void;
 	onPatch: PatchFn;
 	onDeleteHighlight: (bookmarkId: number, highlightId: number) => Promise<void>;
+	/** RED-206: passed straight through to the panel's "Clear screenshot". */
+	onClearScreenshot: (bookmarkId: number) => Promise<void>;
 }) {
 	const host = hostOf(bookmark.url);
 	// m22: pinned rows are back in the feed log (SPEC §8/§9) — and a search has
@@ -250,6 +253,7 @@ export function LogRow({
 					tagSuggestions={tagSuggestions}
 					onPatch={onPatch}
 					onDeleteHighlight={onDeleteHighlight}
+					onClearScreenshot={onClearScreenshot}
 				/>
 			) : null}
 		</Fragment>

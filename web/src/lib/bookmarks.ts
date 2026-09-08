@@ -970,3 +970,68 @@ export async function setScreenshotIfMissing(
 
 	return rows.length > 0;
 }
+
+/**
+ * Drops a bookmark's screenshot (RED-206, SPEC §15.2 — the site's "Clear
+ * screenshot"): `screenshot_path` back to NULL, so the card reverts to the
+ * plain style and the next upload for that row is accepted by the keep-first
+ * rule again. The ONLY overwrite path; the upload endpoint still never
+ * replaces a stored screenshot.
+ *
+ * Returns null when the row is not the caller's or does not exist (route:
+ * 404). Otherwise the row as it now stands plus `clearedPath` — the object the
+ * caller should delete from Storage, or null when there was nothing to clear.
+ * A row with no screenshot is therefore a successful no-op: the action is
+ * IDEMPOTENT, since a double click must not turn into an error.
+ *
+ * Read-then-write inside one transaction, because RETURNING reports the NEW
+ * row and the OLD path is what Storage needs. No upload can slip in between:
+ * `setScreenshotIfMissing` only ever writes a row whose path is NULL, and the
+ * path read here is not. A concurrent CLEAR can — its UPDATE wins, ours
+ * matches nothing, and both hand the same object to a delete that is
+ * idempotent anyway.
+ *
+ * CRITICAL (Hard rule #1): `screenshot_path` is the ONLY column assigned.
+ * `updated_at`, `pinned_at`, `pin_position` and `archived_at` are
+ * byte-identical before and after — removing a screenshot is no more a live
+ * capture than adding one was.
+ */
+export async function clearScreenshot(
+	db: BookmarksDb,
+	userId: string,
+	bookmarkId: number,
+): Promise<{ bookmark: BookmarkRow; clearedPath: string | null } | null> {
+	const cond = and(eq(bookmarks.id, bookmarkId), eq(bookmarks.userId, userId));
+
+	return db.transaction(async (tx) => {
+		const [current] = await tx
+			.select({
+				...BOOKMARK_COLUMNS(),
+				screenshotPath: bookmarks.screenshotPath,
+			})
+			.from(bookmarks)
+			.where(cond)
+			.limit(1);
+		if (!current) {
+			return null;
+		}
+
+		const { screenshotPath, ...bookmark } = current;
+		if (screenshotPath === null) {
+			return { bookmark, clearedPath: null };
+		}
+
+		const rows = await tx
+			.update(bookmarks)
+			.set({ screenshotPath: null })
+			.where(and(cond, isNotNull(bookmarks.screenshotPath)))
+			.returning(BOOKMARK_COLUMNS());
+
+		// `rows` is empty only when a concurrent clear got there first, in which
+		// case the row has no screenshot either way.
+		return {
+			bookmark: rows[0] ?? { ...bookmark, screenshotUrl: null },
+			clearedPath: screenshotPath,
+		};
+	});
+}
