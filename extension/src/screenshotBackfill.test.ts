@@ -208,6 +208,13 @@ describe("createScreenshotBackfill — eligibility", () => {
 });
 
 describe("createScreenshotBackfill — the settle re-check", () => {
+	// RED-206: 2500 ms, up from the 1000 ms this shipped with. An SPA reports
+	// `status: "complete"` with an empty shell on screen, and the shorter settle
+	// filed blank pages permanently (the server keeps the first screenshot).
+	it("settles for 2500 ms", () => {
+		expect(SCREENSHOT_SETTLE_MS).toBe(2500);
+	});
+
 	it("waits SCREENSHOT_SETTLE_MS, then re-reads the tab, then captures", async () => {
 		const { deps, complete } = harness({ cached: NEEDS_SHOT });
 		await complete();

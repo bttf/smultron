@@ -178,7 +178,11 @@ async function downscaleJpeg(
 		const target = fitWidth(bitmap.width, bitmap.height, SCREENSHOT_MAX_WIDTH);
 		if (target.width === bitmap.width && quality >= SCREENSHOT_JPEG_QUALITY) {
 			const base64 = dataUrlToBase64(dataUrl);
-			return { base64, byteLength: base64ByteLength(base64) };
+			return {
+				base64,
+				byteLength: base64ByteLength(base64),
+				width: bitmap.width,
+			};
 		}
 		const canvas = new OffscreenCanvas(target.width, target.height);
 		const ctx = canvas.getContext("2d");
@@ -186,7 +190,13 @@ async function downscaleJpeg(
 		ctx.drawImage(bitmap, 0, 0, target.width, target.height);
 		const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
 		const bytes = new Uint8Array(await blob.arrayBuffer());
-		return { base64: bytesToBase64(bytes), byteLength: bytes.length };
+		return {
+			base64: bytesToBase64(bytes),
+			byteLength: bytes.length,
+			// The width these bytes actually encode — what the blank-page floor
+			// in src/screenshot.ts judges.
+			width: target.width,
+		};
 	} finally {
 		bitmap.close();
 	}
