@@ -151,6 +151,31 @@ export function dialIconSources(dial: SpeedDial): string[] {
 	return [dial.iconUrl, service];
 }
 
+/**
+ * Whether two lists are the same row (SPEC §16.4) — same length, and every
+ * position the same id, name, url and icon.
+ *
+ * The new tab page's echo skip: its own commit comes back through
+ * `storage.onChanged`, and a list equal to what is already on screen must paint
+ * nothing rather than rebuild the row it just arranged.
+ */
+export function sameDials(
+	a: readonly SpeedDial[],
+	b: readonly SpeedDial[],
+): boolean {
+	if (a.length !== b.length) return false;
+	return a.every((dial, index) => {
+		const other = b[index];
+		return (
+			other !== undefined &&
+			dial.id === other.id &&
+			dial.name === other.name &&
+			dial.url === other.url &&
+			dial.iconUrl === other.iconUrl
+		);
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Storage.
 
@@ -167,23 +192,8 @@ function asDial(raw: unknown): SpeedDial | undefined {
 	return dial;
 }
 
-/**
- * The stored list, in display order.
- *
- * TOTAL by contract, like `readSnapshot` (SPEC §16.1): a missing key, a value
- * from an older build, junk, or a storage failure all read as an empty list,
- * and one unusable entry costs that entry rather than the row. The new tab
- * page paints this before anything else on EVERY tab — it must never throw.
- */
-export async function readSpeedDial(
-	storage: KeyValueStorage,
-): Promise<SpeedDial[]> {
-	let raw: unknown;
-	try {
-		raw = await storage.get(SPEED_DIAL_KEY);
-	} catch {
-		return [];
-	}
+/** The stored value → a usable list. Shared by both reads below. */
+function parseDials(raw: unknown): SpeedDial[] {
 	if (typeof raw !== "object" || raw === null) return [];
 	const value = (raw as Record<string, unknown>).dials;
 	if (!Array.isArray(value)) return [];
@@ -199,6 +209,38 @@ export async function readSpeedDial(
 		if (dials.length === SPEED_DIAL_CAP) break;
 	}
 	return dials;
+}
+
+/**
+ * The read every WRITER uses (SPEC §16.1): identical to `readSpeedDial` except
+ * that a rejected `storage.get` propagates.
+ *
+ * A total read feeding a read-modify-write would turn one transient storage
+ * failure into an erased list — the write would build on "no dials" and store
+ * exactly that. Failing the write instead leaves the stored list alone and
+ * lets the page show its `couldn't save` state.
+ */
+async function readDialsStrict(storage: KeyValueStorage): Promise<SpeedDial[]> {
+	return parseDials(await storage.get(SPEED_DIAL_KEY));
+}
+
+/**
+ * The stored list, in display order.
+ *
+ * TOTAL by contract, like `readSnapshot` (SPEC §16.1): a missing key, a value
+ * from an older build, junk, or a storage failure all read as an empty list,
+ * and one unusable entry costs that entry rather than the row. The new tab
+ * page paints this before anything else on EVERY tab — it must never throw.
+ * READERS only: see `readDialsStrict` for what the writers use.
+ */
+export async function readSpeedDial(
+	storage: KeyValueStorage,
+): Promise<SpeedDial[]> {
+	try {
+		return await readDialsStrict(storage);
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -229,7 +271,7 @@ export async function addDial(
 ): Promise<AddDialResult> {
 	const parsed = parseDialUrl(draft);
 	if (!parsed.ok) return parsed;
-	const dials = await readSpeedDial(storage);
+	const dials = await readDialsStrict(storage);
 	if (dials.some((dial) => dial.url === parsed.url)) {
 		return { ok: false, empty: false, error: "already added" };
 	}
@@ -254,7 +296,7 @@ export async function removeDial(
 	storage: KeyValueStorage,
 	id: string,
 ): Promise<SpeedDial[]> {
-	const dials = await readSpeedDial(storage);
+	const dials = await readDialsStrict(storage);
 	const next = dials.filter((dial) => dial.id !== id);
 	if (next.length === dials.length) return dials;
 	await writeDials(storage, next);
@@ -275,7 +317,7 @@ export async function reorderSpeedDial(
 	storage: KeyValueStorage,
 	ids: readonly string[],
 ): Promise<SpeedDial[]> {
-	const dials = await readSpeedDial(storage);
+	const dials = await readDialsStrict(storage);
 	const byId = new Map(dials.map((dial) => [dial.id, dial]));
 	const next: SpeedDial[] = [];
 	const placed = new Set<string>();
@@ -357,22 +399,46 @@ function decodeEntities(text: string): string {
  * the row.
  */
 export function extractTitle(html: string): string | undefined {
-	const match = /<title\b[^>]*>([\s\S]*?)<\/title/i.exec(
-		html.slice(0, HTML_SCAN_LIMIT),
-	);
-	if (match === null) return undefined;
-	const text = decodeEntities(match[1] ?? "")
-		.replace(/\s+/g, " ")
-		.trim();
-	if (text === "") return undefined;
-	return text.slice(0, DIAL_NAME_LIMIT);
+	// INDEX SEARCH, not a lazy regex (SPEC §16.2): `<title\b[^>]*>([\s\S]*?)<\/title`
+	// re-scans the whole document from every `<title`-shaped position, so half a
+	// megabyte of `<title>` with no closing tag costs seconds on the Options
+	// page's main thread. `indexOf` walks each region once.
+	const head = html.slice(0, HTML_SCAN_LIMIT);
+	const lower = head.toLowerCase();
+	let from = 0;
+	for (;;) {
+		const open = lower.indexOf("<title", from);
+		if (open === -1) return undefined;
+		// The `\b` of the old pattern: `<titlebar>` is a different element.
+		if (isWordCode(lower.charCodeAt(open + 6))) {
+			from = open + 6;
+			continue;
+		}
+		const gt = lower.indexOf(">", open + 6);
+		if (gt === -1) return undefined;
+		const close = lower.indexOf("</title", gt + 1);
+		if (close === -1) return undefined;
+		const text = decodeEntities(head.slice(gt + 1, close))
+			.replace(/\s+/g, " ")
+			.trim();
+		if (text === "") return undefined;
+		return text.slice(0, DIAL_NAME_LIMIT);
+	}
 }
 
-/** `rel="a b"`, `rel=a`, `REL='a'` — attributes of one tag, lowercased keys. */
+/**
+ * `rel="a b"`, `rel=a`, `REL='a'` — attributes of one tag, lowercased keys.
+ *
+ * The name must start at the tag body's start or right after whitespace, `/`
+ * or a closing quote. Without that anchor the engine starts a fresh attempt at
+ * every character of a long unbroken word run, walking it to the end each time
+ * before failing on the missing `=` — quadratic, and 128 KiB of `a` took nine
+ * seconds. Anchored, only real attribute positions are tried.
+ */
 function tagAttributes(tag: string): Map<string, string> {
 	const attributes = new Map<string, string>();
 	const pattern =
-		/([a-z_:][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+		/(?:^|[\s/"'])([a-z_:][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
 	let match = pattern.exec(tag);
 	while (match !== null) {
 		const name = (match[1] ?? "").toLowerCase();
@@ -382,6 +448,53 @@ function tagAttributes(tag: string): Map<string, string> {
 		match = pattern.exec(tag);
 	}
 	return attributes;
+}
+
+/**
+ * Longest `<link …>` body walked (SPEC §16.2). A tag past it is SKIPPED, not
+ * truncated: two kilobytes is an order of magnitude more than any real link
+ * tag, so anything longer is padding, and refusing it caps every per-tag cost
+ * below — including `tagAttributes` — at a constant.
+ */
+const TAG_BODY_LIMIT = 2048;
+
+/** `\b` as the regex engine means it: a word character ends an identifier. */
+function isWordCode(code: number): boolean {
+	return (
+		(code >= 48 && code <= 57) || // 0-9
+		(code >= 65 && code <= 90) || // A-Z
+		(code >= 97 && code <= 122) || // a-z
+		code === 95 // _
+	);
+}
+
+/**
+ * Walk every `<link …>` body in one pass, bounded (SPEC §16.2).
+ *
+ * `/<link\b([^>]*)>/g` re-walks the rest of the document from every `<link`
+ * in it, which is quadratic on a page that opens a few thousand of them and
+ * closes none. Here the `>` cursor only ever moves FORWARD, so the whole scan
+ * costs one pass whatever the input looks like.
+ */
+function scanLinkTags(head: string, visit: (body: string) => void): void {
+	const opens = /<link\b/gi;
+	let gt = head.indexOf(">");
+	let open = opens.exec(head);
+	while (open !== null) {
+		const bodyStart = open.index + open[0].length;
+		while (gt !== -1 && gt < bodyStart) gt = head.indexOf(">", gt + 1);
+		// No closing bracket left anywhere: nothing after this can be a tag.
+		if (gt === -1) return;
+		if (gt - bodyStart <= TAG_BODY_LIMIT) {
+			visit(head.slice(bodyStart, gt));
+			opens.lastIndex = gt + 1;
+		} else {
+			// An overlong tag is skipped; scanning resumes INSIDE it, so a real
+			// `<link>` buried in the padding is still found.
+			opens.lastIndex = bodyStart;
+		}
+		open = opens.exec(head);
+	}
 }
 
 /** The largest edge a `sizes` attribute declares; 0 when there isn't one. */
@@ -417,35 +530,71 @@ export function extractTouchIcon(
 ): string | undefined {
 	let best: string | undefined;
 	let bestEdge = -1;
-	const head = html.slice(0, HTML_SCAN_LIMIT);
-	const pattern = /<link\b([^>]*)>/gi;
-	let match = pattern.exec(head);
-	while (match !== null) {
-		const attributes = tagAttributes(match[1] ?? "");
+	scanLinkTags(html.slice(0, HTML_SCAN_LIMIT), (body) => {
+		const attributes = tagAttributes(body);
 		const rel = (attributes.get("rel") ?? "").toLowerCase().trim().split(/\s+/);
 		const isTouchIcon =
 			rel.includes("apple-touch-icon") ||
 			rel.includes("apple-touch-icon-precomposed");
 		const href = attributes.get("href");
-		if (isTouchIcon && href !== undefined && href.trim() !== "") {
-			const edge = largestSizeEdge(attributes.get("sizes"));
-			// Strictly greater, so the FIRST of equally sized tags wins.
-			if (edge > bestEdge) {
-				let resolved: string | undefined;
-				try {
-					resolved = new URL(decodeEntities(href.trim()), baseUrl).href;
-				} catch {
-					resolved = undefined;
-				}
-				if (isDialUrl(resolved)) {
-					best = resolved;
-					bestEdge = edge;
-				}
+		if (!isTouchIcon || href === undefined || href.trim() === "") return;
+		const edge = largestSizeEdge(attributes.get("sizes"));
+		// Strictly greater, so the FIRST of equally sized tags wins.
+		if (edge <= bestEdge) return;
+		let resolved: string | undefined;
+		try {
+			resolved = new URL(decodeEntities(href.trim()), baseUrl).href;
+		} catch {
+			resolved = undefined;
+		}
+		if (isDialUrl(resolved)) {
+			best = resolved;
+			bestEdge = edge;
+		}
+	});
+	return best;
+}
+
+/**
+ * The first `HTML_SCAN_LIMIT` characters of a response, and no more
+ * (SPEC §16.2).
+ *
+ * `response.text()` buffers whatever the server decides to send — an endless
+ * stream is an endless allocation on the Options page. So the body is read
+ * chunk by chunk and the reader CANCELLED at the limit, which also closes the
+ * connection. A test double (or any response without a readable `body`) falls
+ * back to `text()`, sliced.
+ */
+async function readBoundedHtml(response: Response): Promise<string> {
+	const body: ReadableStream<Uint8Array> | null | undefined = response.body;
+	if (
+		body === null ||
+		body === undefined ||
+		typeof body.getReader !== "function"
+	) {
+		return (await response.text()).slice(0, HTML_SCAN_LIMIT);
+	}
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	let html = "";
+	try {
+		while (html.length < HTML_SCAN_LIMIT) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			if (chunk.value !== undefined) {
+				html += decoder.decode(chunk.value, { stream: true });
 			}
 		}
-		match = pattern.exec(head);
+	} finally {
+		// Releases the connection. An already-errored or already-closed stream
+		// rejects here, and that is not news — the read result stands.
+		try {
+			await reader.cancel();
+		} catch {
+			// nothing to do: we are done with this body either way.
+		}
 	}
-	return best;
+	return html.slice(0, HTML_SCAN_LIMIT);
 }
 
 /**
@@ -477,7 +626,9 @@ export async function fetchDialMetadata(
 		if (!response.ok) return {};
 		const type = response.headers.get("content-type") ?? "";
 		if (!type.toLowerCase().includes("text/html")) return {};
-		const html = await response.text();
+		// The abort stays armed across this (`clearTimeout` is in `finally`), so
+		// a body that stalls half way through is cut off like a stalled header.
+		const html = await readBoundedHtml(response);
 		// The FINAL URL (SPEC §16.3): a redirect to `www.` must not leave a
 		// relative href resolving against the host that redirected away.
 		const baseUrl =
@@ -513,7 +664,7 @@ export async function fillDialMetadata(
 	metadata: DialMetadata,
 ): Promise<boolean> {
 	try {
-		const dials = await readSpeedDial(storage);
+		const dials = await readDialsStrict(storage);
 		const index = dials.findIndex((dial) => dial.id === id);
 		const dial = dials[index];
 		if (dial === undefined) return false;

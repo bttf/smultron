@@ -16,6 +16,7 @@ import {
 	reorderSpeedDial,
 	SPEED_DIAL_CAP,
 	type SpeedDial,
+	sameDials,
 } from "./speedDial";
 import { type KeyValueStorage, SPEED_DIAL_KEY } from "./types";
 
@@ -218,6 +219,11 @@ describe("dialIconSources", () => {
 		]);
 	});
 
+	it("lists a stored icon that IS the service URL only once", () => {
+		const service = dialIconUrl("https://example.com/");
+		expect(dialIconSources(dial({ iconUrl: service }))).toEqual([service]);
+	});
+
 	// The s2 endpoint the log rows use serves 16–32 px favicons (SPEC §16.3).
 	it("never offers the s2 favicon endpoint", () => {
 		for (const src of dialIconSources(
@@ -225,6 +231,33 @@ describe("dialIconSources", () => {
 		)) {
 			expect(src).not.toContain("s2/favicons");
 		}
+	});
+});
+
+describe("sameDials", () => {
+	const a = dial({ id: "a", url: "https://a.test/" });
+	const b = dial({ id: "b", url: "https://b.test/" });
+
+	it("is true for the same row, field for field", () => {
+		expect(sameDials([a, b], [{ ...a }, { ...b }])).toBe(true);
+		expect(sameDials([], [])).toBe(true);
+	});
+
+	it("is false on a different length or a different order", () => {
+		expect(sameDials([a, b], [a])).toBe(false);
+		expect(sameDials([a, b], [b, a])).toBe(false);
+	});
+
+	it("is false when a name, url or icon differs", () => {
+		expect(sameDials([a], [{ ...a, name: "Renamed" }])).toBe(false);
+		expect(sameDials([a], [{ ...a, url: "https://a.test/x" }])).toBe(false);
+		// A fill that landed is exactly the change the echo skip must NOT skip.
+		expect(sameDials([a], [{ ...a, iconUrl: "https://a.test/t.png" }])).toBe(
+			false,
+		);
+		expect(sameDials([{ ...a, iconUrl: "https://a.test/t.png" }], [a])).toBe(
+			false,
+		);
 	});
 });
 
@@ -463,6 +496,53 @@ describe("reorderSpeedDial", () => {
 	});
 });
 
+// A total read feeding a read-modify-write would store "no dials" the first
+// time `storage.get` hiccuped (SPEC §16.1): the WRITERS read strictly.
+describe("the strict read the writers use", () => {
+	function failingStorage(): KeyValueStorage & {
+		set: ReturnType<typeof vi.fn>;
+	} {
+		const set = vi.fn(async () => undefined);
+		return {
+			get: async () => {
+				throw new Error("storage is gone");
+			},
+			set,
+		};
+	}
+
+	it("fails addDial without writing", async () => {
+		const storage = failingStorage();
+		await expect(addDial(storage, "example.com", mintId)).rejects.toThrow(
+			"storage is gone",
+		);
+		expect(storage.set).not.toHaveBeenCalled();
+	});
+
+	it("fails removeDial without writing", async () => {
+		const storage = failingStorage();
+		await expect(removeDial(storage, "a")).rejects.toThrow("storage is gone");
+		expect(storage.set).not.toHaveBeenCalled();
+	});
+
+	it("fails reorderSpeedDial without writing", async () => {
+		const storage = failingStorage();
+		await expect(reorderSpeedDial(storage, ["a", "b"])).rejects.toThrow(
+			"storage is gone",
+		);
+		expect(storage.set).not.toHaveBeenCalled();
+	});
+
+	// The fill keeps its never-throws contract instead (SPEC §16.2).
+	it("makes fillDialMetadata return false without writing", async () => {
+		const storage = failingStorage();
+		await expect(
+			fillDialMetadata(storage, "a", { title: "Example" }),
+		).resolves.toBe(false);
+		expect(storage.set).not.toHaveBeenCalled();
+	});
+});
+
 describe("extractTitle", () => {
 	it("reads the first title element", () => {
 		expect(extractTitle("<html><head><title>One</title></head>")).toBe("One");
@@ -650,6 +730,64 @@ describe("extractTouchIcon", () => {
 	});
 });
 
+// The page being read is untrusted and the work runs on the Options page's
+// MAIN THREAD, so extraction has to stay linear (SPEC §16.2). The bounds here
+// are generous: the same inputs cost 9–18 s against the patterns these
+// replaced, and well under 10 ms against these.
+describe("linear-time extraction", () => {
+	const HOSTILE = 512 * 1024;
+	/** Wall time of one call. Generous by design — this catches seconds. */
+	function millis(run: () => void): number {
+		const started = performance.now();
+		run();
+		return performance.now() - started;
+	}
+
+	it("walks half a megabyte of unclosed <link tags without stalling", () => {
+		// The leading `<html>` matters: it gives the scan a closing bracket to
+		// start from, so the whole half megabyte is actually walked rather than
+		// short-circuited on "no `>` in the document at all".
+		const html = `<html>${"<link ".repeat(Math.ceil(HOSTILE / 6)).slice(0, HOSTILE)}`;
+		let result: string | undefined = "unset";
+		expect(
+			millis(() => {
+				result = extractTouchIcon(html, "https://example.com/");
+			}),
+		).toBeLessThan(1000);
+		expect(result).toBeUndefined();
+	});
+
+	it("skips a <link> tag whose body is one enormous word run", () => {
+		const html = `<link ${"a".repeat(HOSTILE)}>`;
+		let result: string | undefined = "unset";
+		expect(
+			millis(() => {
+				result = extractTouchIcon(html, "https://example.com/");
+			}),
+		).toBeLessThan(1000);
+		expect(result).toBeUndefined();
+	});
+
+	// Skipping the padding must not mean giving up on the rest of the document.
+	it("still finds a real tag sitting after an overlong one", () => {
+		const html = `<link ${"a".repeat(4096)}><link rel="apple-touch-icon" href="/t.png">`;
+		expect(extractTouchIcon(html, "https://example.com/")).toBe(
+			"https://example.com/t.png",
+		);
+	});
+
+	it("walks half a megabyte of unclosed <title> tags without stalling", () => {
+		const html = "<title>".repeat(Math.ceil(HOSTILE / 7)).slice(0, HOSTILE);
+		let result: string | undefined = "unset";
+		expect(
+			millis(() => {
+				result = extractTitle(html);
+			}),
+		).toBeLessThan(1000);
+		expect(result).toBeUndefined();
+	});
+});
+
 describe("fetchDialMetadata", () => {
 	it("sends one uncredentialed GET and returns the title and touch icon", async () => {
 		const fetchImpl = vi.fn(async () =>
@@ -736,6 +874,92 @@ describe("fetchDialMetadata", () => {
 				fetchImpl as unknown as typeof fetch,
 			),
 		).resolves.toEqual({});
+	});
+
+	// The body is a stranger's stream: it is read to the scan limit and no
+	// further, and the reader is cancelled there (SPEC §16.2).
+	it("stops an endless body at the scan limit and cancels the reader", async () => {
+		const chunk = new TextEncoder().encode("x".repeat(64 * 1024));
+		let pulls = 0;
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls += 1;
+				controller.enqueue(chunk);
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			url: "https://example.com/",
+			headers: new Headers({ "Content-Type": "text/html" }),
+			body,
+			text: async () => {
+				throw new Error("text() buffers everything — it must not be used");
+			},
+		}));
+		await expect(
+			fetchDialMetadata(
+				"https://example.com/",
+				fetchImpl as unknown as typeof fetch,
+			),
+		).resolves.toEqual({});
+		expect(cancelled).toBe(true);
+		// Eight 64 KiB chunks cover the limit; anything near the stream's real
+		// length would mean the cap was not applied.
+		expect(pulls).toBeLessThanOrEqual(HTML_SCAN_LIMIT / chunk.length + 2);
+	});
+
+	it("caps a body-less response at the scan limit too", async () => {
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			url: "https://example.com/",
+			headers: new Headers({ "Content-Type": "text/html" }),
+			// A test double, or any response Chrome hands over without a stream.
+			text: async () =>
+				`${"x".repeat(HTML_SCAN_LIMIT)}<link rel="apple-touch-icon" href="/t.png">`,
+		}));
+		await expect(
+			fetchDialMetadata(
+				"https://example.com/",
+				fetchImpl as unknown as typeof fetch,
+			),
+		).resolves.toEqual({});
+	});
+
+	it("is empty when the abort fires during the body read", async () => {
+		const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			const signal = init?.signal;
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					// A first chunk arrives, then the stream simply stalls — the
+					// 5 s budget covers the body, not just the headers.
+					controller.enqueue(new TextEncoder().encode("<title>Slow</title>"));
+					signal?.addEventListener("abort", () => {
+						controller.error(new DOMException("aborted", "AbortError"));
+					});
+				},
+			});
+			return {
+				ok: true,
+				url: "https://slow.test/",
+				headers: new Headers({ "Content-Type": "text/html" }),
+				body,
+			};
+		});
+		await expect(
+			fetchDialMetadata(
+				"https://slow.test/",
+				fetchImpl as unknown as typeof fetch,
+				{ timeoutMs: 5 },
+			),
+		).resolves.toEqual({});
+		const [, init] = firstCall(
+			fetchImpl as unknown as ReturnType<typeof vi.fn>,
+		);
+		expect(init.signal?.aborted).toBe(true);
 	});
 
 	it("is empty when the body read rejects", async () => {

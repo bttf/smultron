@@ -126,6 +126,34 @@ function setDialError(text: string): void {
 	dialErrorEl.textContent = text;
 }
 
+/**
+ * ONE promise chain over every dial WRITE — add, remove and the metadata
+ * write-back (SPEC §16.2), the same promise-chain mutex `createBrowseBuffer`
+ * uses.
+ *
+ * Each write is a read-modify-write, so two of them overlapping would have the
+ * second build on the list the first has not stored yet: a double-activated
+ * Add would store the URL twice, and a fill landing mid-add would write the
+ * pre-add list back. The chain always continues, success or failure, so a
+ * rejected write never wedges the section. The metadata FETCH stays outside —
+ * five seconds of network must not hold the queue.
+ */
+let dialWrites: Promise<unknown> = Promise.resolve();
+function enqueueDialWrite<T>(task: () => Promise<T>): Promise<T> {
+	const run = dialWrites.then(task, task);
+	dialWrites = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	return run;
+}
+
+/** A write that failed: say so, and put the stored list back on screen. */
+function onDialWriteFailed(): void {
+	setDialError("couldn't save");
+	void paintDials();
+}
+
 /** The first character of the name, once every icon source has failed. */
 function dialLetter(name: string): string {
 	return (Array.from(name)[0] ?? "").toUpperCase();
@@ -141,6 +169,9 @@ function dialIcon(dial: SpeedDial): HTMLElement {
 	let next = 0;
 	const img = el("img");
 	img.alt = "";
+	// A stored touch icon is a host the DIALLED site picked (SPEC §16.3) — it
+	// learns nothing about where the request came from.
+	img.referrerPolicy = "no-referrer";
 	img.addEventListener("error", () => {
 		const src = sources[next];
 		next += 1;
@@ -151,13 +182,9 @@ function dialIcon(dial: SpeedDial): HTMLElement {
 		}
 		img.src = src;
 	});
-	const first = sources[next];
+	// `dialIconSources` always yields at least the icon service.
+	img.src = sources[next] ?? "";
 	next += 1;
-	if (first === undefined) {
-		frame.textContent = dialLetter(dial.name);
-		return frame;
-	}
-	img.src = first;
 	frame.append(img);
 	return frame;
 }
@@ -173,9 +200,10 @@ function renderDialRow(dial: SpeedDial): HTMLElement {
 	remove.type = "button";
 	remove.setAttribute("aria-label", `Remove ${dial.name}`);
 	remove.addEventListener("click", () => {
-		void removeDial(storage, dial.id).then(renderDials, () => {
-			setDialError("couldn't save");
-		});
+		void enqueueDialWrite(() => removeDial(storage, dial.id)).then(
+			renderDials,
+			onDialWriteFailed,
+		);
 	});
 	row.append(dialIcon(dial), text, remove);
 	return row;
@@ -199,16 +227,19 @@ async function paintDials(): Promise<void> {
  * Add the draft, then try the page itself for a name and a touch icon
  * (SPEC §16.2). The row appears BEFORE the fetch: the add is already written,
  * and the metadata is decoration that may never arrive.
+ *
+ * The draft is read inside the queued write, so a second activation arriving
+ * while the first is still storing finds the cleared box and does nothing.
  */
 async function onAddDial(): Promise<void> {
 	setDialError("");
 	let result: Awaited<ReturnType<typeof addDial>>;
 	try {
-		result = await addDial(storage, dialUrlInput.value, () =>
-			crypto.randomUUID(),
+		result = await enqueueDialWrite(() =>
+			addDial(storage, dialUrlInput.value, () => crypto.randomUUID()),
 		);
 	} catch {
-		setDialError("couldn't save");
+		onDialWriteFailed();
 		return;
 	}
 	if (!result.ok) {
@@ -216,13 +247,17 @@ async function onAddDial(): Promise<void> {
 		if (!result.empty) setDialError(result.error satisfies DialError);
 		return;
 	}
+	const added = result.dial;
 	dialUrlInput.value = "";
 	renderDials(result.dials);
 
-	const metadata = await fetchDialMetadata(result.dial.url, fetch);
-	if (await fillDialMetadata(storage, result.dial.id, metadata)) {
-		await paintDials();
-	}
+	// Outside the chain: the fetch has five seconds of budget, and nothing else
+	// on this page should wait on a stranger's server.
+	const metadata = await fetchDialMetadata(added.url, fetch);
+	const filled = await enqueueDialWrite(() =>
+		fillDialMetadata(storage, added.id, metadata),
+	);
+	if (filled) await paintDials();
 }
 
 dialAddButton.addEventListener("click", () => {

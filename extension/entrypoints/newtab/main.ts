@@ -34,6 +34,7 @@ import {
 	readSpeedDial,
 	reorderSpeedDial,
 	type SpeedDial,
+	sameDials,
 } from "@/src/speedDial";
 import {
 	CONFIG_KEY,
@@ -278,6 +279,9 @@ function renderDial(dial: SpeedDial): HTMLAnchorElement {
 	const link = el("a", "dial");
 	link.href = dial.url;
 	link.title = dial.name;
+	// The accessible name must not depend on which icon source rendered — or on
+	// none of them rendering at all (SPEC §16.3).
+	link.setAttribute("aria-label", dial.name);
 	// The dial is the drag handle (SPEC §16.4); `data-dial-id` is how the
 	// delegated handlers below map a DOM node back to its dial.
 	link.draggable = true;
@@ -286,6 +290,9 @@ function renderDial(dial: SpeedDial): HTMLAnchorElement {
 	img.alt = dial.name;
 	// A drag started on the icon must lift the DIAL, not the image.
 	img.draggable = false;
+	// A stored touch icon is a host the DIALLED site picked (SPEC §16.3) — it
+	// learns nothing about where the request came from.
+	img.referrerPolicy = "no-referrer";
 	// Each failure advances to the next source; the letter is the end of the
 	// line rather than a broken-image glyph (SPEC §16.3).
 	const sources = dialIconSources(dial);
@@ -299,13 +306,9 @@ function renderDial(dial: SpeedDial): HTMLAnchorElement {
 		}
 		img.src = src;
 	});
-	const first = sources[next];
+	// `dialIconSources` always yields at least the icon service.
+	img.src = sources[next] ?? "";
 	next += 1;
-	if (first === undefined) {
-		link.append(el("span", "dial-letter", dialLetter(dial.name)));
-		return link;
-	}
-	img.src = first;
 	link.append(img);
 	return link;
 }
@@ -462,18 +465,33 @@ async function saveDialOrder(
 		if (!sameDialOrder(saved, after)) renderDials(saved);
 	} catch {
 		if (dialSeq !== seq) return;
-		renderDials(before);
 		dialOrderError = true;
 		paintMeta();
+		// Repaint from STORAGE, not from the pre-drag list: the read may itself
+		// be what failed, and in every other case storage is the truth an
+		// Options edit may also have moved. The pre-drag list is the fallback,
+		// so a failed write can never leave the row blank (SPEC §16.4).
+		const stored = await readSpeedDial(storage);
+		if (dialSeq !== seq) return;
+		renderDials(stored.length === 0 && before.length > 0 ? before : stored);
 	}
 }
 
 // An Options-page edit shows up in an already-open new tab (SPEC §16.4). Our
-// own writes echo back here too; the paint is idempotent, and mid-drag it is
-// held rather than applied.
+// OWN commit echoes back here as well: a list equal to the row already on
+// screen paints nothing, so a reorder never rebuilds what it just arranged.
+// Anything else repaints — mid-drag, held until `dragend`.
 browser.storage.onChanged.addListener((changes, area) => {
 	if (area !== "local" || changes[SPEED_DIAL_KEY] === undefined) return;
-	void paintDials();
+	void (async () => {
+		const dials = await readSpeedDial(storage);
+		if (sameDials(dials, dialOrder)) return;
+		// A storage change is fresh news about the row, so the stale failure
+		// mark goes (SPEC §16.4).
+		dialOrderError = false;
+		renderDials(dials);
+		paintMeta();
+	})();
 });
 
 // ---------------------------------------------------------------------------
@@ -946,14 +964,17 @@ searchEl.addEventListener("keydown", (event) => {
 });
 
 async function init(): Promise<void> {
-	// First, from the storage read alone: the speed dial is extension-local, so
-	// it must show before the pairing check and in every state the page can end
-	// up in — unpaired, 401, offline, mid-search (m24, SPEC §16.4).
-	await paintDials();
+	// Started first, from the storage read alone: the speed dial is
+	// extension-local, so it must show before the pairing check and in every
+	// state the page can end up in — unpaired, 401, offline, mid-search
+	// (m24, SPEC §16.4). Not AWAITED first, though: one slow storage read has no
+	// business delaying the config and the feed behind it.
+	const dialsPainted = paintDials();
 	renderLog([], { label: "RECENT", empty: message("…") });
 
 	const config = await loadConfig();
 	if (config === undefined) {
+		await dialsPainted;
 		renderUnpaired();
 		return;
 	}
@@ -975,6 +996,7 @@ async function init(): Promise<void> {
 	const result = await fetchBookmarksPage(config, fetch);
 	if (!result.ok) {
 		if (result.status === 401) {
+			await dialsPainted;
 			renderUnpaired();
 			return;
 		}
