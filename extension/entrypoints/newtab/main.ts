@@ -30,10 +30,17 @@ import {
 import { moveItem, putPinnedOrder } from "@/src/pinOrder";
 import { relativeTime } from "@/src/relativeTime";
 import {
+	dialIconSources,
+	readSpeedDial,
+	reorderSpeedDial,
+	type SpeedDial,
+} from "@/src/speedDial";
+import {
 	CONFIG_KEY,
 	DEFAULT_BASE_URL,
 	type ExtensionConfig,
 	type KeyValueStorage,
+	SPEED_DIAL_KEY,
 } from "@/src/types";
 
 /** `chrome.storage.local` as the injectable shape `src/` speaks. */
@@ -63,6 +70,8 @@ function mustGet<T extends Element>(selector: string): T {
 const brandEl = mustGet<HTMLButtonElement>("#brand");
 const metaEl = mustGet<HTMLDivElement>("#meta");
 const searchEl = mustGet<HTMLInputElement>("#search");
+const dialSectionEl = mustGet<HTMLElement>("#dial");
+const dialsEl = mustGet<HTMLDivElement>("#dials");
 const shelfEl = mustGet<HTMLElement>("#shelf");
 const cardsEl = mustGet<HTMLDivElement>("#cards");
 const logLabelEl = mustGet<HTMLDivElement>("#log-label");
@@ -234,6 +243,240 @@ function renderRow(bookmark: NewTabBookmark, now: Date): HTMLAnchorElement {
 }
 
 // ---------------------------------------------------------------------------
+// Speed dial (m24, SPEC §16). Extension-local: the row is read from
+// `chrome.storage.local` and never from the listing response, so it paints
+// before the pairing check and stands in every page state — unpaired, 401,
+// offline, mid-search. Its reorder is a storage write, not a request.
+
+/** The row on screen. Differs from storage only while a drag is running. */
+let dialOrder: SpeedDial[] = [];
+/** The id of the dial being dragged; `undefined` = no dial drag in progress. */
+let dialDragSourceId: string | undefined;
+/** The order to snap back to when a dial drag ends without a commit. */
+let preDragDials: SpeedDial[] | undefined;
+/** The live order the row is reflowing through as the pointer crosses icons. */
+let dialDragOrder: SpeedDial[] = [];
+/** Set by the row's `drop`; `dragend` reverts only when it is still false. */
+let dialDragCommitted = false;
+/** True while the last dial reorder's write is known to have failed (§16.4). */
+let dialOrderError = false;
+/** A repaint that arrived mid-drag, held until `dragend` like the shelf's. */
+let heldDialPaint: SpeedDial[] | undefined;
+/**
+ * Dial-paint sequence, the `shelfSeq` of this row: a commit bumps it, and a
+ * write that lands afterwards may repaint only while it is unchanged — two
+ * quick drags must not have the first one's result overwrite the second's.
+ */
+let dialSeq = 0;
+
+/** The first character of the name, once every icon source has failed. */
+function dialLetter(name: string): string {
+	return (Array.from(name)[0] ?? "").toUpperCase();
+}
+
+function renderDial(dial: SpeedDial): HTMLAnchorElement {
+	const link = el("a", "dial");
+	link.href = dial.url;
+	link.title = dial.name;
+	// The dial is the drag handle (SPEC §16.4); `data-dial-id` is how the
+	// delegated handlers below map a DOM node back to its dial.
+	link.draggable = true;
+	link.dataset.dialId = dial.id;
+	const img = el("img");
+	img.alt = dial.name;
+	// A drag started on the icon must lift the DIAL, not the image.
+	img.draggable = false;
+	// Each failure advances to the next source; the letter is the end of the
+	// line rather than a broken-image glyph (SPEC §16.3).
+	const sources = dialIconSources(dial);
+	let next = 0;
+	img.addEventListener("error", () => {
+		const src = sources[next];
+		next += 1;
+		if (src === undefined) {
+			img.replaceWith(el("span", "dial-letter", dialLetter(dial.name)));
+			return;
+		}
+		img.src = src;
+	});
+	const first = sources[next];
+	next += 1;
+	if (first === undefined) {
+		link.append(el("span", "dial-letter", dialLetter(dial.name)));
+		return link;
+	}
+	img.src = first;
+	link.append(img);
+	return link;
+}
+
+function renderDials(dials: SpeedDial[]): void {
+	// Rebuilding the row mid-drag would remove the source node, and Chrome ends
+	// the drag when that happens — so the paint waits (SPEC §16.4).
+	if (dialDragSourceId !== undefined) {
+		heldDialPaint = dials;
+		return;
+	}
+	dialOrder = dials;
+	dialSectionEl.classList.toggle("hidden", dials.length === 0);
+	dialsEl.replaceChildren(...dials.map(renderDial));
+}
+
+/** Read storage and paint. Total by contract, so this never rejects. */
+async function paintDials(): Promise<void> {
+	renderDials(await readSpeedDial(storage));
+}
+
+/**
+ * Reorder the EXISTING dial nodes into `order`, for the same reason the shelf
+ * does it (`applyOrderToDom`): mid-drag, rebuilding would cancel the gesture.
+ */
+function applyDialOrderToDom(order: readonly SpeedDial[]): void {
+	const nodes = new Map<string, Element>();
+	for (const node of Array.from(dialsEl.children)) {
+		const id = (node as HTMLElement).dataset.dialId;
+		if (id !== undefined) nodes.set(id, node);
+	}
+	let slot = 0;
+	for (const dial of order) {
+		const node = nodes.get(dial.id);
+		if (node === undefined) continue;
+		const occupant = dialsEl.children[slot];
+		if (occupant !== node) dialsEl.insertBefore(node, occupant ?? null);
+		slot += 1;
+	}
+}
+
+function dialFrom(target: EventTarget | null): HTMLAnchorElement | undefined {
+	if (!(target instanceof Element)) return undefined;
+	const link = target.closest<HTMLAnchorElement>(".dial");
+	return link !== null && dialsEl.contains(link) ? link : undefined;
+}
+
+function sameDialOrder(
+	a: readonly SpeedDial[],
+	b: readonly SpeedDial[],
+): boolean {
+	return a.length === b.length && a.every((row, i) => row.id === b[i]?.id);
+}
+
+dialsEl.addEventListener("dragstart", (event) => {
+	const link = dialFrom(event.target);
+	const id = link?.dataset.dialId;
+	if (link === undefined || id === undefined) return;
+	dialDragSourceId = id;
+	preDragDials = dialOrder;
+	dialDragOrder = dialOrder;
+	dialDragCommitted = false;
+	const data = event.dataTransfer;
+	if (data !== null) {
+		data.effectAllowed = "move";
+		// The payload is the dial ID, deliberately NOT the URL (SPEC §16.4): an
+		// anchor pre-seeds the drag with its own link, and a stray drop elsewhere
+		// in Chrome must never receive one.
+		data.clearData();
+		data.setData("text/plain", id);
+	}
+	link.classList.add("dragging");
+});
+
+/** Reflow the row live as the pointer crosses another dial (SPEC §16.4). */
+function onDialDragOver(event: DragEvent): void {
+	// A CARD drag over this row is a different gesture and does nothing.
+	if (dialDragSourceId === undefined) return;
+	event.preventDefault();
+	event.stopPropagation();
+	if (event.dataTransfer !== null) event.dataTransfer.dropEffect = "move";
+	const link = dialFrom(event.target);
+	const targetId = link?.dataset.dialId;
+	if (targetId === undefined || targetId === dialDragSourceId) return;
+	const from = dialDragOrder.findIndex((row) => row.id === dialDragSourceId);
+	const to = dialDragOrder.findIndex((row) => row.id === targetId);
+	if (from < 0 || to < 0) return;
+	dialDragOrder = moveItem(dialDragOrder, from, to);
+	applyDialOrderToDom(dialDragOrder);
+}
+
+dialsEl.addEventListener("dragenter", onDialDragOver);
+dialsEl.addEventListener("dragover", onDialDragOver);
+
+dialsEl.addEventListener("drop", (event) => {
+	if (dialDragSourceId === undefined) return;
+	event.preventDefault();
+	event.stopPropagation();
+	dialDragCommitted = true;
+	commitDialOrder();
+});
+
+dialsEl.addEventListener("dragend", () => {
+	for (const node of Array.from(dialsEl.querySelectorAll(".dragging"))) {
+		node.classList.remove("dragging");
+	}
+	if (dialDragSourceId === undefined) return;
+	if (!dialDragCommitted && preDragDials !== undefined) {
+		// A drop outside the row reverts — it never navigates (SPEC §16.4).
+		dialDragOrder = preDragDials;
+		applyDialOrderToDom(dialDragOrder);
+	}
+	dialDragSourceId = undefined;
+	preDragDials = undefined;
+	dialDragOrder = [];
+	dialDragCommitted = false;
+	if (heldDialPaint !== undefined) {
+		const pending = heldDialPaint;
+		heldDialPaint = undefined;
+		renderDials(pending);
+	}
+});
+
+/**
+ * Commit the dragged order: it is already painted, so this is bookkeeping plus
+ * ONE `reorderSpeedDial` write (SPEC §16.4).
+ */
+function commitDialOrder(): void {
+	const before = preDragDials ?? dialOrder;
+	const after = dialDragOrder;
+	if (sameDialOrder(before, after)) return;
+	heldDialPaint = undefined;
+	dialOrder = after;
+	dialOrderError = false;
+	paintMeta();
+	dialSeq += 1;
+	void saveDialOrder(after, before, dialSeq);
+}
+
+async function saveDialOrder(
+	after: SpeedDial[],
+	before: SpeedDial[],
+	seq: number,
+): Promise<void> {
+	try {
+		const saved = await reorderSpeedDial(
+			storage,
+			after.map((dial) => dial.id),
+		);
+		// A newer drag already owns the row — this result is stale.
+		if (dialSeq !== seq) return;
+		// The write is lenient (SPEC §16.4), so its answer can differ from what
+		// was dragged: a dial removed in Options mid-drag is gone from it.
+		if (!sameDialOrder(saved, after)) renderDials(saved);
+	} catch {
+		if (dialSeq !== seq) return;
+		renderDials(before);
+		dialOrderError = true;
+		paintMeta();
+	}
+}
+
+// An Options-page edit shows up in an already-open new tab (SPEC §16.4). Our
+// own writes echo back here too; the paint is idempotent, and mid-drag it is
+// held rather than applied.
+browser.storage.onChanged.addListener((changes, area) => {
+	if (area !== "local" || changes[SPEED_DIAL_KEY] === undefined) return;
+	void paintDials();
+});
+
+// ---------------------------------------------------------------------------
 // Shelf reordering (m21, SPEC §6). Native HTML5 drag and drop — no library:
 // this page only ever runs in desktop Chrome, where native DnD is dependable.
 
@@ -350,6 +593,8 @@ function setMeta(text: string, stale = false): void {
 
 function renderUnpaired(): void {
 	setMeta("");
+	// The speed dial row is deliberately NOT hidden here: it is extension-local
+	// and has nothing to do with pairing (SPEC §16.4).
 	shelfEl.classList.add("hidden");
 	logLabelEl.textContent = "";
 	const line = message("Not paired — open settings to pair this extension.");
@@ -399,7 +644,8 @@ let activeConfig: NewTabConfig | undefined;
  * reorder or refresh clears it (SPEC §6).
  */
 function paintMeta(): void {
-	if (orderError) {
+	// A failed speed-dial reorder reports itself the same way (SPEC §16.4).
+	if (orderError || dialOrderError) {
 		setMeta("couldn't save order", true);
 		return;
 	}
@@ -519,14 +765,19 @@ cardsEl.addEventListener("dragend", () => {
 // The page outside the grid: accept the drag so Chrome runs no default of its
 // own (dropping a link navigates the tab), but refuse the drop so `dragend`
 // reverts. Registered on the document, so it only ever sees what the grid's
-// handlers did not stop.
+// handlers did not stop — and it covers a dial drag as well as a card drag
+// (m24, SPEC §16.4), since both lift an anchor.
+function dragInProgress(): boolean {
+	return dragSourceId !== undefined || dialDragSourceId !== undefined;
+}
+
 document.addEventListener("dragover", (event) => {
-	if (dragSourceId === undefined) return;
+	if (!dragInProgress()) return;
 	event.preventDefault();
 	if (event.dataTransfer !== null) event.dataTransfer.dropEffect = "none";
 });
 document.addEventListener("drop", (event) => {
-	if (dragSourceId === undefined) return;
+	if (!dragInProgress()) return;
 	event.preventDefault();
 });
 
@@ -695,6 +946,10 @@ searchEl.addEventListener("keydown", (event) => {
 });
 
 async function init(): Promise<void> {
+	// First, from the storage read alone: the speed dial is extension-local, so
+	// it must show before the pairing check and in every state the page can end
+	// up in — unpaired, 401, offline, mid-search (m24, SPEC §16.4).
+	await paintDials();
 	renderLog([], { label: "RECENT", empty: message("…") });
 
 	const config = await loadConfig();

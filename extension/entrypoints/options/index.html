@@ -11,6 +11,7 @@
         --fg: #1f1a17;
         --muted: #6f6660;
         --border: #d8d2cc;
+        --border-soft: #eeeae6;
         --accent: #b02a2a;
         --field-bg: #ffffff;
         --ok: #1d7a3d;
@@ -22,6 +23,7 @@
           --fg: #ece7e2;
           --muted: #9a918a;
           --border: #3c3631;
+          --border-soft: #2b2622;
           --accent: #e05252;
           --field-bg: #211d1a;
           --ok: #4fc06f;
@@ -101,6 +103,117 @@
       #status.err {
         color: var(--err);
       }
+      /* Speed dial editor (m24, SPEC §16). Independent of pairing — it works
+         without a token. The page's global `button`/`input` rules reach in
+         here, so every control below restates the margins it needs. */
+      .rule {
+        margin: 2.25rem 0 0;
+        border: none;
+        border-top: 1px solid var(--border);
+      }
+      .dial-section {
+        margin-top: 1.75rem;
+      }
+      .dial-section h2 {
+        margin: 0 0 0.25rem;
+        font-size: 1rem;
+      }
+      .dial-section .dial-sub {
+        margin: 0 0 1rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      .dial-list {
+        display: flex;
+        flex-direction: column;
+      }
+      .dial-row {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        padding: 0.45rem 0;
+        border-bottom: 1px solid var(--border-soft);
+      }
+      /* The 26 px version of the new tab's circular frame (SPEC §16.3); it
+         centres the fallback letter when every icon source has failed. */
+      .dial-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+        width: 26px;
+        height: 26px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 50%;
+        color: var(--muted);
+        font-size: 0.7rem;
+        font-weight: 600;
+      }
+      .dial-icon img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .dial-text {
+        min-width: 0;
+        flex: 1;
+      }
+      .dial-name {
+        font-size: 0.85rem;
+        font-weight: 600;
+        line-height: 1.3;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .dial-url {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.75rem;
+        color: var(--muted);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .dial-remove {
+        margin-top: 0;
+        padding: 0.25rem;
+        border: none;
+        background: none;
+        color: var(--muted);
+        font-size: 0.85rem;
+        line-height: 1;
+      }
+      .dial-remove:hover {
+        color: var(--accent);
+      }
+      .dial-empty {
+        margin: 0.5rem 0 0;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .dial-add {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+      }
+      .dial-add input {
+        flex: 1;
+        min-width: 0;
+        width: auto;
+      }
+      .dial-add button {
+        flex: none;
+        margin-top: 0;
+        padding: 0.5rem 1.1rem;
+      }
+      .dial-error {
+        margin: 0.4rem 0 0;
+        color: var(--err);
+        font-size: 0.85rem;
+        min-height: 1.3em;
+      }
     </style>
   </head>
   <body>
@@ -129,6 +242,33 @@
         <button id="save" type="submit">Save &amp; pair</button>
       </form>
       <p id="status"></p>
+
+      <!-- Speed dial (m24, SPEC §16). Deliberately OUTSIDE the pairing form:
+           Enter in the URL box adds a site, it must never submit pairing. -->
+      <hr class="rule" />
+      <section class="dial-section">
+        <h2>Speed dial</h2>
+        <p class="dial-sub">
+          Sites shown as a row of icons at the top of every new tab.
+        </p>
+        <div class="dial-list" id="dial-list"></div>
+        <div class="dial-add">
+          <input
+            id="dial-url"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="https://example.com"
+            aria-label="Site URL"
+          />
+          <button id="dial-add" type="button">Add</button>
+        </div>
+        <p class="dial-error" id="dial-error"></p>
+        <p class="hint">
+          The name and icon are picked up from the site automatically. Drag
+          icons on the new tab page to reorder.
+        </p>
+      </section>
       <script type="module" src="./main.ts"></script>
     </main>
   </body>
