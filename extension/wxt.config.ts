@@ -45,8 +45,10 @@ export default defineConfig({
 		// save is not an extension invocation, so it grants no `activeTab` —
 		// without it a save-time screenshot is impossible. The install warning
 		// escalates to "read and change all your data on all websites"; the
-		// extension never injects scripts or reads page content, only pixels of
-		// the tab being bookmarked. SPEC §6 and §15 record the trade-off.
+		// extension never injects scripts or reads a tab's content, only pixels of
+		// the tab being bookmarked. SPEC §6 and §15 record the trade-off. The one
+		// page read anywhere is the m24 speed-dial metadata fill (SPEC §16.2): an
+		// uncredentialed GET, from the Options page, of a URL the user typed there.
 		host_permissions: [
 			"http://localhost:3000/*",
 			"https://smultron.redpine.software/*",
