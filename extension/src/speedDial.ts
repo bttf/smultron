@@ -127,7 +127,7 @@ export function dialHostName(url: string): string {
  * and a stored icon that later 404s.
  *
  * Deliberately NOT the s2 endpoint the log rows use: that serves 16–32 px
- * favicons, which are transparent-margined and blur when blown up to 34 px.
+ * favicons, which are transparent-margined and blur when blown up to the dial's size.
  */
 export function dialIconUrl(url: string): string {
 	let origin: string;
@@ -511,7 +511,7 @@ function largestSizeEdge(sizes: string | undefined): number {
 
 /**
  * The page's touch icon (SPEC §16.3) — the large, opaque, square art a site
- * ships for home screens, which is what fills a 34 px circle properly.
+ * ships for home screens, which is what sits cleanly inside the dial's circle.
  *
  * Scans `<link>` tags whose `rel` TOKEN LIST holds `apple-touch-icon` or
  * `apple-touch-icon-precomposed` (`rel="icon apple-touch-icon"` counts), and

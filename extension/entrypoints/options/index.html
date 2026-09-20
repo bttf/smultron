@@ -134,15 +134,17 @@
         padding: 0.45rem 0;
         border-bottom: 1px solid var(--border-soft);
       }
-      /* The 26 px version of the new tab's circular frame (SPEC §16.3); it
+      /* The 30 px version of the new tab's padded circular frame (SPEC §16.3); it
          centres the fallback letter when every icon source has failed. */
       .dial-icon {
         display: flex;
         align-items: center;
         justify-content: center;
         flex: none;
-        width: 26px;
-        height: 26px;
+        box-sizing: border-box;
+        width: 30px;
+        height: 30px;
+        padding: 4px;
         overflow: hidden;
         border: 1px solid var(--border);
         border-radius: 50%;
@@ -154,6 +156,7 @@
         display: block;
         width: 100%;
         height: 100%;
+        border-radius: 5px;
         object-fit: cover;
       }
       .dial-text {

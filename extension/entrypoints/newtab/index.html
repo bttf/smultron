@@ -131,16 +131,23 @@
       /* Speed dial (m24, SPEC §16) — round site icons, extension-local, and
          painted in every page state including unpaired. Same tokens as the
          cards below, so dark mode follows for free. */
+      /* Evenly spaced across the page width (SPEC §16.4): `auto-fit` collapses
+         the empty tracks, so seven dials sit in seven equal columns, and a row
+         that wraps lines its dials up under the ones above. */
       .dials {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(40px, 1fr));
+        justify-items: center;
+        gap: 14px;
       }
+      /* The icon sits INSIDE the circle, not cropped by it (SPEC §16.3): 6 px
+         of padding leaves a 26 px rounded square clear of the frame's edge. */
       .dial {
         display: block;
-        flex: none;
-        width: 34px;
-        height: 34px;
+        box-sizing: border-box;
+        width: 40px;
+        height: 40px;
+        padding: 6px;
         overflow: hidden;
         border: 1px solid var(--border);
         border-radius: 50%;
@@ -171,6 +178,7 @@
         display: block;
         width: 100%;
         height: 100%;
+        border-radius: 6px;
         object-fit: cover;
       }
       /* What the frame shows once every icon source has failed: the name's
