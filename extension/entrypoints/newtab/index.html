@@ -128,6 +128,67 @@
       .count {
         color: var(--faint);
       }
+      /* Speed dial (m24, SPEC §16) — round site icons, extension-local, and
+         painted in every page state including unpaired. Same tokens as the
+         cards below, so dark mode follows for free. */
+      /* Evenly spaced across the page width (SPEC §16.4): `auto-fit` collapses
+         the empty tracks, so seven dials sit in seven equal columns, and a row
+         that wraps lines its dials up under the ones above. */
+      .dials {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
+        justify-items: center;
+        gap: 14px;
+      }
+      /* The icon sits INSIDE the circle, not cropped by it (SPEC §16.3): 7 px
+         of padding leaves a 32 px rounded square clear of the frame's edge. */
+      .dial {
+        display: block;
+        box-sizing: border-box;
+        width: 48px;
+        height: 48px;
+        padding: 7px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 50%;
+        background: var(--card);
+        color: var(--muted);
+        text-decoration: none;
+        cursor: pointer;
+        transform: scale(1);
+        transition:
+          transform 250ms ease-out,
+          border-color 250ms ease-out;
+      }
+      .dial:hover,
+      .dial:focus-visible {
+        border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+        transform: scale(1.06);
+      }
+      /* The same dim the shelf cards take while lifted (SPEC §16.4). */
+      .dial.dragging {
+        opacity: 0.4;
+        transform: none;
+        transition: none;
+      }
+      .dial img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border-radius: 7px;
+        object-fit: cover;
+      }
+      /* What the frame shows once every icon source has failed: the name's
+         first character, never a broken-image glyph (SPEC §16.3). */
+      .dial-letter {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        font-size: 14px;
+        font-weight: 600;
+      }
       /* Pinned shelf — the site's card grid (SPEC §9), narrower gutters. */
       .cards {
         display: grid;
@@ -254,7 +315,10 @@
       @media (prefers-reduced-motion: reduce) {
         .card,
         .card:hover,
-        .card:focus-within {
+        .card:focus-within,
+        .dial,
+        .dial:hover,
+        .dial:focus-visible {
           transform: none;
           transition: none;
         }
@@ -379,6 +443,13 @@
         placeholder="Search bookmarks — press / to focus"
         aria-label="Search bookmarks"
       />
+
+      <!-- Speed dial (m24, SPEC §16): extension-local, so it is painted from
+           storage before the pairing check and shows in every page state. -->
+      <section class="section hidden" id="dial">
+        <div class="section-label">SPEED DIAL</div>
+        <div class="dials" id="dials"></div>
+      </section>
 
       <section class="section hidden" id="shelf">
         <div class="section-label">

@@ -267,6 +267,9 @@ export const BROWSE_BUFFER_KEY = "browseBuffer";
  * path. Its own key, like `attention`: the options-page config object is
  * rewritten wholesale on save. */
 export const NEWTAB_KEY = "newtab";
+/** m24: the speed dial list (SPEC §16) — extension-local furniture, its own
+ * key, never the server, the outbox or the `newtab` snapshot. */
+export const SPEED_DIAL_KEY = "speedDial";
 
 /** `chrome.storage.session` key holding the capture session's `bootId`. */
 export const BOOT_ID_KEY = "bootId";
