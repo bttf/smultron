@@ -768,7 +768,7 @@ export default defineBackground(() => {
 	browser.storage.onChanged.addListener((changes, area) => {
 		if (area !== "local") return;
 
-		// m19: the opt-in toggle flipped — capture_start + baseline on enable,
+		// m19: the opt-in toggle flipped — capture_start on enable,
 		// capture_stop on disable, then a drain so the edge ships promptly.
 		const attentionChange = changes[ATTENTION_KEY];
 		if (attentionChange !== undefined) {
