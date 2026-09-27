@@ -318,7 +318,7 @@ describe("browse caps under mixed backlog (halted flush)", () => {
 		});
 
 		for (let i = 0; i < 1_200; i += 1) {
-			await buffer.append(factory.windowBlur({ bootId: "boot-1" }));
+			await buffer.append(factory.captureStart({ bootId: "boot-1" }));
 		}
 		await buffer.drain();
 		await outbox.flush();
@@ -332,5 +332,7 @@ describe("browse caps under mixed backlog (halted flush)", () => {
 		expect(posted[1]?.at(-1)).toBe("wire-1200");
 		expect(queueIds(storage)).toEqual([]);
 		expect(await buffer.size()).toBe(0);
-	});
+		// 1200 sequential appends pass the 5s default when the web suite's
+		// PGlite tests run in parallel (`pnpm test`).
+	}, 20_000);
 });

@@ -212,31 +212,7 @@ describe("event constructors", () => {
 		expect(enriched.title).toBe("Example");
 	});
 
-	it("window_focus requires windowId; window_blur carries NO fields", () => {
-		const focus = events.windowFocus({ bootId: "boot", windowId: 4, tabId: 2 });
-		expect(focus.windowId).toBe(4);
-		expect(focus.tabId).toBe(2);
-
-		const blur = events.windowBlur({ bootId: "boot" });
-		expect(Object.keys(blur).sort()).toEqual([
-			"bootId",
-			"id",
-			"kind",
-			"occurredAtMs",
-		]);
-		expect(blur.kind).toBe("window_blur");
-	});
-
-	it("idle carries only idleState; capture_start/stop carry nothing", () => {
-		const idle = events.idle({ bootId: "boot", idleState: "locked" });
-		expect(Object.keys(idle).sort()).toEqual([
-			"bootId",
-			"id",
-			"idleState",
-			"kind",
-			"occurredAtMs",
-		]);
-
+	it("capture_start/stop carry nothing", () => {
 		for (const built of [
 			events.captureStart({ bootId: "boot" }),
 			events.captureStop({ bootId: "boot" }),
@@ -251,7 +227,7 @@ describe("event constructors", () => {
 	});
 
 	it("defaults occurredAtMs to now() and floors/clamps supplied stamps", () => {
-		expect(events.windowBlur({ bootId: "boot" }).occurredAtMs).toBe(
+		expect(events.captureStart({ bootId: "boot" }).occurredAtMs).toBe(
 			1_700_000_000_000,
 		);
 		// webNavigation timeStamps are floats — the server requires an integer.
@@ -264,14 +240,14 @@ describe("event constructors", () => {
 			}).occurredAtMs,
 		).toBe(1_699_999_000_123);
 		expect(
-			events.windowBlur({ bootId: "boot", occurredAtMs: -5 }).occurredAtMs,
+			events.captureStart({ bootId: "boot", occurredAtMs: -5 }).occurredAtMs,
 		).toBe(0);
 		expect(
-			events.windowBlur({ bootId: "boot", occurredAtMs: Number.NaN })
+			events.captureStart({ bootId: "boot", occurredAtMs: Number.NaN })
 				.occurredAtMs,
 		).toBe(0);
 		expect(
-			events.windowBlur({ bootId: "boot", occurredAtMs: 1e18 }).occurredAtMs,
+			events.captureStop({ bootId: "boot", occurredAtMs: 1e18 }).occurredAtMs,
 		).toBe(MAX_TIMESTAMP_MS);
 	});
 
@@ -309,16 +285,6 @@ describe("event constructors", () => {
 		expect("url" in activated).toBe(false);
 		expect("title" in activated).toBe(false);
 
-		const focus = events.windowFocus({
-			bootId: "boot",
-			windowId: 2,
-			tabId: 1,
-			url: "",
-			title: "",
-		});
-		expect("url" in focus).toBe(false);
-		expect("title" in focus).toBe(false);
-
 		const nav = events.nav({
 			bootId: "boot",
 			tabId: 1,
@@ -331,8 +297,8 @@ describe("event constructors", () => {
 	});
 
 	it("mints a unique id per event", () => {
-		const a = events.windowBlur({ bootId: "boot" });
-		const b = events.windowBlur({ bootId: "boot" });
+		const a = events.captureStart({ bootId: "boot" });
+		const b = events.captureStart({ bootId: "boot" });
 		expect(a.id).not.toBe(b.id);
 	});
 });

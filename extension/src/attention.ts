@@ -1,7 +1,9 @@
 /**
- * Attention-tracking primitives (m19, SPEC §13): the opt-in gate, the
+ * Browsing-history capture primitives (m19, SPEC §13): the opt-in gate, the
  * capture-session (`bootId`) store, the per-kind event constructors, and the
- * storage-backed browse-event buffer.
+ * storage-backed browse-event buffer. The module and its `attention` storage
+ * key keep their m19 names; the attention-tracking project that introduced
+ * them was canceled 2026-09-27.
  *
  * Pure logic only — every dependency (storage, clock, uuid, outbox enqueue)
  * is injected, so the whole thing is unit-testable and contains NO Chrome
@@ -22,12 +24,7 @@
  */
 
 import { chunk } from "./tree";
-import type {
-	BrowseEvent,
-	BrowseOutboxEntry,
-	IdleState,
-	KeyValueStorage,
-} from "./types";
+import type { BrowseEvent, BrowseOutboxEntry, KeyValueStorage } from "./types";
 import {
 	BOOT_ID_KEY,
 	BROWSE_BATCH_LIMIT,
@@ -176,23 +173,9 @@ export interface TabActivatedInput extends BaseInput {
 	title?: string;
 }
 
-export interface WindowFocusInput extends BaseInput {
-	windowId: number;
-	tabId?: number;
-	url?: string;
-	title?: string;
-}
-
-export interface IdleInput extends BaseInput {
-	idleState: IdleState;
-}
-
 export interface BrowseEventFactory {
 	nav(input: NavInput): BrowseEvent;
 	tabActivated(input: TabActivatedInput): BrowseEvent;
-	windowFocus(input: WindowFocusInput): BrowseEvent;
-	windowBlur(input: BaseInput): BrowseEvent;
-	idle(input: IdleInput): BrowseEvent;
 	captureStart(input: BaseInput): BrowseEvent;
 	captureStop(input: BaseInput): BrowseEvent;
 }
@@ -237,31 +220,12 @@ export function createEventFactory(deps: EventFactoryDeps): BrowseEventFactory {
 		tabActivated(input) {
 			const event = base("tab_activated", input);
 			event.tabId = input.tabId;
-			// windowId is REQUIRED: without it a slicer can't tell whether the
-			// activation happened in the focused window (§13).
+			// windowId is REQUIRED for this kind (§13).
 			event.windowId = input.windowId;
 			const url = optionalText(input.url, BROWSE_URL_LIMIT);
 			if (url !== undefined) event.url = url;
 			const title = optionalText(input.title, BROWSE_TITLE_LIMIT);
 			if (title !== undefined) event.title = title;
-			return event;
-		},
-		windowFocus(input) {
-			const event = base("window_focus", input);
-			event.windowId = input.windowId;
-			if (input.tabId !== undefined) event.tabId = input.tabId;
-			const url = optionalText(input.url, BROWSE_URL_LIMIT);
-			if (url !== undefined) event.url = url;
-			const title = optionalText(input.title, BROWSE_TITLE_LIMIT);
-			if (title !== undefined) event.title = title;
-			return event;
-		},
-		windowBlur(input) {
-			return base("window_blur", input);
-		},
-		idle(input) {
-			const event = base("idle", input);
-			event.idleState = input.idleState;
 			return event;
 		},
 		captureStart(input) {

@@ -1,8 +1,8 @@
 "use client";
 // Browse-event log view — SPEC §9 ("Browse-events log view (m19)"), kinds and
-// per-kind fields per §13. The mid-week sanity check for the collection week:
-// a dense, read-only Datadog-style log over raw attention edges, not a product
-// surface. Talks ONLY to GET /api/browse-events (Hard rule #2 — never the DB
+// per-kind fields per §13. A dense, read-only Datadog-style log of the
+// browsing history the extension captures, searchable over url + title.
+// Talks ONLY to GET /api/browse-events (Hard rule #2 — never the DB
 // directly), polls page 1 every 10s via SWR, and pages deeper with the feed's
 // IntersectionObserver sentinel. No realtime (Hard rule #6).
 //
@@ -366,7 +366,7 @@ function EmptyState({ filtered }: { filtered: boolean }) {
 		<p className="max-w-md px-4 py-6 font-mono text-xs text-muted-foreground">
 			{filtered
 				? "no matching events"
-				: "No browse events yet — flip on attention tracking in the extension popup and captured events show up here."}
+				: "No browse events yet — turn on Browsing history in the extension popup and captured events show up here."}
 		</p>
 	);
 }

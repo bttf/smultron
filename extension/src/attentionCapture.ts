@@ -2,8 +2,8 @@
  * Browse-event capture orchestration (m19, SPEC §13).
  *
  * Everything that decides WHETHER and WHAT to record lives here — the opt-in
- * gate, capture-session boundaries (`bootId` + `capture_start`/`capture_stop`
- * + the baseline activation), enrichment, and the drain triggers. The
+ * gate, capture-session boundaries (`bootId` + `capture_start`/`capture_stop`),
+ * enrichment, and the drain triggers. The
  * background service worker is left as pure Chrome glue: it translates events
  * into these calls and injects the adapters (extension/AGENTS.md — no Chrome
  * imports in `src/`).
@@ -20,19 +20,11 @@ import type {
 	CaptureSession,
 } from "./attention";
 import { parseAttentionToggle, shouldDrainAfterAppend } from "./attention";
-import type { BrowseEvent, IdleState } from "./types";
+import type { BrowseEvent } from "./types";
 
-/** What `tabs.get` / `tabs.query` contribute to an event (both optional). */
+/** What `tabs.get` contributes to an event (all optional). */
 export interface TabInfo {
 	tabId?: number;
-	url?: string;
-	title?: string;
-}
-
-/** The synthetic baseline activation's target (SPEC §13). */
-export interface BaselineTarget {
-	tabId: number;
-	windowId: number;
 	url?: string;
 	title?: string;
 }
@@ -52,16 +44,8 @@ export interface AttentionCaptureDeps {
 	events: BrowseEventFactory;
 	/** Reads the `attention` toggle; must resolve false on any failure. */
 	isEnabled: () => Promise<boolean>;
-	/**
-	 * The active tab of the LAST-FOCUSED window, or undefined when no Chrome
-	 * window has focus (then the baseline is skipped — the stream starts
-	 * blurred until a `window_focus` arrives).
-	 */
-	getBaselineTarget: () => Promise<BaselineTarget | undefined>;
 	/** `tabs.get` enrichment; undefined when the lookup fails. */
 	getTab: (tabId: number) => Promise<TabInfo | undefined>;
-	/** The active tab of a window; undefined when the query fails. */
-	getActiveTabInWindow: (windowId: number) => Promise<TabInfo | undefined>;
 	/** Ships whatever the drain enqueued (the outbox flush). */
 	flush: () => Promise<void>;
 }
@@ -71,12 +55,6 @@ export interface AttentionCapture {
 	recordNav(observation: NavObservation): Promise<void>;
 	/** `tabs.onActivated` — `activeInfo` always carries both ids. */
 	recordTabActivated(input: { tabId: number; windowId: number }): Promise<void>;
-	/** `windows.onFocusChanged` with a real window id. */
-	recordWindowFocus(windowId: number): Promise<void>;
-	/** `windows.onFocusChanged` = WINDOW_ID_NONE. */
-	recordWindowBlur(): Promise<void>;
-	/** `idle.onStateChanged`. */
-	recordIdle(idleState: IdleState): Promise<void>;
 	/** `storage.onChanged` on the `attention` key. */
 	handleToggleChange(oldValue: unknown, newValue: unknown): Promise<void>;
 	/**
@@ -92,16 +70,7 @@ export interface AttentionCapture {
 export function createAttentionCapture(
 	deps: AttentionCaptureDeps,
 ): AttentionCapture {
-	const {
-		buffer,
-		session,
-		events,
-		isEnabled,
-		getBaselineTarget,
-		getTab,
-		getActiveTabInWindow,
-		flush,
-	} = deps;
+	const { buffer, session, events, isEnabled, getTab, flush } = deps;
 
 	/**
 	 * In-worker memo of the current session, so concurrent events can't each
@@ -126,16 +95,9 @@ export function createAttentionCapture(
 		if (shouldDrainAfterAppend(size)) await drainAndFlush();
 	};
 
-	/**
-	 * First events of a capture session: `capture_start`, then immediately the
-	 * synthetic baseline `tab_activated` so the slicer has an initial dwell
-	 * target (skipped when no window has focus).
-	 */
+	/** The first event of a capture session is always `capture_start`. */
 	const beginSession = async (bootId: string): Promise<void> => {
 		await push(events.captureStart({ bootId }));
-		const target = await getBaselineTarget();
-		if (target === undefined) return;
-		await push(events.tabActivated({ bootId, ...target }));
 	};
 
 	const currentBootId = async (): Promise<string> => {
@@ -197,29 +159,12 @@ export function createAttentionCapture(
 				});
 			}),
 
-		recordWindowFocus: (windowId) =>
-			record(async (bootId) => {
-				const tab = await getActiveTabInWindow(windowId);
-				return events.windowFocus({
-					bootId,
-					windowId,
-					tabId: tab?.tabId,
-					url: tab?.url,
-					title: tab?.title,
-				});
-			}),
-
-		recordWindowBlur: () => record((bootId) => events.windowBlur({ bootId })),
-
-		recordIdle: (idleState) =>
-			record((bootId) => events.idle({ bootId, idleState })),
-
 		handleToggleChange: async (oldValue, newValue) => {
 			const edge = parseAttentionToggle(oldValue, newValue);
 			if (edge === undefined) return;
 			if (edge === "enabled") {
 				// A fresh capture session even if storage.session still holds the
-				// previous one: dwell must never be computed across the off gap.
+				// previous one: the off gap is a session boundary.
 				const bootId = await session.restart();
 				sessionPromise = Promise.resolve(bootId);
 				await beginSession(bootId);

@@ -350,21 +350,16 @@
       .hidden {
         display: none;
       }
-      /* m19 attention tracking: a global setting, so it sits below the
+      /* m19 browsing-history toggle: a global setting, so it sits below the
          per-tab body in every paired state — same 14px gutter, its own
          hairline. */
       .attention {
         display: flex;
-        flex-direction: column;
-        gap: 6px;
-        padding: 10px 14px;
-        border-top: 1px solid var(--border-soft);
-      }
-      .attention-row {
-        display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
+        padding: 10px 14px;
+        border-top: 1px solid var(--border-soft);
       }
       .attention-label {
         font-size: 12px;
@@ -399,18 +394,6 @@
       .switch[aria-checked="true"] .knob {
         margin-left: 16px;
         background: var(--accent);
-      }
-      .attention-grade {
-        display: flex;
-        align-items: baseline;
-        gap: 6px;
-        font-family: var(--mono);
-        font-size: 10.5px;
-        color: var(--muted);
-      }
-      .grade-value {
-        font-size: 13px;
-        color: var(--fg);
       }
       /* Dark values from the approved Claude Design [data-theme=dark] token
          block (Extension Popup mock). Deviations as on the web client
@@ -460,26 +443,19 @@
       <!-- m19 (SPEC §13): shown in every PAIRED state — a global setting, not
            a per-tab one — and never touched by the view re-renders above. -->
       <div class="attention hidden" id="attention">
-        <div class="attention-row">
-          <span class="attention-label" id="attention-label"
-            >Attention tracking</span
-          >
-          <button
-            class="switch"
-            id="attention-toggle"
-            type="button"
-            role="switch"
-            aria-checked="false"
-            aria-labelledby="attention-label"
-          >
-            <span class="knob"></span>
-          </button>
-        </div>
-        <!-- Session grade: a placeholder until the RED-92/93 detectors land. -->
-        <div class="attention-grade hidden" id="attention-grade">
-          <span class="grade-value">—</span>
-          <span>collecting data</span>
-        </div>
+        <span class="attention-label" id="attention-label"
+          >Browsing history</span
+        >
+        <button
+          class="switch"
+          id="attention-toggle"
+          type="button"
+          role="switch"
+          aria-checked="false"
+          aria-labelledby="attention-label"
+        >
+          <span class="knob"></span>
+        </button>
       </div>
     </div>
     <script type="module" src="./main.ts"></script>

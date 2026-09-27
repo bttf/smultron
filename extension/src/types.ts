@@ -81,9 +81,16 @@ export interface ScreenshotOutboxEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Attention tracking (m19, SPEC §13).
+// Browsing history (m19, SPEC §13).
 
-/** The browse-event kinds of SPEC §13. */
+/**
+ * The browse-event kinds of SPEC §13. The extension emits `nav`,
+ * `tab_activated`, `capture_start` and `capture_stop`. `window_focus`,
+ * `window_blur` and `idle` (with `idleState`) are no longer captured, but
+ * builds before 2026-09-27 buffered them, and a queued event must still
+ * reach the wire with every field it was captured with — a dropped
+ * `idleState` would 400 the whole batch.
+ */
 export type BrowseEventKind =
 	| "nav"
 	| "tab_activated"

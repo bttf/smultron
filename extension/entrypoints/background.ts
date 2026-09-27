@@ -6,11 +6,7 @@ import {
 	isCaptureEnabled,
 	isMainFrameNavigation,
 } from "@/src/attention";
-import {
-	type BaselineTarget,
-	createAttentionCapture,
-	type TabInfo,
-} from "@/src/attentionCapture";
+import { createAttentionCapture, type TabInfo } from "@/src/attentionCapture";
 import { captureHighlight, type HighlightCaptureDeps } from "@/src/capture";
 import { lookupTabFavicon, type QueryAllTabs } from "@/src/favicon";
 import {
@@ -55,7 +51,6 @@ import {
 	DEFAULT_BASE_URL,
 	type ExtensionConfig,
 	FLUSH_ALARM,
-	type IdleState,
 	SYNC_BATCH_LIMIT,
 	type SyncBookmark,
 } from "@/src/types";
@@ -248,8 +243,8 @@ async function captureScreenshot(url: string): Promise<void> {
  * the server has the row by the time the upload addresses it by URL — the
  * same argument `/api/highlights` rests on (§5). Only this listener captures;
  * `enqueueLiveBookmark` does not, so the highlight flow's direct enqueue
- * yields one capture, not two. The m19 attention toggle does NOT gate it:
- * saving is an explicit act (§13).
+ * yields one capture, not two. The m19 browsing-history toggle does NOT gate
+ * it: saving is an explicit act (§13).
  */
 async function handleCreated(
 	node: Browser.bookmarks.BookmarkTreeNode,
@@ -560,7 +555,7 @@ function refreshActiveTabIcon(
 }
 
 // ---------------------------------------------------------------------------
-// Attention tracking: browse-event capture (SPEC §13, m19).
+// Browsing history: browse-event capture (SPEC §13, m19).
 //
 // Chrome glue only: the gate, capture-session boundaries, buffer discipline
 // and drain triggers all live in `src/attention.ts` + `src/attentionCapture.ts`,
@@ -593,40 +588,6 @@ async function getTabInfo(tabId: number): Promise<TabInfo | undefined> {
 	}
 }
 
-/** The active tab of a specific window (window_focus enrichment). */
-async function getActiveTabInWindow(
-	windowId: number,
-): Promise<TabInfo | undefined> {
-	try {
-		const [tab] = await browser.tabs.query({ active: true, windowId });
-		if (tab === undefined) return undefined;
-		return { tabId: tab.id, url: tab.url, title: tab.title };
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * Baseline target: the active tab of the LAST-FOCUSED window — undefined
- * (baseline skipped, §13) when no Chrome window currently has focus.
- */
-async function getBaselineTarget(): Promise<BaselineTarget | undefined> {
-	try {
-		const lastFocused = await browser.windows.getLastFocused();
-		const windowId = lastFocused.id;
-		if (lastFocused.focused !== true || windowId === undefined)
-			return undefined;
-		const tab = await getActiveTabInWindow(windowId);
-		if (tab?.tabId === undefined) return undefined;
-		const target: BaselineTarget = { tabId: tab.tabId, windowId };
-		if (tab.url !== undefined) target.url = tab.url;
-		if (tab.title !== undefined) target.title = tab.title;
-		return target;
-	} catch {
-		return undefined;
-	}
-}
-
 const attention = createAttentionCapture({
 	buffer: browseBuffer,
 	session: createCaptureSession({
@@ -638,9 +599,7 @@ const attention = createAttentionCapture({
 		now: Date.now,
 	}),
 	isEnabled: attentionEnabled,
-	getBaselineTarget,
 	getTab: getTabInfo,
-	getActiveTabInWindow,
 	flush: () => outbox.flush(),
 });
 
@@ -662,7 +621,7 @@ interface NavDetails {
 }
 
 function handleNavigation(details: NavDetails): void {
-	// Main frame only (subframe commits aren't the user's attention target) —
+	// Main frame only (a subframe commit is not a page visit) —
 	// by frameType, since prerendered main frames have a nonzero frameId (§13).
 	if (!isMainFrameNavigation(details)) return;
 	capture(
@@ -755,7 +714,7 @@ export default defineBackground(() => {
 		scheduleDrainAlarm();
 		void reconcile();
 		// storage.session is empty at browser startup, so this mints a fresh
-		// capture session (capture_start + baseline) when the toggle is on.
+		// capture session (capture_start) when the toggle is on.
 		capture(attention.start());
 	});
 
@@ -846,24 +805,4 @@ export default defineBackground(() => {
 			}),
 		);
 	});
-
-	browser.windows.onFocusChanged.addListener((windowId) => {
-		if (windowId === browser.windows.WINDOW_ID_NONE) {
-			// Focus left Chrome entirely — dwell stops here.
-			capture(attention.recordWindowBlur());
-			return;
-		}
-		capture(attention.recordWindowFocus(windowId));
-	});
-
-	browser.idle.onStateChanged.addListener((state) => {
-		capture(attention.recordIdle(state as IdleState));
-	});
-
-	// 60s is the floor for retroactive idle thresholds (§13).
-	try {
-		browser.idle.setDetectionInterval(60);
-	} catch {
-		// Nothing to do: the default 60s interval already applies.
-	}
 });

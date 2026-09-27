@@ -4,11 +4,7 @@ import {
 	createCaptureSession,
 	createEventFactory,
 } from "./attention";
-import {
-	type BaselineTarget,
-	createAttentionCapture,
-	type TabInfo,
-} from "./attentionCapture";
+import { createAttentionCapture, type TabInfo } from "./attentionCapture";
 import type { BrowseEvent, BrowseOutboxEntry, KeyValueStorage } from "./types";
 import { BOOT_ID_KEY, BROWSE_BUFFER_KEY } from "./types";
 
@@ -41,10 +37,6 @@ interface Harness {
 	enqueued: BrowseOutboxEntry[];
 	flush: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	getTab: ReturnType<typeof vi.fn<TabLookup>>;
-	getActiveTabInWindow: ReturnType<typeof vi.fn<TabLookup>>;
-	getBaselineTarget: ReturnType<
-		typeof vi.fn<() => Promise<BaselineTarget | undefined>>
-	>;
 	buffered: () => BrowseEvent[];
 	/** Everything captured: still buffered + already drained, in order. */
 	all: () => BrowseEvent[];
@@ -53,7 +45,6 @@ interface Harness {
 function harness(options: {
 	enabled?: boolean;
 	bootId?: string;
-	baselineTarget?: BaselineTarget;
 	buffer?: BrowseEvent[];
 }): Harness {
 	const storage = fakeStorage(
@@ -72,10 +63,6 @@ function harness(options: {
 	});
 	const flush = vi.fn<() => Promise<void>>(async () => {});
 	const getTab = vi.fn<TabLookup>(async () => undefined);
-	const getActiveTabInWindow = vi.fn<TabLookup>(async () => undefined);
-	const getBaselineTarget = vi.fn<() => Promise<BaselineTarget | undefined>>(
-		async () => options.baselineTarget,
-	);
 
 	const capture = createAttentionCapture({
 		buffer,
@@ -88,9 +75,7 @@ function harness(options: {
 			now: () => 1_700_000_000_000,
 		}),
 		isEnabled: async () => options.enabled === true,
-		getBaselineTarget,
 		getTab,
-		getActiveTabInWindow,
 		flush,
 	});
 
@@ -104,8 +89,6 @@ function harness(options: {
 		enqueued,
 		flush,
 		getTab,
-		getActiveTabInWindow,
-		getBaselineTarget,
 		buffered,
 		all: () => [...enqueued.flatMap((entry) => entry.events), ...buffered()],
 	};
@@ -121,15 +104,10 @@ describe("capture gating (toggle OFF = zero capture)", () => {
 	it("records nothing and observes nothing while disabled", async () => {
 		await off.capture.recordNav({ tabId: 1, url: "https://a.test/" });
 		await off.capture.recordTabActivated({ tabId: 1, windowId: 2 });
-		await off.capture.recordWindowFocus(2);
-		await off.capture.recordWindowBlur();
-		await off.capture.recordIdle("idle");
 
 		expect(off.all()).toEqual([]);
-		// Not even enrichment: nothing is looked up, nothing is queried.
+		// Not even enrichment: nothing is looked up.
 		expect(off.getTab).not.toHaveBeenCalled();
-		expect(off.getActiveTabInWindow).not.toHaveBeenCalled();
-		expect(off.getBaselineTarget).not.toHaveBeenCalled();
 		// And no capture session is minted while off.
 		expect(off.sessionStorage.data[BOOT_ID_KEY]).toBeUndefined();
 	});
@@ -157,65 +135,34 @@ describe("capture gating (toggle OFF = zero capture)", () => {
 });
 
 describe("capture-session boundaries", () => {
-	it("mints a bootId + capture_start + baseline on the first event of a boot", async () => {
-		const h = harness({
-			enabled: true,
-			baselineTarget: {
-				tabId: 5,
-				windowId: 3,
-				url: "https://start.test/",
-				title: "Start",
-			},
-		});
-		await h.capture.recordIdle("active");
+	it("mints a bootId + capture_start on the first event of a boot", async () => {
+		const h = harness({ enabled: true });
+		await h.capture.recordNav({ tabId: 5, url: "https://start.test/" });
 
 		const events = h.all();
-		expect(events.map((e) => e.kind)).toEqual([
-			"capture_start",
-			"tab_activated",
-			"idle",
-		]);
+		// capture_start alone opens the session — no synthetic event follows it.
+		expect(events.map((e) => e.kind)).toEqual(["capture_start", "nav"]);
 		expect(new Set(events.map((e) => e.bootId))).toEqual(new Set(["boot-1"]));
-		expect(events[1]).toMatchObject({
-			kind: "tab_activated",
-			tabId: 5,
-			windowId: 3,
-			url: "https://start.test/",
-			title: "Start",
-		});
+		expect(h.getTab).not.toHaveBeenCalled();
 		expect(h.sessionStorage.data[BOOT_ID_KEY]).toBe("boot-1");
 	});
 
-	it("skips the baseline when no window has focus", async () => {
-		const h = harness({ enabled: true, baselineTarget: undefined });
-		await h.capture.recordWindowBlur();
-		expect(h.all().map((e) => e.kind)).toEqual([
-			"capture_start",
-			"window_blur",
-		]);
-	});
-
-	it("REUSES a stored bootId after worker death — no capture_start, no baseline", async () => {
-		const h = harness({
-			enabled: true,
-			bootId: "boot-alive",
-			baselineTarget: { tabId: 1, windowId: 1 },
-		});
-		await h.capture.recordWindowBlur();
-		await h.capture.recordIdle("idle");
+	it("REUSES a stored bootId after worker death — no capture_start", async () => {
+		const h = harness({ enabled: true, bootId: "boot-alive" });
+		await h.capture.recordNav({ tabId: 1, url: "https://a.test/" });
+		await h.capture.recordTabActivated({ tabId: 1, windowId: 1 });
 
 		const events = h.all();
-		expect(events.map((e) => e.kind)).toEqual(["window_blur", "idle"]);
+		expect(events.map((e) => e.kind)).toEqual(["nav", "tab_activated"]);
 		expect(events.every((e) => e.bootId === "boot-alive")).toBe(true);
-		expect(h.getBaselineTarget).not.toHaveBeenCalled();
 	});
 
 	it("mints ONE session under concurrent events", async () => {
-		const h = harness({ enabled: true, baselineTarget: undefined });
+		const h = harness({ enabled: true });
 		await Promise.all([
-			h.capture.recordWindowBlur(),
-			h.capture.recordIdle("idle"),
-			h.capture.recordWindowBlur(),
+			h.capture.recordNav({ tabId: 1, url: "https://a.test/" }),
+			h.capture.recordTabActivated({ tabId: 2, windowId: 1 }),
+			h.capture.recordNav({ tabId: 3, url: "https://b.test/" }),
 		]);
 		const events = h.all();
 		expect(events.filter((e) => e.kind === "capture_start")).toHaveLength(1);
@@ -223,15 +170,12 @@ describe("capture-session boundaries", () => {
 	});
 
 	it("start() begins the session when the toggle is on (browser startup)", async () => {
-		const h = harness({
-			enabled: true,
-			baselineTarget: { tabId: 9, windowId: 1 },
-		});
+		const h = harness({ enabled: true });
 		await h.capture.start();
 		expect(h.enqueued.flatMap((e) => e.events).map((e) => e.kind)).toEqual([
 			"capture_start",
-			"tab_activated",
 		]);
+		expect(h.getTab).not.toHaveBeenCalled();
 		expect(h.flush).toHaveBeenCalled();
 	});
 
@@ -243,22 +187,15 @@ describe("capture-session boundaries", () => {
 });
 
 describe("toggle reactions", () => {
-	it("enable → fresh bootId + capture_start + baseline, then drain + flush", async () => {
-		const h = harness({
-			enabled: true,
-			bootId: "boot-stale",
-			baselineTarget: { tabId: 2, windowId: 4, url: "https://x.test/" },
-		});
+	it("enable → fresh bootId + capture_start, then drain + flush", async () => {
+		const h = harness({ enabled: true, bootId: "boot-stale" });
 		await h.capture.handleToggleChange({ enabled: false }, { enabled: true });
 
-		// A NEW session even though storage.session still held the old id: dwell
-		// must never be computed across the off gap.
+		// A NEW session even though storage.session still held the old id: the
+		// off gap is a session boundary.
 		expect(h.sessionStorage.data[BOOT_ID_KEY]).toBe("boot-1");
 		const shipped = h.enqueued.flatMap((e) => e.events);
-		expect(shipped.map((e) => e.kind)).toEqual([
-			"capture_start",
-			"tab_activated",
-		]);
+		expect(shipped.map((e) => e.kind)).toEqual(["capture_start"]);
 		expect(shipped.every((e) => e.bootId === "boot-1")).toBe(true);
 		expect(h.flush).toHaveBeenCalledTimes(1);
 		expect(h.buffered()).toEqual([]);
@@ -295,14 +232,14 @@ describe("toggle reactions", () => {
 		// A listener that got past the gate before the toggle landed must not
 		// record under the stopped boot, after its own capture_stop.
 		const raced = harness({ enabled: true, bootId: "" });
-		await raced.capture.recordWindowBlur();
+		await raced.capture.recordNav({ tabId: 1, url: "https://a.test/" });
 		const kinds = raced.all();
-		expect(kinds.map((e) => e.kind)).toEqual(["capture_start", "window_blur"]);
+		expect(kinds.map((e) => e.kind)).toEqual(["capture_start", "nav"]);
 		expect(kinds.every((e) => e.bootId === "boot-1")).toBe(true);
 	});
 
 	it("a re-enable after a disable mints ANOTHER fresh bootId", async () => {
-		const h = harness({ enabled: true, baselineTarget: undefined });
+		const h = harness({ enabled: true });
 		await h.capture.handleToggleChange(undefined, { enabled: true });
 		await h.capture.handleToggleChange({ enabled: true }, { enabled: false });
 		await h.capture.handleToggleChange({ enabled: false }, { enabled: true });
@@ -392,7 +329,7 @@ describe("recording", () => {
 		expect(event !== undefined && "title" in event).toBe(false);
 	});
 
-	it("omits Chrome's empty pre-commit url/title from enrichment and the baseline", async () => {
+	it("omits Chrome's empty pre-commit url/title from enrichment", async () => {
 		const h = harness({ enabled: true, bootId: "boot-live" });
 		// A tab opened with ⌘T reports url "" and title "" until it commits.
 		h.getTab.mockResolvedValue({ tabId: 4, url: "", title: "" });
@@ -401,60 +338,19 @@ describe("recording", () => {
 		expect(activated).toMatchObject({ kind: "tab_activated", tabId: 4 });
 		expect(activated !== undefined && "url" in activated).toBe(false);
 		expect(activated !== undefined && "title" in activated).toBe(false);
-
-		const baseline = harness({
-			enabled: true,
-			baselineTarget: { tabId: 1, windowId: 1, url: "", title: "" },
-		});
-		await baseline.capture.recordWindowBlur();
-		const synthetic = baseline.all()[1];
-		expect(synthetic?.kind).toBe("tab_activated");
-		expect(synthetic !== undefined && "url" in synthetic).toBe(false);
-	});
-
-	it("window_focus enriches with that window's active tab; blur carries nothing", async () => {
-		const h = harness({ enabled: true, bootId: "boot-live" });
-		h.getActiveTabInWindow.mockResolvedValue({
-			tabId: 8,
-			url: "https://b.test/",
-			title: "B",
-		});
-		await h.capture.recordWindowFocus(3);
-		await h.capture.recordWindowBlur();
-
-		const [focus, blur] = h.all();
-		expect(h.getActiveTabInWindow).toHaveBeenCalledWith(3);
-		expect(focus).toMatchObject({
-			kind: "window_focus",
-			windowId: 3,
-			tabId: 8,
-			url: "https://b.test/",
-			title: "B",
-		});
-		expect(Object.keys(blur ?? {}).sort()).toEqual([
-			"bootId",
-			"id",
-			"kind",
-			"occurredAtMs",
-		]);
-	});
-
-	it("idle carries the state", async () => {
-		const h = harness({ enabled: true, bootId: "boot-live" });
-		await h.capture.recordIdle("locked");
-		expect(h.all()[0]).toMatchObject({ kind: "idle", idleState: "locked" });
 	});
 });
 
 describe("drain triggers", () => {
 	it("drains as soon as the buffer reaches 50 events", async () => {
 		const h = harness({ enabled: true, bootId: "boot-live" });
-		for (let i = 0; i < 49; i++) await h.capture.recordWindowBlur();
+		for (let i = 0; i < 49; i++)
+			await h.capture.recordNav({ tabId: 1, url: `https://a.test/${i}` });
 		expect(h.enqueued).toEqual([]);
 		expect(h.flush).not.toHaveBeenCalled();
 		expect(h.buffered()).toHaveLength(49);
 
-		await h.capture.recordWindowBlur();
+		await h.capture.recordNav({ tabId: 1, url: "https://a.test/49" });
 		expect(h.enqueued).toHaveLength(1);
 		expect(h.enqueued[0]?.events).toHaveLength(50);
 		expect(h.flush).toHaveBeenCalledTimes(1);
@@ -463,7 +359,7 @@ describe("drain triggers", () => {
 
 	it("drainAndFlush ships the buffer (the 1-minute alarm path)", async () => {
 		const h = harness({ enabled: true, bootId: "boot-live" });
-		await h.capture.recordIdle("active");
+		await h.capture.recordNav({ tabId: 1, url: "https://a.test/" });
 		expect(h.enqueued).toEqual([]);
 
 		await h.capture.drainAndFlush();

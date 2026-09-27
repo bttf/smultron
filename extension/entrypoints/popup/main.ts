@@ -720,7 +720,7 @@ function renderEditor(
 }
 
 // ---------------------------------------------------------------------------
-// Attention tracking (m19, SPEC §13).
+// Browsing-history toggle (m19, SPEC §13).
 //
 // A GLOBAL setting, so it lives outside #view (view re-renders never touch it)
 // and shows in every paired state. The popup only reads and writes the
@@ -729,7 +729,6 @@ function renderEditor(
 
 const attentionEl = mustGet<HTMLDivElement>("#attention");
 const attentionToggleEl = mustGet<HTMLButtonElement>("#attention-toggle");
-const attentionGradeEl = mustGet<HTMLDivElement>("#attention-grade");
 
 let attentionMounted = false;
 
@@ -754,9 +753,6 @@ async function mountAttention(): Promise<void> {
 
 	function paint(): void {
 		attentionToggleEl.setAttribute("aria-checked", enabled ? "true" : "false");
-		// The grade slot only means anything while capture is running; it stays
-		// a placeholder until the RED-92/93 detectors exist.
-		attentionGradeEl.classList.toggle("hidden", !enabled);
 	}
 
 	attentionToggleEl.addEventListener("click", () => {
