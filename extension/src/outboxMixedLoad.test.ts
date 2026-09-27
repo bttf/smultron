@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { createBrowseBuffer, createEventFactory } from "./attention";
+import { createBrowseBuffer, createEventFactory } from "./browseEvents";
 import {
 	type BlobKeyValueStorage,
 	createOutbox,

@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createBrowseCapture, type TabInfo } from "./browseCapture";
 import {
 	createBrowseBuffer,
 	createCaptureSession,
 	createEventFactory,
-} from "./attention";
-import { createAttentionCapture, type TabInfo } from "./attentionCapture";
+} from "./browseEvents";
 import type { BrowseEvent, BrowseOutboxEntry, KeyValueStorage } from "./types";
 import { BOOT_ID_KEY, BROWSE_BUFFER_KEY } from "./types";
 
@@ -31,7 +31,7 @@ function counterUuid(prefix: string): () => string {
 type TabLookup = (id: number) => Promise<TabInfo | undefined>;
 
 interface Harness {
-	capture: ReturnType<typeof createAttentionCapture>;
+	capture: ReturnType<typeof createBrowseCapture>;
 	storage: FakeStorage;
 	sessionStorage: FakeStorage;
 	enqueued: BrowseOutboxEntry[];
@@ -64,7 +64,7 @@ function harness(options: {
 	const flush = vi.fn<() => Promise<void>>(async () => {});
 	const getTab = vi.fn<TabLookup>(async () => undefined);
 
-	const capture = createAttentionCapture({
+	const capture = createBrowseCapture({
 		buffer,
 		session: createCaptureSession({
 			sessionStorage,

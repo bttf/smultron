@@ -20,12 +20,12 @@ import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { asc, eq, sql } from "drizzle-orm";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createBrowseCapture } from "../../../extension/src/browseCapture";
 import {
 	createBrowseBuffer,
 	createCaptureSession,
 	createEventFactory,
-} from "../../../extension/src/attention";
-import { createAttentionCapture } from "../../../extension/src/attentionCapture";
+} from "../../../extension/src/browseEvents";
 import { toBrowseEventInput } from "../../../extension/src/outbox";
 import type {
 	BrowseOutboxEntry,
@@ -122,7 +122,7 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 		const uuid = uuidSeq();
 		const enqueued: BrowseOutboxEntry[] = [];
 		let enabled = false;
-		const capture = createAttentionCapture({
+		const capture = createBrowseCapture({
 			buffer: createBrowseBuffer({
 				storage: memStorage(),
 				enqueueBrowse: async (entries) => {

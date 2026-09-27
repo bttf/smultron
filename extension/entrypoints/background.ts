@@ -1,3 +1,4 @@
+import { createBrowseCapture, type TabInfo } from "@/src/browseCapture";
 import {
 	createBrowseBuffer,
 	createCaptureSession,
@@ -5,8 +6,7 @@ import {
 	formatTransition,
 	isCaptureEnabled,
 	isMainFrameNavigation,
-} from "@/src/attention";
-import { createAttentionCapture, type TabInfo } from "@/src/attentionCapture";
+} from "@/src/browseEvents";
 import { captureHighlight, type HighlightCaptureDeps } from "@/src/capture";
 import { lookupTabFavicon, type QueryAllTabs } from "@/src/favicon";
 import {
@@ -45,8 +45,8 @@ import {
 	type TreeNode,
 } from "@/src/tree";
 import {
-	ATTENTION_KEY,
 	BROWSE_DRAIN_ALARM,
+	CAPTURE_TOGGLE_KEY,
 	CONFIG_KEY,
 	DEFAULT_BASE_URL,
 	type ExtensionConfig,
@@ -558,7 +558,7 @@ function refreshActiveTabIcon(
 // Browsing history: browse-event capture (SPEC §13, m19).
 //
 // Chrome glue only: the gate, capture-session boundaries, buffer discipline
-// and drain triggers all live in `src/attention.ts` + `src/attentionCapture.ts`,
+// and drain triggers all live in `src/browseEvents.ts` + `src/browseCapture.ts`,
 // where they are unit-tested. Nothing here touches bookmarks (hard rule #1).
 
 const browseBuffer = createBrowseBuffer({
@@ -567,11 +567,11 @@ const browseBuffer = createBrowseBuffer({
 	uuid: () => crypto.randomUUID(),
 });
 
-/** The `attention` toggle; ANY failure reads as disabled — off means off. */
-async function attentionEnabled(): Promise<boolean> {
+/** The capture toggle; ANY failure reads as disabled — off means off. */
+async function captureEnabled(): Promise<boolean> {
 	try {
 		return isCaptureEnabled(
-			(await browser.storage.local.get(ATTENTION_KEY))[ATTENTION_KEY],
+			(await browser.storage.local.get(CAPTURE_TOGGLE_KEY))[CAPTURE_TOGGLE_KEY],
 		);
 	} catch {
 		return false;
@@ -588,7 +588,7 @@ async function getTabInfo(tabId: number): Promise<TabInfo | undefined> {
 	}
 }
 
-const attention = createAttentionCapture({
+const browseCapture = createBrowseCapture({
 	buffer: browseBuffer,
 	session: createCaptureSession({
 		sessionStorage,
@@ -598,7 +598,7 @@ const attention = createAttentionCapture({
 		uuid: () => crypto.randomUUID(),
 		now: Date.now,
 	}),
-	isEnabled: attentionEnabled,
+	isEnabled: captureEnabled,
 	getTab: getTabInfo,
 	flush: () => outbox.flush(),
 });
@@ -625,7 +625,7 @@ function handleNavigation(details: NavDetails): void {
 	// by frameType, since prerendered main frames have a nonzero frameId (§13).
 	if (!isMainFrameNavigation(details)) return;
 	capture(
-		attention.recordNav({
+		browseCapture.recordNav({
 			tabId: details.tabId,
 			// Raw URL (hard rule #3) and the event's OWN timestamp (§13).
 			url: details.url,
@@ -650,7 +650,7 @@ function handleNavigation(details: NavDetails): void {
 const screenshotBackfill = createScreenshotBackfill({
 	// The m19 toggle — the same read the browse-event listeners gate on, so a
 	// storage failure reads as OFF here too (SPEC §13).
-	isCaptureEnabled: attentionEnabled,
+	isCaptureEnabled: captureEnabled,
 	getCached: (url) => trackedCache.get(url),
 	lookupTracked: resolveTracked,
 	sleep: (ms) =>
@@ -706,7 +706,7 @@ export default defineBackground(() => {
 		scheduleDrainAlarm();
 		void reconcile();
 		// Toggle on: treat like a startup (mint a bootId only if absent, §13).
-		capture(attention.start());
+		capture(browseCapture.start());
 	});
 
 	browser.runtime.onStartup.addListener(() => {
@@ -715,12 +715,13 @@ export default defineBackground(() => {
 		void reconcile();
 		// storage.session is empty at browser startup, so this mints a fresh
 		// capture session (capture_start) when the toggle is on.
-		capture(attention.start());
+		capture(browseCapture.start());
 	});
 
 	browser.alarms.onAlarm.addListener((alarm) => {
 		if (alarm.name === FLUSH_ALARM) void outbox.flush();
-		if (alarm.name === BROWSE_DRAIN_ALARM) capture(attention.drainAndFlush());
+		if (alarm.name === BROWSE_DRAIN_ALARM)
+			capture(browseCapture.drainAndFlush());
 	});
 
 	// --- m15 action-icon watcher (SPEC §6) --------------------------------
@@ -770,12 +771,12 @@ export default defineBackground(() => {
 
 		// m19: the opt-in toggle flipped — capture_start on enable,
 		// capture_stop on disable, then a drain so the edge ships promptly.
-		const attentionChange = changes[ATTENTION_KEY];
-		if (attentionChange !== undefined) {
+		const captureToggleChange = changes[CAPTURE_TOGGLE_KEY];
+		if (captureToggleChange !== undefined) {
 			capture(
-				attention.handleToggleChange(
-					attentionChange.oldValue,
-					attentionChange.newValue,
+				browseCapture.handleToggleChange(
+					captureToggleChange.oldValue,
+					captureToggleChange.newValue,
 				),
 			);
 		}
@@ -799,7 +800,7 @@ export default defineBackground(() => {
 
 	browser.tabs.onActivated.addListener((info) => {
 		capture(
-			attention.recordTabActivated({
+			browseCapture.recordTabActivated({
 				tabId: info.tabId,
 				windowId: info.windowId,
 			}),

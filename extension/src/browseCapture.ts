@@ -18,8 +18,8 @@ import type {
 	BrowseBuffer,
 	BrowseEventFactory,
 	CaptureSession,
-} from "./attention";
-import { parseAttentionToggle, shouldDrainAfterAppend } from "./attention";
+} from "./browseEvents";
+import { parseCaptureToggle, shouldDrainAfterAppend } from "./browseEvents";
 import type { BrowseEvent } from "./types";
 
 /** What `tabs.get` contributes to an event (all optional). */
@@ -38,11 +38,11 @@ export interface NavObservation {
 	documentLifecycle?: string;
 }
 
-export interface AttentionCaptureDeps {
+export interface BrowseCaptureDeps {
 	buffer: BrowseBuffer;
 	session: CaptureSession;
 	events: BrowseEventFactory;
-	/** Reads the `attention` toggle; must resolve false on any failure. */
+	/** Reads the capture toggle; must resolve false on any failure. */
 	isEnabled: () => Promise<boolean>;
 	/** `tabs.get` enrichment; undefined when the lookup fails. */
 	getTab: (tabId: number) => Promise<TabInfo | undefined>;
@@ -50,7 +50,7 @@ export interface AttentionCaptureDeps {
 	flush: () => Promise<void>;
 }
 
-export interface AttentionCapture {
+export interface BrowseCapture {
 	/** `webNavigation.onCommitted` / `onHistoryStateUpdated`, main frame. */
 	recordNav(observation: NavObservation): Promise<void>;
 	/** `tabs.onActivated` — `activeInfo` always carries both ids. */
@@ -67,9 +67,7 @@ export interface AttentionCapture {
 	drainAndFlush(): Promise<void>;
 }
 
-export function createAttentionCapture(
-	deps: AttentionCaptureDeps,
-): AttentionCapture {
+export function createBrowseCapture(deps: BrowseCaptureDeps): BrowseCapture {
 	const { buffer, session, events, isEnabled, getTab, flush } = deps;
 
 	/**
@@ -160,7 +158,7 @@ export function createAttentionCapture(
 			}),
 
 		handleToggleChange: async (oldValue, newValue) => {
-			const edge = parseAttentionToggle(oldValue, newValue);
+			const edge = parseCaptureToggle(oldValue, newValue);
 			if (edge === undefined) return;
 			if (edge === "enabled") {
 				// A fresh capture session even if storage.session still holds the

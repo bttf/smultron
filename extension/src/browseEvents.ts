@@ -1,15 +1,14 @@
 /**
  * Browsing-history capture primitives (m19, SPEC §13): the opt-in gate, the
  * capture-session (`bootId`) store, the per-kind event constructors, and the
- * storage-backed browse-event buffer. The module and its `attention` storage
- * key keep their m19 names; the attention-tracking project that introduced
- * them was canceled 2026-09-27.
+ * storage-backed browse-event buffer. The toggle's storage key is still the
+ * m19 string `attention` (see CAPTURE_TOGGLE_KEY).
  *
  * Pure logic only — every dependency (storage, clock, uuid, outbox enqueue)
  * is injected, so the whole thing is unit-testable and contains NO Chrome
  * imports (extension/AGENTS.md). Chrome wiring lives in
  * `entrypoints/background.ts`; the orchestration that sits between the two is
- * `src/attentionCapture.ts`.
+ * `src/browseCapture.ts`.
  *
  * Buffer discipline (SPEC §13 — loss-proofing):
  * - Appends AND drains serialize through the SAME promise-chain mutex. An
@@ -59,7 +58,7 @@ export function isCaptureEnabled(raw: unknown): boolean {
  * EDGES matter: a write that leaves the effective state unchanged (e.g. the
  * popup re-saving `{enabled: true}`) is not a capture-session boundary.
  */
-export function parseAttentionToggle(
+export function parseCaptureToggle(
 	oldValue: unknown,
 	newValue: unknown,
 ): "enabled" | "disabled" | undefined {

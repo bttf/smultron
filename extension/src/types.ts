@@ -155,7 +155,7 @@ export interface BrowseOutboxEntry {
 }
 
 /** The `attention` storage value (SPEC §13). A missing key = disabled. */
-export interface AttentionSettings {
+export interface CaptureToggleSettings {
 	enabled: boolean;
 }
 
@@ -266,8 +266,10 @@ export const MAX_TIMESTAMP_MS = 253_402_300_799_999;
 export const CONFIG_KEY = "config";
 export const OUTBOX_KEY = "outbox";
 /** m19: the opt-in toggle — its OWN key, never the options-page config
- * object (which is rewritten wholesale on save). Missing = disabled. */
-export const ATTENTION_KEY = "attention";
+ * object (which is rewritten wholesale on save). Missing = disabled. The
+ * string predates the browsing-history naming; changing it would read as
+ * "disabled" and switch off every running capture. */
+export const CAPTURE_TOGGLE_KEY = "attention";
 /** m19: the browse-event buffer awaiting a drain into the outbox. */
 export const BROWSE_BUFFER_KEY = "browseBuffer";
 /** m20: the new tab page's render snapshot — a paint cache, never a write

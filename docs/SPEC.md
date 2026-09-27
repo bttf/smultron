@@ -401,7 +401,7 @@ Every external step throws `PipelineError` (`lib/pipelineError.ts`) carrying a s
 
 ## 13. Browsing history: browse-event capture (m19)
 
-The extension records the pages the user visits into `browse_events`, and `/events` (§9) lists them, searchable over URL and title. m19 built this as the collection infrastructure for an attention-tracking project (Linear "Smultron: Attention Tracking", RED-90–94, RED-200). That project was canceled on 2026-09-27: no detectors, categories or toasts will be built. The capture stays as a browsing-history feature, narrowed to the events a history needs. The m19 names stay in code: the `attention` storage key, `src/attention.ts` and `src/attentionCapture.ts`.
+The extension records the pages the user visits into `browse_events`, and `/events` (§9) lists them, searchable over URL and title. m19 built this as the collection infrastructure for an attention-tracking project (Linear "Smultron: Attention Tracking", RED-90–94, RED-200). That project was canceled on 2026-09-27: no detectors, categories or toasts will be built. The capture stays as a browsing-history feature, narrowed to the events a history needs. The code lives in `extension/src/browseEvents.ts` (gate, session store, event constructors, buffer) and `extension/src/browseCapture.ts` (orchestration); the files were renamed from their m19 `attention*` names on 2026-09-27. The toggle's storage key is still the m19 string `attention` (`CAPTURE_TOGGLE_KEY`), because a new key would read as disabled and switch off a running capture.
 
 ### Principles
 

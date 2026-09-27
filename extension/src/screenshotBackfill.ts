@@ -15,9 +15,9 @@
  *
  * - **The m19 toggle gates it, and is checked FIRST.** Backfill is
  *   opportunistic observation of pages the user visits, so it lives under the
- *   attention opt-in (§13). Off — or a storage read that throws — means zero
- *   lookups, zero captures, zero enqueues attributable to backfill, and the
- *   check precedes everything so that stays literally true.
+ *   browsing-history opt-in (§13). Off — or a storage read that throws —
+ *   means zero lookups, zero captures, zero enqueues attributable to
+ *   backfill, and the check precedes everything so that stays literally true.
  * - **Uncertainty does nothing.** Only `hasScreenshot === false` triggers. An
  *   optimistic cache override (`onCreated`, a popup ping) stores `{ tracked }`
  *   alone, so the page just saved never backfills itself while that entry is
@@ -64,7 +64,7 @@ export interface TabState {
 }
 
 export interface ScreenshotBackfillDeps {
-	/** The m19 `attention` toggle (§13). May reject — that reads as OFF. */
+	/** The m19 capture toggle (§13). May reject — that reads as OFF. */
 	isCaptureEnabled: () => Promise<boolean>;
 	/** Fresh tracked-cache entry for a raw URL, or undefined on a miss. */
 	getCached: (url: string) => TrackedEntry | undefined;

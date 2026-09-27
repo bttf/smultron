@@ -6,9 +6,9 @@ import {
 	formatTransition,
 	isCaptureEnabled,
 	isMainFrameNavigation,
-	parseAttentionToggle,
+	parseCaptureToggle,
 	shouldDrainAfterAppend,
-} from "./attention";
+} from "./browseEvents";
 import type { BrowseEvent, BrowseOutboxEntry, KeyValueStorage } from "./types";
 import {
 	BOOT_ID_KEY,
@@ -70,23 +70,23 @@ describe("isCaptureEnabled", () => {
 	});
 });
 
-describe("parseAttentionToggle", () => {
+describe("parseCaptureToggle", () => {
 	it("classifies the two capture-session edges", () => {
-		expect(parseAttentionToggle(undefined, { enabled: true })).toBe("enabled");
-		expect(parseAttentionToggle({ enabled: false }, { enabled: true })).toBe(
+		expect(parseCaptureToggle(undefined, { enabled: true })).toBe("enabled");
+		expect(parseCaptureToggle({ enabled: false }, { enabled: true })).toBe(
 			"enabled",
 		);
-		expect(parseAttentionToggle({ enabled: true }, { enabled: false })).toBe(
+		expect(parseCaptureToggle({ enabled: true }, { enabled: false })).toBe(
 			"disabled",
 		);
-		expect(parseAttentionToggle({ enabled: true }, undefined)).toBe("disabled");
+		expect(parseCaptureToggle({ enabled: true }, undefined)).toBe("disabled");
 	});
 
 	it("ignores writes that don't change the effective state", () => {
 		expect(
-			parseAttentionToggle({ enabled: true }, { enabled: true }),
+			parseCaptureToggle({ enabled: true }, { enabled: true }),
 		).toBeUndefined();
-		expect(parseAttentionToggle({ enabled: false }, undefined)).toBeUndefined();
+		expect(parseCaptureToggle({ enabled: false }, undefined)).toBeUndefined();
 	});
 });
 
