@@ -210,11 +210,14 @@ export const articleAudio = smultron
 	.enableRLS();
 
 /**
- * Browse-event kinds (m19, SPEC §13) — the raw attention EDGES the extension
- * captures. Stored as plain `text`, not a pg enum, for the same reason as
- * ARTICLE_STATUSES: the set is expected to evolve and a text column keeps
- * that a code change instead of an ALTER TYPE migration. This TS union is
- * the authority (the API's Zod enum is built from it).
+ * Browse-event kinds (m19, SPEC §13). The extension captures `nav`,
+ * `tab_activated`, `capture_start` and `capture_stop`; `window_focus`,
+ * `window_blur` and `idle` are no longer captured (2026-09-27) but stay
+ * accepted and stored, because existing rows and batches queued by older
+ * builds carry them. Stored as plain `text`, not a pg enum, for the same
+ * reason as ARTICLE_STATUSES: the set is expected to evolve and a text
+ * column keeps that a code change instead of an ALTER TYPE migration. This
+ * TS union is the authority (the API's Zod enum is built from it).
  */
 export const BROWSE_EVENT_KINDS = [
 	"nav",
@@ -233,7 +236,7 @@ export const IDLE_STATES = ["active", "idle", "locked"] as const;
 
 export type IdleState = (typeof IDLE_STATES)[number];
 
-// Attention-tracking telemetry (m19, SPEC §13). APPEND-ONLY: rows are never
+// Browsing-history capture (m19, SPEC §13). APPEND-ONLY: rows are never
 // updated or deleted. COMPLETELY separate from bookmarks — nothing here
 // references or touches the bookmarks table, which is why no part of this
 // feature can bump `bookmarks.updated_at` (Hard rule #1).
@@ -246,8 +249,8 @@ export const browseEvents = smultron
 			// Extension-minted uuid; the idempotency key that makes at-least-once
 			// outbox delivery safe (unique with user_id below, DO NOTHING insert).
 			clientEventId: text("client_event_id").notNull(),
-			// Capture-session uuid (SPEC §13): dwell intervals are only valid
-			// BETWEEN events sharing a boot_id.
+			// Capture-session uuid (SPEC §13): groups the events of one capture
+			// session; a boot_id change marks a gap the capture could not see.
 			bootId: text("boot_id").notNull(),
 			// One of BROWSE_EVENT_KINDS.
 			kind: text().notNull(),

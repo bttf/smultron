@@ -17,15 +17,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-import { sql } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createBrowseCapture } from "../../../extension/src/browseCapture";
 import {
 	createBrowseBuffer,
 	createCaptureSession,
 	createEventFactory,
-} from "../../../extension/src/attention";
-import { createAttentionCapture } from "../../../extension/src/attentionCapture";
+} from "../../../extension/src/browseEvents";
 import { toBrowseEventInput } from "../../../extension/src/outbox";
 import type {
 	BrowseOutboxEntry,
@@ -122,7 +122,7 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 		const uuid = uuidSeq();
 		const enqueued: BrowseOutboxEntry[] = [];
 		let enabled = false;
-		const capture = createAttentionCapture({
+		const capture = createBrowseCapture({
 			buffer: createBrowseBuffer({
 				storage: memStorage(),
 				enqueueBrowse: async (entries) => {
@@ -133,18 +133,7 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 			session: createCaptureSession({ sessionStorage: memStorage(), uuid }),
 			events: createEventFactory({ uuid, now: () => 1_754_900_000_000 }),
 			isEnabled: async () => enabled,
-			getBaselineTarget: async () => ({
-				tabId: 3,
-				windowId: 7,
-				url: "https://example.com/baseline",
-				title: "Baseline",
-			}),
 			getTab: async () => ({
-				tabId: 4,
-				url: "https://example.com/tab",
-				title: "Tab",
-			}),
-			getActiveTabInWindow: async () => ({
 				tabId: 4,
 				url: "https://example.com/tab",
 				title: "Tab",
@@ -164,19 +153,19 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 			documentLifecycle: "prerender",
 		});
 		await capture.recordTabActivated({ tabId: 4, windowId: 7 });
-		await capture.recordWindowFocus(7);
-		await capture.recordWindowBlur();
-		await capture.recordIdle("idle");
 		enabled = false;
 		await capture.handleToggleChange({ enabled: true }, { enabled: false });
 
 		const events = enqueued.flatMap((entry) => entry.events);
-		// The stream exercised the complete §13 kind set (capture_start + the
-		// synthetic baseline came from the enable edge, capture_stop from the
-		// disable edge).
-		expect(new Set(events.map((event) => event.kind))).toEqual(
-			new Set(BROWSE_EVENT_KINDS),
-		);
+		// The stream exercised every kind the capture still emits: capture_start
+		// from the enable edge, nav and tab_activated from the listeners,
+		// capture_stop from the disable edge.
+		expect(events.map((event) => event.kind)).toEqual([
+			"capture_start",
+			"nav",
+			"tab_activated",
+			"capture_stop",
+		]);
 
 		const body = toWireBody(events);
 		const parsed = browseEventsBodySchema.safeParse(body);
@@ -241,19 +230,55 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 				url: "https://example.com/t",
 				title: "y".repeat(6_000),
 			}),
-			factory.windowFocus({
+			// Events buffered by a pre-2026-09-27 build, which still captured
+			// window_focus / window_blur / idle. They can sit in the buffer or the
+			// outbox across an upgrade, so they must still convert and insert
+			// with every field intact.
+			{
+				id: uuid(),
 				bootId,
+				kind: "window_focus",
+				occurredAtMs: 1_754_900_000_000,
 				windowId: 7,
 				tabId: 5,
 				url: "https://example.com/w",
-				title: "",
-			}),
+				title: "Window",
+			},
 			// Focus enrichment failed: bare window_focus.
-			factory.windowFocus({ bootId, windowId: 8 }),
-			factory.windowBlur({ bootId }),
-			factory.idle({ bootId, idleState: "active" }),
-			factory.idle({ bootId, idleState: "idle" }),
-			factory.idle({ bootId, idleState: "locked" }),
+			{
+				id: uuid(),
+				bootId,
+				kind: "window_focus",
+				occurredAtMs: 1_754_900_000_000,
+				windowId: 8,
+			},
+			{
+				id: uuid(),
+				bootId,
+				kind: "window_blur",
+				occurredAtMs: 1_754_900_000_000,
+			},
+			{
+				id: uuid(),
+				bootId,
+				kind: "idle",
+				occurredAtMs: 1_754_900_000_000,
+				idleState: "active",
+			},
+			{
+				id: uuid(),
+				bootId,
+				kind: "idle",
+				occurredAtMs: 1_754_900_000_000,
+				idleState: "idle",
+			},
+			{
+				id: uuid(),
+				bootId,
+				kind: "idle",
+				occurredAtMs: 1_754_900_000_000,
+				idleState: "locked",
+			},
 			factory.captureStart({ bootId }),
 			factory.captureStop({ bootId }),
 		];
@@ -272,9 +297,39 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 		expect(parsed.data.events[4]).not.toHaveProperty("url");
 		expect(parsed.data.events[4]).not.toHaveProperty("title");
 		expect(parsed.data.events[5]?.title).toHaveLength(4_096);
+		// The legacy kinds kept their kind-specific fields through the wire.
+		expect(parsed.data.events[6]).toMatchObject({
+			kind: "window_focus",
+			windowId: 7,
+			tabId: 5,
+			url: "https://example.com/w",
+			title: "Window",
+		});
+		expect(parsed.data.events[7]).toMatchObject({
+			kind: "window_focus",
+			windowId: 8,
+		});
+		expect(
+			parsed.data.events.slice(9, 12).map((event) => event.idleState),
+		).toEqual(["active", "idle", "locked"]);
 
 		const result = await applyBrowseEvents(db, USER, parsed.data.events);
 		expect(result).toEqual({ inserted: events.length, deduped: 0 });
+
+		// ...and the stored rows still carry them.
+		const idleRows = await db
+			.select({
+				kind: schema.browseEvents.kind,
+				idleState: schema.browseEvents.idleState,
+			})
+			.from(schema.browseEvents)
+			.where(eq(schema.browseEvents.kind, "idle"))
+			.orderBy(asc(schema.browseEvents.clientEventId));
+		expect(idleRows).toEqual([
+			{ kind: "idle", idleState: "active" },
+			{ kind: "idle", idleState: "idle" },
+			{ kind: "idle", idleState: "locked" },
+		]);
 	});
 
 	it("an overfull buffer drains into batches the server's cap accepts", async () => {
@@ -291,7 +346,7 @@ describe("wire compatibility: capture orchestrator → Zod → PGlite", () => {
 		});
 
 		for (let i = 0; i < 600; i += 1) {
-			await buffer.append(factory.windowBlur({ bootId }));
+			await buffer.append(factory.captureStart({ bootId }));
 		}
 		await buffer.drain();
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEventFactory } from "./attention";
+import { createEventFactory } from "./browseEvents";
 import {
 	type BlobKeyValueStorage,
 	createBrowseEntry,

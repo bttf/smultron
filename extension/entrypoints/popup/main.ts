@@ -6,13 +6,13 @@
 // every write is user-initiated. All popup traffic is DIRECT fetch with
 // truthful user-visible outcomes — never the outbox.
 
-import { isCaptureEnabled } from "@/src/attention";
+import { isCaptureEnabled } from "@/src/browseEvents";
 import { createCoalescedSender } from "@/src/coalesce";
 import { relativeTime } from "@/src/relativeTime";
 import { filterTagSuggestions } from "@/src/tagSuggestions";
 import { trackedChangedMessage } from "@/src/trackedCache";
 import {
-	ATTENTION_KEY,
+	CAPTURE_TOGGLE_KEY,
 	CONFIG_KEY,
 	DEFAULT_BASE_URL,
 	type ExtensionConfig,
@@ -265,9 +265,9 @@ function renderUnsupported(): void {
 
 function renderUnpaired(): void {
 	setHeaderStatus("none");
-	// The attention section belongs to PAIRED states only — a 401 mid-session
+	// The browsing-history section belongs to PAIRED states only — a 401 mid-session
 	// (revoked token) lands here with the section already mounted (SPEC §13).
-	hideAttention();
+	hideHistoryToggle();
 	const message = el("div", "message", "Not paired — open settings to pair.");
 	const button = el("button", "btn-accent", "Open settings");
 	button.type = "button";
@@ -720,53 +720,49 @@ function renderEditor(
 }
 
 // ---------------------------------------------------------------------------
-// Attention tracking (m19, SPEC §13).
+// Browsing-history toggle (m19, SPEC §13).
 //
 // A GLOBAL setting, so it lives outside #view (view re-renders never touch it)
 // and shows in every paired state. The popup only reads and writes the
 // `attention` storage key — it captures nothing and pings nothing; the
 // background reacts to the key via storage.onChanged.
 
-const attentionEl = mustGet<HTMLDivElement>("#attention");
-const attentionToggleEl = mustGet<HTMLButtonElement>("#attention-toggle");
-const attentionGradeEl = mustGet<HTMLDivElement>("#attention-grade");
+const historyEl = mustGet<HTMLDivElement>("#history");
+const historyToggleEl = mustGet<HTMLButtonElement>("#history-toggle");
 
-let attentionMounted = false;
+let historyMounted = false;
 
 /** Unpaired states hide the section (it may already be mounted on a 401). */
-function hideAttention(): void {
-	attentionEl.classList.add("hidden");
+function hideHistoryToggle(): void {
+	historyEl.classList.add("hidden");
 }
 
-async function mountAttention(): Promise<void> {
-	if (attentionMounted) return;
-	attentionMounted = true;
+async function mountHistoryToggle(): Promise<void> {
+	if (historyMounted) return;
+	historyMounted = true;
 
 	// Missing key = disabled (SPEC §13); a read failure shows the same.
 	let enabled = false;
 	try {
 		enabled = isCaptureEnabled(
-			(await browser.storage.local.get(ATTENTION_KEY))[ATTENTION_KEY],
+			(await browser.storage.local.get(CAPTURE_TOGGLE_KEY))[CAPTURE_TOGGLE_KEY],
 		);
 	} catch {
 		enabled = false;
 	}
 
 	function paint(): void {
-		attentionToggleEl.setAttribute("aria-checked", enabled ? "true" : "false");
-		// The grade slot only means anything while capture is running; it stays
-		// a placeholder until the RED-92/93 detectors exist.
-		attentionGradeEl.classList.toggle("hidden", !enabled);
+		historyToggleEl.setAttribute("aria-checked", enabled ? "true" : "false");
 	}
 
-	attentionToggleEl.addEventListener("click", () => {
+	historyToggleEl.addEventListener("click", () => {
 		enabled = !enabled;
 		paint();
-		void browser.storage.local.set({ [ATTENTION_KEY]: { enabled } });
+		void browser.storage.local.set({ [CAPTURE_TOGGLE_KEY]: { enabled } });
 	});
 
 	paint();
-	attentionEl.classList.remove("hidden");
+	historyEl.classList.remove("hidden");
 }
 
 // ---------------------------------------------------------------------------
@@ -795,7 +791,7 @@ async function init(): Promise<void> {
 		// Still a paired state when a token is configured, and the toggle is a
 		// global setting — the tab just isn't bookmarkable.
 		void loadPopupConfig().then((paired) => {
-			if (paired !== undefined) void mountAttention();
+			if (paired !== undefined) void mountHistoryToggle();
 		});
 		return;
 	}
@@ -806,8 +802,8 @@ async function init(): Promise<void> {
 		renderUnpaired();
 		return;
 	}
-	// Paired: every state below the config check shows the attention section.
-	void mountAttention();
+	// Paired: every state below the config check shows the browsing-history section.
+	void mountHistoryToggle();
 
 	const result = await getBookmarkByUrl(config, rawUrl);
 	if (!result.ok) {

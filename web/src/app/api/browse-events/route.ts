@@ -1,5 +1,5 @@
 // POST /api/browse-events — SPEC §8/§13. Token-authed write path for the
-// extension's attention-tracking capture. Validates the batch (strict at
+// extension's browsing-history capture. Validates the batch (strict at
 // every level, per-kind field requirements) then delegates to
 // applyBrowseEvents, which normalizes URLs server-side (Hard rule #3) and
 // inserts append-only with ON CONFLICT DO NOTHING.

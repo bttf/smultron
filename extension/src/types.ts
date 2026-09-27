@@ -81,9 +81,16 @@ export interface ScreenshotOutboxEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Attention tracking (m19, SPEC §13).
+// Browsing history (m19, SPEC §13).
 
-/** The browse-event kinds of SPEC §13. */
+/**
+ * The browse-event kinds of SPEC §13. The extension emits `nav`,
+ * `tab_activated`, `capture_start` and `capture_stop`. `window_focus`,
+ * `window_blur` and `idle` (with `idleState`) are no longer captured, but
+ * builds before 2026-09-27 buffered them, and a queued event must still
+ * reach the wire with every field it was captured with — a dropped
+ * `idleState` would 400 the whole batch.
+ */
 export type BrowseEventKind =
 	| "nav"
 	| "tab_activated"
@@ -148,7 +155,7 @@ export interface BrowseOutboxEntry {
 }
 
 /** The `attention` storage value (SPEC §13). A missing key = disabled. */
-export interface AttentionSettings {
+export interface CaptureToggleSettings {
 	enabled: boolean;
 }
 
@@ -259,8 +266,10 @@ export const MAX_TIMESTAMP_MS = 253_402_300_799_999;
 export const CONFIG_KEY = "config";
 export const OUTBOX_KEY = "outbox";
 /** m19: the opt-in toggle — its OWN key, never the options-page config
- * object (which is rewritten wholesale on save). Missing = disabled. */
-export const ATTENTION_KEY = "attention";
+ * object (which is rewritten wholesale on save). Missing = disabled. The
+ * string predates the browsing-history naming; changing it would read as
+ * "disabled" and switch off every running capture. */
+export const CAPTURE_TOGGLE_KEY = "attention";
 /** m19: the browse-event buffer awaiting a drain into the outbox. */
 export const BROWSE_BUFFER_KEY = "browseBuffer";
 /** m20: the new tab page's render snapshot — a paint cache, never a write

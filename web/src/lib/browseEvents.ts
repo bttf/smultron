@@ -1,4 +1,4 @@
-// Browse-event capture core — SPEC §13 (attention tracking) + §8
+// Browse-event capture core — SPEC §13 (browsing history) + §8
 // (POST/GET /api/browse-events). Pure functions over an injected Drizzle db
 // (PGlite-testable, same pattern as sync.ts / bookmarks.ts); callers (route
 // handlers) own auth, this module owns validation + the queries.
