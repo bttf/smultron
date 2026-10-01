@@ -124,6 +124,8 @@ create table smultron.article_audio (
 
 Highlights are **hard-deleted** (the soft-delete rule is scoped to bookmarks): a highlight is a low-stakes, easily-recreated capture, not deliberate curation. Duplicate texts per bookmark are allowed (no unique constraint).
 
+`smultron.snapshots` (m25) is specified in §17.2.
+
 Indexes:
 
 -   `unique (bookmark_id)` on `articles` (one article per bookmark) and `btree (user_id, bookmark_id)` for the ownership-scoped lookup
@@ -173,7 +175,7 @@ A live capture carries `faviconUrl`: the `favIconUrl` of the open tab showing th
 -   **Insert**: the validated value is stored. **On conflict (live re-save)**: `favicon_url = coalesce(bookmarks.favicon_url, excluded.favicon_url)` — fill-when-null, exactly like the m17 fill. A resolved icon is site-owned and survives a re-save; a re-save carrying no favicon never erases one.
 -   **Backfill never carries it and never writes it.** The tree walk (`flattenTree`) omits the field, and `applySync` ignores any favicon in `backfill` mode — backfill inserts write null (the column default) and backfill conflicts stay `DO NOTHING`, byte-identical on `updated_at`.
 
-Live captures — this path, web adds (below), and highlight inserts (below) — are the ONLY paths that bump `updated_at`.
+Live captures — this path, web adds (below), highlight inserts (below), and snapshot creates (m25, §17.8) — are the ONLY paths that bump `updated_at`.
 
 ### `web add` (site composer, via `POST /api/bookmarks`, m11)
 
@@ -213,7 +215,7 @@ Server normalizes the URL and looks up `smultron.bookmarks` by `(user_id, url_no
 
 ## 6. Extension (`extension/`, WXT, MV3)
 
--   `manifest`: permissions `bookmarks`, `storage`, `alarms`, `contextMenus` (later milestones added `activeTab`, `tabs`, `webNavigation`, and — m23 — `unlimitedStorage`; m19's `idle` was removed on 2026-09-27); `host_permissions` for `APP_URL` and — m23 — `<all_urls>`. **Least privilege, and the two recorded exceptions**: `tabs` (m15, below) reads the active tab's URL passively; `<all_urls>` (m23, §15) exists because `chrome.tabs.captureVisibleTab` may only capture a tab whose origin the extension holds a host permission for, and a Ctrl+D save is not an extension invocation, so it grants no `activeTab` — without `<all_urls>` a save-time screenshot is impossible. The install warning escalates to "read and change all your data on all websites"; the extension never injects scripts or reads a tab's content, only pixels of the tab being bookmarked (the one page read anywhere is the m24 speed-dial metadata fill, §16.2: an uncredentialed GET from the Options page of a URL the user typed there). `unlimitedStorage` (no install warning) keeps queued screenshots from exhausting `chrome.storage.local`'s default 10 MB quota, which would make every outbox write — bookmark syncs included — fail. `history` is still deliberately absent.
+-   `manifest`: permissions `bookmarks`, `storage`, `alarms`, `contextMenus` (later milestones added `activeTab`, `tabs`, `webNavigation`, and — m23 — `unlimitedStorage`; m19's `idle` was removed on 2026-09-27); `host_permissions` for `APP_URL` and — m23 — `<all_urls>`. **Least privilege, and the two recorded exceptions**: `tabs` (m15, below) reads the active tab's URL passively; `<all_urls>` (m23, §15) exists because `chrome.tabs.captureVisibleTab` may only capture a tab whose origin the extension holds a host permission for, and a Ctrl+D save is not an extension invocation, so it grants no `activeTab` — without `<all_urls>` a save-time screenshot is impossible. The install warning escalates to "read and change all your data on all websites"; the extension never injects scripts or reads a tab's content, only pixels of the tab being bookmarked (the one page read anywhere is the m24 speed-dial metadata fill, §16.2: an uncredentialed GET from the Options page of a URL the user typed there). `unlimitedStorage` (no install warning) keeps queued screenshots from exhausting `chrome.storage.local`'s default 10 MB quota, which would make every outbox write — bookmark syncs included — fail. `history` is still deliberately absent. **m25 amendment (§17)**: the extension adds `scripting` and `debugger` and DOES read page content, but only in the active tab and only after the user clicks `Snapshot` in the popup — it injects the snapshot script, which may make same-origin requests with the user's session, and captures the full page over CDP (§17.1, §17.7). Nothing else injects or reads.
 -   **Service worker**:
     -   `onCreated` listener → enqueue `{mode:'live', bookmark}` in outbox → (m23) capture the page screenshot and enqueue a `screenshot` entry BEHIND it (§15) → flush. The live entry also carries `faviconUrl` when a tab is open on the URL (`chrome.tabs.query({})` + exact `tab.url` string match, active tab preferred — NEVER a `{url}` match pattern, which drops fragments; pure helper `src/favicon.ts`, unit-tested) — see §5. Backfill entries never carry it.
     -   `chrome.runtime.onStartup` + `onInstalled` → reconciliation sweep: `chrome.bookmarks.getTree()`, flatten (skip folders; capture each bookmark's folder path), send in batches of ~500 as `{mode:'backfill', bookmarks:[...]}` → also flush outbox.
@@ -398,6 +400,7 @@ Every external step throws `PipelineError` (`lib/pipelineError.ts`) carrying a s
 22. URL fidelity + pin editability: fragment-keeping normalization (`:~:` directive stripped, bare `#` dropped) with the `0013_keep-fragments` recompute of `url_normalized` for bookmarks AND browse_events; `url` on `PATCH /api/bookmarks/:id` (web-add validation, 409 `duplicate_url` with the conflicting row, `favicon_url` cleared on host change, never bumps `updated_at`) + click-to-edit URL in the expanded panel; pinned rows return to the feed log (accent `★` marker, `matching` no longer subtracts pins, "Everything is pinned." empty state retired, pinned-duplicate composer special case retired, new-tab log inherits + `★`); shelf-card `✎` opening the shared expanded editor beneath the shelf (§3, §4, §6, §8, §9, §13).
 23. Page screenshots (RED-206): `screenshot_path` column (`0014_screenshot-path`, add-column only); a PUBLIC Supabase Storage bucket bootstrapped by the generalized `ensureBucket`; `POST /api/bookmarks/by-url/screenshot` (token auth, raw JPEG body, keep-first, never bumps `updated_at`); `screenshotUrl` on every bookmark row; extension capture-on-save (`<all_urls>` + `unlimitedStorage`, `captureVisibleTab` → OffscreenCanvas downscale → `screenshot` outbox kind with a blob side-store, drop-oldest cap, poison rule + attempt counter); opportunistic backfill for bookmarked pages without a screenshot, gated on the m19 toggle; screenshot-backed pinned cards on the site shelf (react-spring scale + CSS pan) and the new tab shelf (CSS only), with the m20 snapshot cache carrying `screenshotUrl` (§3, §6, §8, §9, §13, §15).
 24. Speed dial (RED-244): a row of round site icons at the top of the new tab page, configured from the Options page (add by URL, remove) and reordered by dragging on the new tab page; extension-local in `chrome.storage.local` — no server, schema or permission change (§6, §16).
+25. Page snapshots (RED-407): user-initiated snapshot from the popup — in-page extraction by site adapters (reddit first) with a Readability generic fallback, full-page CDP screenshot tiles, metadata, raw HTML; `snapshots` table (`0015_snapshots`) attached to the bookmark as a live capture; a PRIVATE bucket with direct-to-Storage signed uploads; `/api/snapshots` routes; feed pill, panel section, and `/snapshots/:id` page with Copy markdown (§17). Lighter process.
 
 ## 13. Browsing history: browse-event capture (m19)
 
@@ -556,3 +559,199 @@ A row of round site icons at the top of the new tab page. Each icon is a plain l
 
 -   Pure logic in `extension/src/speedDial.ts` with storage, fetch and the id minter injected — no Chrome imports (extension/AGENTS.md). Chrome/DOM wiring only in `entrypoints/options/main.ts` and `entrypoints/newtab/main.ts`. Both pages reuse their existing `:root` tokens, so dark mode follows.
 -   Vitest covers: `parseDialUrl` (scheme prepend, case-insensitive scheme, non-http(s) rejected, userinfo rejected — `mailto:` included — dotless host rejected, `localhost` accepted, empty → no-op, `href` canonical form); `readSpeedDial` totality (absent, corrupt, bad entries skipped, duplicate ids, cap); `addDial` (append order, hostname default with `www.` stripped, duplicate, cap, minted id); `removeDial` (unknown id no-op); `reorderSpeedDial` (listed first, unknown dropped, repeats ignored, unlisted appended in stored order, unchanged order → no write); `extractTitle` (entities, whitespace, attributes on the tag, cap, absent/empty → undefined, only the first 512 KiB considered); `extractTouchIcon` (both rel values, rel token lists and case, largest `sizes` wins, missing `sizes` = 0, relative href resolved against the final URL, entity-decoded href, non-http(s) href skipped, none → undefined); `fetchDialMetadata` (`credentials: "omit"`, resolves against `response.url`, non-2xx / non-HTML / network failure / abort → empty result, never throws); `fillDialMetadata` (name filled only while it is still the hostname default, `iconUrl` filled only when absent, a removed dial is not resurrected); `readSpeedDial` dropping a bad `iconUrl` but keeping the entry; `dialIconUrl` (origin encoded, exact URL form) and `dialIconSources` ordering (incl. a stored icon equal to the service URL listed once); the strict read (a rejected `get` fails `addDial`/`removeDial`/`reorderSpeedDial` without writing; `fillDialMetadata` returns false without writing); the bounded body read (reader cancelled at 512 KiB, abort during the body → empty result); linear-time extraction (512 KiB of an unclosed `<link`, of one long attribute-less word run, and of unclosed `<title>` each finish well under a second); `sameDials` equality used for the echo skip.
+
+## 17. Page snapshots (m25, RED-407)
+
+A snapshot is a user-initiated capture of one page: clean markdown extracted IN the page by a site adapter (generic fallback for unknown sites), a full top-to-bottom screenshot, the page metadata, the raw HTML, and the adapter's structured output. Snapshots attach to the page's bookmark; a bookmark can have many (an archive over time). The markdown is the primary export, copied and pasted into LLM prompts, so it must be text-only and keep thread structure unambiguous. Decisions fixed by the user on 2026-10-01: a snapshot is a live capture (it creates or bumps the bookmark); the read-aloud pipeline (§10) is not involved; m25 runs a lighter process (no separate review pass; tests only where §17.10 lists them). Replaces the canceled standalone Spatula project.
+
+### 17.1 Principles
+
+-   **Explicit user action only.** The only trigger is the popup's `Snapshot` button. Nothing snapshots automatically, on save, or in the background.
+-   **Page reads are scoped to that action.** The extension injects a script and reads the DOM ONLY in the active tab, ONLY after the click (§6 amended). Adapters may make same-origin requests with the user's session (e.g. reddit's `.json` endpoints) — that is the point of extracting in the browser rather than with Firecrawl, which sees the logged-out page.
+-   **No outbox.** A snapshot is interactive: the service worker runs it so closing the popup does not cancel it, the popup shows progress and errors, and a failure is retried by clicking again. One snapshot in flight at a time.
+-   Snapshots are immutable once complete and hard-deletable (like highlights; the soft-delete rule is bookmark-scoped).
+
+### 17.2 Data model
+
+```sql
+create table smultron.snapshots (
+  id              bigint generated always as identity primary key,
+  user_id         uuid not null references auth.users(id),   -- FK via hand-written migration (0001 / browse_events pattern)
+  bookmark_id     bigint not null references smultron.bookmarks(id),
+  url             text not null,          -- raw tab URL at capture
+  title           text not null,          -- the adapter's title
+  adapter_id      text not null,          -- 'reddit-post' | 'generic' | ...
+  adapter_version text not null,
+  markdown        text not null,          -- the export
+  metadata        jsonb not null,         -- PageMetadata (§17.5)
+  assets          jsonb not null,         -- SnapshotAsset[] (§17.4)
+  status          text not null default 'uploading',  -- 'uploading' | 'complete'
+  captured_at     timestamptz not null,   -- client clock at capture
+  created_at      timestamptz not null default now()
+);
+```
+
+-   Indexes: btree `(user_id, bookmark_id, captured_at desc)` (a bookmark's snapshots), btree `(user_id, created_at desc, id desc)` (recent list). RLS enabled, no policies (§3).
+-   Migration `0015_snapshots` via `pnpm db:generate --name snapshots`; the `auth.users` FK follows the browse_events pattern.
+-   `status` is plain text like `articles.status`. A row stays `uploading` if the extension never completes it; the UI shows it as incomplete. No cleanup job.
+
+### 17.3 Storage
+
+-   A **PRIVATE** Supabase Storage bucket, name from `SNAPSHOT_BUCKET` (optional; default `page-snapshots`), created by the generalized `ensureBucket` with `public: false`, `allowed_mime_types: ["image/webp", "image/jpeg", "text/html", "application/json"]`, `file_size_limit: 52428800` (50 MiB). Private, unlike the §15 screenshot bucket, because a snapshot can hold logged-in content.
+-   Object path: `<userId>/<snapshotId>/<name>`, names `screenshot-<idx>.webp` (`.jpg` for JPEG), `page.html`, `data.json`. Server-assigned; the client never chooses a path.
+-   **Uploads go from the extension straight to Storage** through signed upload URLs (`POST /storage/v1/object/upload/sign/<bucket>/<path>` with the service-role key, server-side; the extension `PUT`s the bytes to the returned URL). Reason: Vercel rejects request bodies over 4.5 MB, and tall screenshots and HTML exceed that. The service-role key never leaves the server.
+-   Reads use signed URLs (6 h TTL, like audio) minted per API response. The signing helper is generalized to take a bucket.
+-   Delete removes the objects best-effort, then the row. A Storage failure does not block the row delete.
+
+### 17.4 Assets
+
+```ts
+type SnapshotAsset = {
+  kind: "screenshot" | "html" | "data";
+  idx: number;        // screenshot tile order, top to bottom, from 0; 0 for html/data
+  path: string;       // server-assigned object path (§17.3)
+  mime: string;       // image/webp | image/jpeg | text/html | application/json
+  byteSize: number;
+  width?: number;     // screenshots only, image pixels
+  height?: number;
+};
+```
+
+-   `screenshot`: tiles at most 8000 px tall each (GPU texture limits on long pages), WebP quality 80. Zero tiles is allowed (capture failed; §17.7).
+-   `html`: `document.documentElement.outerHTML` at extraction time, UTF-8.
+-   `data`: the adapter's structured output as JSON (e.g. the normalized reddit tree). Omitted when the adapter returns none.
+-   At most 64 assets per snapshot.
+
+### 17.5 Extension: adapters
+
+Pure code in `extension/src/adapters/` — DOM APIs only, no Chrome APIs (extension/AGENTS.md), so it runs in the injected script and in Vitest (jsdom/linkedom).
+
+```ts
+type AdapterContext = { document: Document; url: URL; fetch: typeof fetch };  // fetch = the page's, same-origin with the user's session
+type AdapterOutput = { title: string; markdown: string; data?: unknown };
+type Adapter = {
+  id: string;           // stable kebab-case; stored on every snapshot; the enable/disable key
+  name: string;         // shown in Options
+  description: string;
+  version: string;      // bump when the output format changes
+  matches(url: URL): boolean;
+  extract(ctx: AdapterContext): Promise<AdapterOutput>;
+};
+type ScrapeResult = AdapterOutput & { adapterId: string; adapterVersion: string };
+```
+
+-   `index.ts`: `siteAdapters` (priority order), `genericAdapter`, `allAdapters`, `findAdapter(url, disabledIds)`, `runAdapter(ctx, disabledIds)`. The first enabled site adapter whose `matches` is true runs; otherwise the generic adapter. A site adapter that throws falls back to the generic adapter, with `data: { fallbackFrom, error }`.
+-   **Enable/disable**: Options lists `allAdapters` with a checkbox each; the generic adapter is always on. Stored as `disabledAdapters: string[]` in `chrome.storage.sync` (missing = all enabled, so a new adapter ships enabled).
+-   `metadata.ts`: `collectMetadata(document): PageMetadata` —
+
+```ts
+type PageMetadata = {
+  url: string; canonicalUrl?: string; title: string; description?: string; lang?: string;
+  siteName?: string; author?: string; publishedAt?: string; modifiedAt?: string; favicon?: string;
+  meta: Array<{ name?: string; property?: string; httpEquiv?: string; charset?: string; content?: string }>;
+  openGraph: Record<string, string | string[]>;  // og:* without the prefix; repeats become arrays
+  twitter: Record<string, string>;               // twitter:* without the prefix
+  jsonLd: unknown[];                             // parsed blocks; unparseable blocks skipped
+  links: Array<{ rel: string; href: string; type?: string; hreflang?: string; title?: string }>;
+  viewport: { width: number; height: number; devicePixelRatio: number };
+  scrollHeight: number; userAgent: string; capturedAt: string;  // ISO
+};
+```
+
+-   **Generic adapter** (`generic/`): Mozilla Readability on a cloned document, then Turndown + GFM tables. Output: `# <title>`, a header line (URL, byline, site, published date), a blank line, the article markdown. Images become `![alt](absolute-src)`; no data URIs. If Readability finds nothing, cleaned `body.innerText`.
+-   Dependencies: `@mozilla/readability`, `turndown`, `turndown-plugin-gfm` in `extension/`.
+
+### 17.6 Reddit adapter
+
+`id: "reddit-post"`. Matches `reddit.com` hosts (`www.`, `old.`, `new.`, bare) with paths `/r/<sub>/comments/<id>/…`.
+
+-   **Source**: `<origin><permalink>.json?limit=500&raw_json=1` (the page's own origin, so old reddit works; a `sort` param on the page URL is passed through). Expand `kind: "more"` stubs with `/api/morechildren.json?api_type=json&link_id=t3_<id>&children=<ids>&raw_json=1&limit_children=false` in batches of ≤ 100, inserting results by `parent_id`. A "continue this thread" stub (`more` with id `_` / count 0) fetches the parent comment's permalink `.json`. Caps: 2000 comments and 50 requests; hitting a cap adds a truncation note to the markdown.
+-   **Fallback**: if the JSON fetch fails, read the rendered DOM (`shreddit-post`, `shreddit-comment` with `author`, `depth`, `score`, `thingid`, `parentid`, `permalink`). No expansion.
+-   **Format**:
+
+```
+# <post title>
+
+r/<sub> · u/<author> · <score> points · <ISO date> · <N> comments · flair: <flair>
+<permalink>
+
+<selftext markdown | link URL | gallery image URLs | "crosspost of <source permalink>">
+
+---
+
+## Comments
+
+**[1]** u/alice · 120 points · 2026-09-30
+Top-level comment text.
+
+> **[1.1]** u/bob · 40 points · 2026-09-30
+> Reply text.
+>
+> > **[1.1.1]** u/alice (OP) · 12 points · 2026-09-30 · edited
+> > Reply to the reply.
+> > Second line of the same comment.
+
+**[2]** [deleted] · 3 points · 2026-09-30
+[removed]
+```
+
+-   Each comment has a hierarchical path label (`[1.2.3]`) so the tree survives a paste that loses indentation. Nesting is blockquote depth, with EVERY line of a multi-line body prefixed, so the markdown also renders correctly. Markers: `(OP)`, `[deleted]`/`[removed]`, `(mod)`/`(admin)` for distinguished, `stickied`, `edited`. Sibling order is reddit's order for the requested sort.
+-   `data`: the normalized post and comment tree as JSON.
+
+### 17.7 Extension: capture flow
+
+-   **Permissions** added: `scripting` (no new install warning — `<all_urls>` is already held) and `debugger` (adds the "access the page debugger backend" warning; Chrome disables the extension on update until the user re-approves, and shows a "started debugging this browser" bar while a capture runs).
+-   **Popup**: a `Snapshot` button, enabled on http(s) tabs. Click → message to the service worker with the tab id. The popup renders the in-flight state from `chrome.storage.session` key `snapshotState` (`{ tabId, url, step, error?, snapshotId?, screenshotFailed? }`) on open and on `storage.onChanged`. Steps shown in plain words: reading the page, capturing the screenshot, uploading, done. Done shows `Copy markdown` (primary; the markdown is kept in the worker's session state until the next snapshot) and `Open` (`${APP_URL}/snapshots/<id>`). Below it, the five most recent snapshots (`GET /api/snapshots?limit=5`), each with `Copy` (fetches `GET /api/snapshots/:id`) and `Open`.
+-   **Service worker**, in order:
+    1. `chrome.scripting.executeScript` of the WXT unlisted script `snapshot` into the tab's top frame. It runs `runAdapter({ document, url: new URL(location.href), fetch }, disabledAdapters)` and `collectMetadata(document)`, and reads `outerHTML`; it returns `{ result, metadata, html }`.
+    2. Full-page screenshot over CDP: `chrome.debugger.attach` (protocol 1.3), `Page.getLayoutMetrics` for the content size, then `Page.captureScreenshot({ format: "webp", quality: 80, captureBeyondViewport: true, clip: { x: 0, y, width, height: ≤8000, scale: 1 } })` per tile; `detach` in `finally`. A failure here does not fail the snapshot: it continues with zero tiles and sets `screenshotFailed`.
+    3. `POST /api/snapshots` with the manifest (§17.8) → `{ snapshot, uploads }`.
+    4. `PUT` each asset's bytes to its `uploadUrl` with its mime type (up to 3 concurrent).
+    5. `POST /api/snapshots/:id/complete`.
+-   A 401 surfaces as "not paired" with a link to Options, like the rest of the popup.
+
+### 17.8 API
+
+All inputs Zod-validated, unknown fields rejected (`metadata` is validated as a JSON object ≤ 512 KB serialized, not field by field).
+
+-   `POST /api/snapshots` — token auth. Body:
+
+```ts
+{
+  url: string;               // raw tab URL, ≤ 2048, http(s)
+  title: string;             // ≤ 1000
+  faviconUrl?: string;       // the tab's favIconUrl, raw (validated server-side like RED-205)
+  adapterId: string; adapterVersion: string;
+  markdown: string;          // ≤ 1,000,000 chars
+  metadata: PageMetadata;
+  capturedAt: string;        // ISO 8601
+  assets: Array<{ kind: "screenshot" | "html" | "data"; idx: number; mime: string; byteSize: number; width?: number; height?: number }>;  // ≤ 64
+}
+```
+
+    In one transaction: (1) the bookmark upsert as a **live capture** on `(user_id, url_normalized)` — insert with `created_at = updated_at = now()`, `title` from the body, no tags, no `chrome_id`, validated `favicon_url`; on conflict `updated_at = now()`, `archived_at = null`, `favicon_url = coalesce(bookmarks.favicon_url, excluded.favicon_url)`, and nothing else (title, tags, url, pins, note, screenshot untouched); (2) insert the snapshot with `status = 'uploading'` and server-assigned asset paths. Then mint one signed upload URL per asset. Returns `201 { snapshot: SnapshotSummary, uploads: Array<{ kind, idx, path, uploadUrl }> }`. Storage unconfigured or signing failed → `503`.
+-   `POST /api/snapshots/:id/complete` — token auth. Lists the snapshot's Storage prefix; if every asset path is present, sets `status = 'complete'` and returns `200 { snapshot }`; otherwise `409 { error: "missing_assets", missing: string[] }`. Idempotent on a complete row. `404` for an unknown or another user's id.
+-   `GET /api/snapshots?bookmarkId=&limit=&cursor=` — session or token (`authenticateRequest`). Summaries, `created_at desc, id desc`, keyset cursor like the feed's; `limit` default 20, max 100. `bookmarkId` filters to one bookmark.
+-   `GET /api/snapshots/:id` — session or token. The full snapshot: summary fields + `markdown`, `metadata`, and `assets` each with a signed read `url` and `expiresAt`. `404` for an unknown or another user's id.
+-   `DELETE /api/snapshots/:id` — session auth. Hard delete per §17.3. `204`; `404` when not found/not owned.
+-   `GET /api/bookmarks` rows gain `snapshotCount: number` (a correlated count; personal scale, no new index beyond §17.2).
+
+```ts
+type SnapshotSummary = {
+  id: number; bookmarkId: number; url: string; title: string;
+  adapterId: string; adapterVersion: string; status: "uploading" | "complete";
+  capturedAt: string; createdAt: string;
+  markdownChars: number; screenshotCount: number;
+};
+```
+
+### 17.9 UI (site)
+
+-   **Feed row**: a snapshot-count pill beside the `✱ N` highlight pill when `snapshotCount > 0`.
+-   **Expanded panel**: a `SNAPSHOTS` section (mounted only for the open row, like read-aloud): one line per snapshot — captured time, adapter name, size in characters, an `incomplete` mark for `uploading` rows — with `Copy markdown` and `Open`.
+-   **`/snapshots/:id`** (session-authed page): title, URL link-out, captured time, adapter; `Copy markdown` as the primary button; the markdown in a wrapping monospace block; the screenshot tiles stacked vertically at full width, lazy-loaded; metadata as a collapsible key/value list plus raw JSON; `Download HTML`; `Delete` (returns to the feed).
+-   Copy is `navigator.clipboard.writeText` with a brief "Copied" confirmation.
+
+### 17.10 Tests (lighter process)
+
+Vitest only for: the reddit renderer (path labels, blockquote nesting, multi-line bodies at depth, OP/deleted/removed/distinguished/edited markers, truncation note — from fixture JSON, no network); `runAdapter` selection, disabled ids, and generic fallback on a throwing site adapter; and `POST /api/snapshots`'s bookmark upsert on PGlite with the real migrations (insert, bump + unarchive, favicon fill-when-null, title/tags/pins untouched on conflict, user scoping). Everything else is verified by hand.
