@@ -9,6 +9,22 @@
 import { isCaptureEnabled } from "@/src/browseEvents";
 import { createCoalescedSender } from "@/src/coalesce";
 import { relativeTime } from "@/src/relativeTime";
+import {
+	isInFlight,
+	readSnapshotState,
+	readStoredMarkdown,
+	SNAPSHOT_MARKDOWN_KEY,
+	SNAPSHOT_STATE_KEY,
+	type SnapshotState,
+	snapshotStartMessage,
+} from "@/src/snapshot";
+import {
+	describeFailure,
+	getSnapshotMarkdown,
+	listRecentSnapshots,
+	type SnapshotSummary,
+	snapshotPageUrl,
+} from "@/src/snapshotApi";
 import { filterTagSuggestions } from "@/src/tagSuggestions";
 import { trackedChangedMessage } from "@/src/trackedCache";
 import {
@@ -268,6 +284,8 @@ function renderUnpaired(): void {
 	// The browsing-history section belongs to PAIRED states only — a 401 mid-session
 	// (revoked token) lands here with the section already mounted (SPEC §13).
 	hideHistoryToggle();
+	// So does the snapshot section (m25, §17.7).
+	hideSnapshots();
 	const message = el("div", "message", "Not paired — open settings to pair.");
 	const button = el("button", "btn-accent", "Open settings");
 	button.type = "button";
@@ -766,6 +784,374 @@ async function mountHistoryToggle(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Page snapshots (m25, SPEC §17.7).
+//
+// The popup only starts a snapshot (one message to the service worker) and
+// renders `snapshotState` from chrome.storage.session; the worker runs it, so
+// closing the popup cancels nothing. Like the history toggle, the section lives
+// outside #view and shows in every paired state. The recent list and the Copy
+// buttons are direct fetches with the pairing token.
+
+const snapEl = mustGet<HTMLDivElement>("#snap");
+const snapButton = mustGet<HTMLButtonElement>("#snap-button");
+const snapStatusEl = mustGet<HTMLDivElement>("#snap-status");
+const snapRecentEl = mustGet<HTMLDivElement>("#snap-recent");
+
+const RECENT_SNAPSHOT_LIMIT = 5;
+/** How long "Starting…" waits for the worker's first state before giving up. */
+const SNAPSHOT_START_TIMEOUT_MS = 5_000;
+const COPY_FLASH_MS = 1_600;
+
+const STEP_TEXT: Record<"reading" | "capturing", string> = {
+	reading: "Reading the page…",
+	capturing: "Capturing the screenshot…",
+};
+const STEP_INDEX = { reading: 0, capturing: 1, uploading: 2 } as const;
+
+let snapMounted = false;
+
+function hideSnapshots(): void {
+	snapEl.classList.add("hidden");
+}
+
+async function readSession(key: string): Promise<unknown> {
+	try {
+		return (await browser.storage.session.get(key))[key];
+	} catch {
+		return undefined;
+	}
+}
+
+/** "example.com/path" for a raw URL; the raw string when it doesn't parse. */
+function hostPath(rawUrl: string): string {
+	try {
+		const url = new URL(rawUrl);
+		return `${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+	} catch {
+		return rawUrl;
+	}
+}
+
+function hostOf(rawUrl: string): string {
+	try {
+		return new URL(rawUrl).host;
+	} catch {
+		return "";
+	}
+}
+
+function formatCount(n: number): string {
+	return n.toLocaleString("en-US");
+}
+
+/** Briefly swap a button's label for an outcome, then restore it. */
+function flashButton(button: HTMLButtonElement, text: string): void {
+	// The resting label is recorded once, so a second click mid-flash restores
+	// "Copy", not "Copied ✓".
+	button.dataset.label ??= button.textContent ?? "";
+	const original = button.dataset.label;
+	button.textContent = text;
+	setTimeout(() => {
+		button.textContent = original;
+	}, COPY_FLASH_MS);
+}
+
+async function writeClipboard(text: string): Promise<boolean> {
+	try {
+		await navigator.clipboard.writeText(text);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function openSnapshotPage(config: PopupConfig, id: number): void {
+	void browser.tabs.create({ url: snapshotPageUrl(config.baseUrl, id) });
+}
+
+/**
+ * Copy one stored snapshot's markdown (`GET /api/snapshots/:id`). A 401 is the
+ * revoked-token case and swaps the whole popup to the unpaired prompt.
+ */
+async function copyRemoteMarkdown(
+	config: PopupConfig,
+	id: number,
+	button: HTMLButtonElement,
+): Promise<void> {
+	button.disabled = true;
+	const result = await getSnapshotMarkdown(config, fetch, id);
+	button.disabled = false;
+	if (!result.ok) {
+		if (result.status === 401) {
+			renderUnpaired();
+			return;
+		}
+		flashButton(button, "Failed");
+		return;
+	}
+	flashButton(
+		button,
+		(await writeClipboard(result.value)) ? "Copied ✓" : "Failed",
+	);
+}
+
+async function mountSnapshots(
+	config: PopupConfig,
+	tab: { id?: number; url?: string },
+): Promise<void> {
+	if (snapMounted) return;
+	snapMounted = true;
+	// Shown before any await: a 401 elsewhere that hides it afterwards must win.
+	snapEl.classList.remove("hidden");
+
+	const tabId = tab.id;
+	const canSnapshot =
+		tabId !== undefined &&
+		tab.url !== undefined &&
+		/^https?:\/\//i.test(tab.url);
+	if (!canSnapshot) snapButton.title = "Only web pages can be snapshotted";
+
+	let state: SnapshotState | undefined;
+	let starting = false;
+	let startError: string | undefined;
+	let startTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Monotonic: only the newest recent-list request may paint. */
+	let recentSeq = 0;
+
+	function line(text: string, className = "snap-line"): HTMLDivElement {
+		return el("div", className, text);
+	}
+
+	function stepBar(current: number): HTMLDivElement {
+		const bar = el("div", "snap-steps");
+		for (let i = 0; i < 3; i += 1) {
+			bar.append(
+				el(
+					"span",
+					i < current ? "done" : i === current ? "current" : undefined,
+				),
+			);
+		}
+		return bar;
+	}
+
+	/** The snapshotted page, when it isn't the tab the popup is open on. */
+	function otherPage(s: SnapshotState): HTMLElement[] {
+		if (s.url === tab.url || s.url === "") return [];
+		return [el("div", "snap-title", s.title?.trim() || hostPath(s.url))];
+	}
+
+	/** Copy the last run's markdown: the worker's session copy, else the server's. */
+	async function copyLastMarkdown(
+		s: SnapshotState,
+		button: HTMLButtonElement,
+	): Promise<void> {
+		const stored = readStoredMarkdown(await readSession(SNAPSHOT_MARKDOWN_KEY));
+		if (stored !== undefined && stored.runId === s.runId) {
+			flashButton(
+				button,
+				(await writeClipboard(stored.markdown)) ? "Copied ✓" : "Failed",
+			);
+			return;
+		}
+		if (s.snapshotId !== undefined) {
+			await copyRemoteMarkdown(config, s.snapshotId, button);
+			return;
+		}
+		flashButton(button, "Unavailable");
+	}
+
+	function copyButton(s: SnapshotState, className: string): HTMLButtonElement {
+		const button = el("button", className, "Copy markdown");
+		button.type = "button";
+		button.addEventListener("click", () => {
+			void copyLastMarkdown(s, button);
+		});
+		return button;
+	}
+
+	function paint(): void {
+		const inFlight = isInFlight(state);
+		snapButton.disabled = !canSnapshot || starting || inFlight;
+
+		const nodes: HTMLElement[] = [];
+		if (starting && !inFlight) {
+			nodes.push(stepBar(0), line("Starting…"));
+		} else if (startError !== undefined) {
+			nodes.push(el("div", "error-line", startError));
+		} else if (state !== undefined) {
+			const s = state;
+			if (s.step === "reading" || s.step === "capturing") {
+				nodes.push(
+					stepBar(STEP_INDEX[s.step]),
+					line(STEP_TEXT[s.step]),
+					...otherPage(s),
+				);
+			} else if (s.step === "uploading") {
+				const progress =
+					s.uploadTotal !== undefined
+						? `Uploading ${s.uploaded ?? 0} of ${s.uploadTotal}…`
+						: "Uploading…";
+				nodes.push(
+					stepBar(STEP_INDEX.uploading),
+					line(progress),
+					...otherPage(s),
+				);
+			} else if (s.step === "done") {
+				const parts = ["✓ Done"];
+				if (s.screenshotFailed) parts.push("no screenshot");
+				else if (s.screenshotCount !== undefined)
+					parts.push(
+						`${s.screenshotCount} screenshot${s.screenshotCount === 1 ? "" : "s"}`,
+					);
+				if (s.markdownChars !== undefined)
+					parts.push(`${formatCount(s.markdownChars)} chars`);
+				const actions = el("div", "snap-actions");
+				if (s.snapshotId !== undefined) {
+					const id = s.snapshotId;
+					const open = el("button", "btn-secondary", "Open");
+					open.type = "button";
+					open.addEventListener("click", () => openSnapshotPage(config, id));
+					actions.append(open);
+				}
+				actions.append(copyButton(s, "btn-accent"));
+				nodes.push(
+					line(parts.join(" · "), "snap-line ok"),
+					...otherPage(s),
+					actions,
+				);
+			} else if (s.unpaired) {
+				const settings = el("button", "btn-secondary", "Open settings");
+				settings.type = "button";
+				settings.addEventListener("click", () => {
+					void browser.runtime.openOptionsPage();
+				});
+				const actions = el("div", "snap-actions");
+				actions.append(settings);
+				nodes.push(
+					el("div", "error-line", "Not paired — open settings to pair."),
+					actions,
+				);
+			} else {
+				nodes.push(
+					el(
+						"div",
+						"error-line",
+						`Snapshot failed: ${s.error ?? "unknown error"}`,
+					),
+					...otherPage(s),
+				);
+				// The page was read before the failure: its markdown is still in
+				// the worker's session copy and worth having.
+				if (s.markdownChars !== undefined) {
+					const actions = el("div", "snap-actions");
+					actions.append(copyButton(s, "btn-secondary"));
+					nodes.push(actions);
+				}
+			}
+		}
+		snapStatusEl.replaceChildren(...nodes);
+		snapStatusEl.classList.toggle("hidden", nodes.length === 0);
+	}
+
+	snapButton.addEventListener("click", () => {
+		if (tabId === undefined) return;
+		starting = true;
+		startError = undefined;
+		paint();
+		// If the worker never publishes a state (it was busy), give the button back.
+		clearTimeout(startTimer);
+		startTimer = setTimeout(() => {
+			starting = false;
+			paint();
+		}, SNAPSHOT_START_TIMEOUT_MS);
+		void browser.runtime
+			.sendMessage(snapshotStartMessage(tabId))
+			.catch((error: unknown) => {
+				clearTimeout(startTimer);
+				starting = false;
+				startError = `couldn't start: ${error instanceof Error ? error.message : String(error)}`;
+				paint();
+			});
+	});
+
+	let changed = false;
+	browser.storage.onChanged.addListener((changes, area) => {
+		if (area !== "session") return;
+		const change = changes[SNAPSHOT_STATE_KEY];
+		if (change === undefined) return;
+		changed = true;
+		const previous = state;
+		state = readSnapshotState(change.newValue);
+		if (state !== undefined && state.runId !== previous?.runId) {
+			// The worker picked the click up.
+			clearTimeout(startTimer);
+			starting = false;
+			startError = undefined;
+		}
+		paint();
+		if (state?.step === "done" && previous?.step !== "done") void loadRecent();
+	});
+
+	snapRecentEl.replaceChildren(el("div", "message", "…"));
+	void loadRecent();
+	const initial = readSnapshotState(await readSession(SNAPSHOT_STATE_KEY));
+	// A change that landed during the read is newer than what the read saw.
+	if (!changed) state = initial;
+	paint();
+
+	async function loadRecent(): Promise<void> {
+		const seq = ++recentSeq;
+		const result = await listRecentSnapshots(
+			config,
+			fetch,
+			RECENT_SNAPSHOT_LIMIT,
+		);
+		if (seq !== recentSeq) return;
+		if (!result.ok) {
+			if (result.status === 401) {
+				renderUnpaired();
+				return;
+			}
+			snapRecentEl.replaceChildren(
+				el(
+					"div",
+					"error-line",
+					`couldn't load snapshots: ${describeFailure(result)}`,
+				),
+			);
+			return;
+		}
+		if (result.value.length === 0) {
+			snapRecentEl.replaceChildren(el("div", "message", "No snapshots yet."));
+			return;
+		}
+		snapRecentEl.replaceChildren(...result.value.map(recentRow));
+	}
+
+	function recentRow(snapshot: SnapshotSummary): HTMLElement {
+		const row = el("div", "recent-row");
+		const text = el("div", "recent-text");
+		const meta = [hostOf(snapshot.url), relativeTime(snapshot.createdAt)];
+		if (snapshot.status !== "complete") meta.push("incomplete");
+		text.append(
+			el("div", "recent-title", snapshot.title || snapshot.url),
+			el("div", "recent-meta", meta.filter((part) => part !== "").join(" · ")),
+		);
+		const copy = el("button", "btn-small", "Copy");
+		copy.type = "button";
+		copy.addEventListener("click", () => {
+			void copyRemoteMarkdown(config, snapshot.id, copy);
+		});
+		const open = el("button", "btn-small", "Open");
+		open.type = "button";
+		open.addEventListener("click", () => openSnapshotPage(config, snapshot.id));
+		row.append(text, copy, open);
+		return row;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Entry.
 
 // Header brand → the site in a new tab. Wired at module scope, so it works in
@@ -789,9 +1175,13 @@ async function init(): Promise<void> {
 	if (rawUrl === undefined || !/^https?:\/\//i.test(rawUrl)) {
 		renderUnsupported();
 		// Still a paired state when a token is configured, and the toggle is a
-		// global setting — the tab just isn't bookmarkable.
+		// global setting — the tab just isn't bookmarkable. The snapshot section
+		// shows too (its recent list and last result are global), with the
+		// button disabled.
 		void loadPopupConfig().then((paired) => {
-			if (paired !== undefined) void mountHistoryToggle();
+			if (paired === undefined) return;
+			void mountHistoryToggle();
+			void mountSnapshots(paired, { id: tab?.id, url: undefined });
 		});
 		return;
 	}
@@ -802,8 +1192,10 @@ async function init(): Promise<void> {
 		renderUnpaired();
 		return;
 	}
-	// Paired: every state below the config check shows the browsing-history section.
+	// Paired: every state below the config check shows the browsing-history
+	// and snapshot sections.
 	void mountHistoryToggle();
+	void mountSnapshots(config, { id: tab?.id, url: rawUrl });
 
 	const result = await getBookmarkByUrl(config, rawUrl);
 	if (!result.ok) {

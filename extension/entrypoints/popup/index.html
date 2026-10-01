@@ -392,6 +392,126 @@
         margin-left: 16px;
         background: var(--accent);
       }
+      /* m25 page snapshots (SPEC §17.7): global like the history toggle — not
+         tied to the per-tab body, shown in every paired state, its own
+         hairline. */
+      .snap {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px 14px;
+        border-top: 1px solid var(--border-soft);
+      }
+      .snap-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      /* Progress / done / failed for the last snapshot. */
+      .snap-box {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        padding: 9px 10px;
+        border: 1px solid var(--border-soft);
+        border-radius: 6px;
+      }
+      .snap-steps {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 4px;
+      }
+      .snap-steps span {
+        height: 3px;
+        border-radius: 2px;
+        background: var(--chip-bg);
+      }
+      .snap-steps span.done {
+        background: var(--accent);
+      }
+      .snap-steps span.current {
+        background: color-mix(in oklab, var(--accent) 45%, var(--chip-bg));
+        animation: snap-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes snap-pulse {
+        50% {
+          opacity: 0.5;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .snap-steps span.current {
+          animation: none;
+        }
+      }
+      .snap-line {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .snap-line.ok {
+        color: var(--ok);
+      }
+      .snap-title {
+        font-size: 12px;
+        font-weight: 500;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .snap-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+      .snap-recent {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .recent-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .recent-text {
+        display: flex;
+        flex: 1;
+        min-width: 0;
+        flex-direction: column;
+        gap: 1px;
+      }
+      .recent-title {
+        font-size: 12px;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .recent-meta {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--muted);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .btn-small {
+        flex: none;
+        padding: 3px 8px;
+        border: 1px solid var(--input-border);
+        border-radius: 5px;
+        background: var(--card);
+        font: inherit;
+        font-size: 11px;
+        color: var(--btn-fg);
+        cursor: pointer;
+      }
+      .btn-small:hover {
+        background: var(--soft);
+      }
       /* Dark values from the approved Claude Design [data-theme=dark] token
          block (Extension Popup mock). Deviations as on the web client
          (globals.css): strawberry-crimson accent instead of the mock's
@@ -443,6 +563,19 @@
         </span>
       </header>
       <div class="body" id="view"></div>
+      <!-- m25 (SPEC §17.7): page snapshots. Shown in every PAIRED state (the
+           button is disabled on non-web tabs); never touched by the view
+           re-renders above. -->
+      <div class="snap hidden" id="snap">
+        <div class="snap-head">
+          <span class="block-label">SNAPSHOTS</span>
+          <button class="btn-secondary" id="snap-button" type="button">
+            Snapshot
+          </button>
+        </div>
+        <div class="snap-box hidden" id="snap-status"></div>
+        <div class="snap-recent" id="snap-recent"></div>
+      </div>
       <!-- m19 (SPEC §13): shown in every PAIRED state — a global setting, not
            a per-tab one — and never touched by the view re-renders above. -->
       <div class="history hidden" id="history">
