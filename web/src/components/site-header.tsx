@@ -1,23 +1,29 @@
-// Shared app header for the two full-viewport log shells: the feed (`/`) and
-// the browse-event log (`/events`, m19). Server component — it renders the
-// sign-out server action's form directly.
+// Shared app header for the two full-viewport log shells — the feed (`/`) and
+// the browse-event log (`/events`, m19) — and the snapshot page
+// (`/snapshots/:id`, m25). Server component — it renders the sign-out server
+// action's form directly.
 import Link from "next/link";
 import { signOutAction } from "../lib/authActions";
 import { Wordmark } from "./wordmark";
 
-export function SiteHeader({ current }: { current: "feed" | "events" }) {
+export function SiteHeader({
+	current,
+}: {
+	current: "feed" | "events" | "snapshot";
+}) {
 	return (
 		<header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2.5">
 			<Wordmark />
 			<nav className="flex items-center gap-3.5 text-[13px]">
 				{/* Two-way link between the log views (SPEC §9): the feed points at
-				    the event log, the event log points back. Deliberately small and
-				    lowercase — /events is a diagnostic tool, not a product surface. */}
+				    the event log, everything else points back at the feed.
+				    Deliberately small and lowercase — /events is a diagnostic tool,
+				    not a product surface. */}
 				<Link
-					href={current === "events" ? "/" : "/events"}
+					href={current === "feed" ? "/events" : "/"}
 					className="font-mono text-[12px] text-muted-foreground hover:text-foreground"
 				>
-					{current === "events" ? "feed" : "events"}
+					{current === "feed" ? "events" : "feed"}
 				</Link>
 				<Link
 					href="/settings"

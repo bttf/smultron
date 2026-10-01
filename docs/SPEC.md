@@ -752,6 +752,7 @@ type SnapshotSummary = {
 -   **Expanded panel**: a `SNAPSHOTS` section (mounted only for the open row, like read-aloud): one line per snapshot — captured time, adapter name, size in characters, an `incomplete` mark for `uploading` rows — with `Copy markdown` and `Open`.
 -   **`/snapshots/:id`** (session-authed page): title, URL link-out, captured time, adapter; `Copy markdown` as the primary button; the markdown in a wrapping monospace block; the screenshot tiles stacked vertically at full width, lazy-loaded; metadata as a collapsible key/value list plus raw JSON; `Download HTML`; `Delete` (returns to the feed).
 -   Copy is `navigator.clipboard.writeText` with a brief "Copied" confirmation.
+-   Recorded from implementation (RED-410): the pill reads `▣ N`. The SNAPSHOTS section mounts only when the row's `snapshotCount > 0` (snapshots come from the extension alone, so an empty section is noise) and refetches when the count changes; its `Copy markdown` fetches `GET /api/snapshots/:id` on click, and `Open` opens the page in a new tab so the feed keeps its state. The page fetches once (no revalidation: every response re-signs the asset URLs, which would reload the tiles). `Download HTML` is the signed URL plus Supabase's `download` query parameter, since a cross-origin `<a download>` is ignored. `Delete` takes two clicks (the first arms it for 4 s): a snapshot of a page that has since changed cannot be re-taken. A tile whose URL could not be signed shows a placeholder line.
 
 ### 17.10 Tests (lighter process)
 

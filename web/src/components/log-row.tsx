@@ -219,6 +219,15 @@ export function LogRow({
 						✱ {bookmark.highlights.length}
 					</span>
 				) : null}
+				{/* m25 (SPEC §17.9): page snapshots, beside the highlight pill. */}
+				{(bookmark.snapshotCount ?? 0) > 0 ? (
+					<span
+						title={`${bookmark.snapshotCount} snapshot${bookmark.snapshotCount === 1 ? "" : "s"}`}
+						className="shrink-0 rounded-full bg-[var(--log-soft)] px-[7px] py-px font-mono text-[10.5px] text-[var(--log-accent)]"
+					>
+						▣ {bookmark.snapshotCount}
+					</span>
+				) : null}
 				{bookmark.tags.length > 0 ? (
 					<span className="flex shrink-0 items-center gap-1">
 						{bookmark.tags.map((tag) => {
