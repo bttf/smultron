@@ -12,9 +12,16 @@
 		"postinstall": "wxt prepare"
 	},
 	"devDependencies": {
+		"@types/turndown": "^5.0.6",
+		"linkedom": "^0.18.13",
 		"typescript": "^5.9.3",
 		"vite": "^7.3.6",
 		"vitest": "^4.1.10",
 		"wxt": "^0.21.3"
+	},
+	"dependencies": {
+		"@mozilla/readability": "^0.6.0",
+		"turndown": "^7.2.4",
+		"turndown-plugin-gfm": "^1.0.2"
 	}
 }
