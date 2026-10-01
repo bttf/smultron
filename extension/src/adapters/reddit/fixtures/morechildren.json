@@ -1,0 +1,119 @@
+{
+	"json": {
+		"errors": [],
+		"data": {
+			"things": [
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c11",
+						"name": "t1_c11",
+						"parent_id": "t3_abc123",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "ivy",
+						"body": "Late top-level comment.",
+						"score": 3,
+						"score_hidden": false,
+						"created_utc": 1790763300.0,
+						"edited": false,
+						"distinguished": null,
+						"stickied": false,
+						"is_submitter": false,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c11/",
+						"depth": 0,
+						"replies": ""
+					}
+				},
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c12",
+						"name": "t1_c12",
+						"parent_id": "t3_abc123",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "carol",
+						"body": "OP top-level follow-up.",
+						"score": 2,
+						"score_hidden": false,
+						"created_utc": 1790763300.0,
+						"edited": false,
+						"distinguished": null,
+						"stickied": false,
+						"is_submitter": true,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c12/",
+						"depth": 0,
+						"replies": ""
+					}
+				},
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c6",
+						"name": "t1_c6",
+						"parent_id": "t1_c2",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "gina",
+						"body": "Loaded from morechildren.",
+						"score": 6,
+						"score_hidden": false,
+						"created_utc": 1790763300.0,
+						"edited": false,
+						"distinguished": null,
+						"stickied": false,
+						"is_submitter": false,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c6/",
+						"depth": 1,
+						"replies": ""
+					}
+				},
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c7",
+						"name": "t1_c7",
+						"parent_id": "t1_c6",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "hank",
+						"body": "Nested under a loaded comment.",
+						"score": 1,
+						"score_hidden": false,
+						"created_utc": 1790763300.0,
+						"edited": false,
+						"distinguished": null,
+						"stickied": false,
+						"is_submitter": false,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c7/",
+						"depth": 2,
+						"replies": ""
+					}
+				},
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c8",
+						"name": "t1_c8",
+						"parent_id": "t1_c2",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "lee",
+						"body": "Last sibling.",
+						"score": 1,
+						"score_hidden": false,
+						"created_utc": 1790763300.0,
+						"edited": false,
+						"distinguished": null,
+						"stickied": false,
+						"is_submitter": false,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c8/",
+						"depth": 1,
+						"replies": ""
+					}
+				}
+			]
+		}
+	}
+}
