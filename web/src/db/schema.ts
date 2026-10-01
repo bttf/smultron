@@ -11,6 +11,7 @@ import {
 	check,
 	index,
 	integer,
+	jsonb,
 	pgSchema,
 	text,
 	timestamp,
@@ -314,6 +315,71 @@ export const highlights = smultron
 			index("highlights_bookmark_id_created_at_idx").on(
 				table.bookmarkId,
 				table.createdAt,
+			),
+		],
+	)
+	.enableRLS();
+
+/**
+ * Snapshot status (m25, SPEC §17.2). A row is created `uploading` by
+ * `POST /api/snapshots` and flips to `complete` once every asset object is
+ * present in Storage (`POST /api/snapshots/:id/complete`). A row the
+ * extension never completes stays `uploading`; there is no cleanup job.
+ * Plain `text`, like ARTICLE_STATUSES; this TS union is the authority.
+ */
+export const SNAPSHOT_STATUSES = ["uploading", "complete"] as const;
+
+export type SnapshotStatus = (typeof SNAPSHOT_STATUSES)[number];
+
+// Page snapshots (m25, SPEC §17). A user-initiated capture of one page:
+// adapter markdown, page metadata, and asset objects (screenshot tiles, raw
+// HTML, adapter JSON) in the PRIVATE snapshot bucket. Many per bookmark.
+// Immutable once complete; hard-deletable (the soft-delete rule is
+// bookmark-scoped). Creating one is a live capture of its bookmark (Hard
+// rule #1) — the bump happens on the bookmarks row, not here. The user_id
+// FK to auth.users rides the hand-written 0016_snapshots-auth-fk migration.
+export const snapshots = smultron
+	.table(
+		"snapshots",
+		{
+			id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+			userId: uuid("user_id").notNull(),
+			bookmarkId: bigint("bookmark_id", { mode: "number" })
+				.notNull()
+				.references(() => bookmarks.id),
+			// Raw tab URL at capture.
+			url: text().notNull(),
+			// The adapter's title.
+			title: text().notNull(),
+			// 'reddit-post' | 'generic' | ... (SPEC §17.5).
+			adapterId: text("adapter_id").notNull(),
+			adapterVersion: text("adapter_version").notNull(),
+			// The export: text-only markdown, pasted into LLM prompts.
+			markdown: text().notNull(),
+			// PageMetadata (SPEC §17.5).
+			metadata: jsonb().notNull(),
+			// SnapshotAsset[] (SPEC §17.4), paths server-assigned.
+			assets: jsonb().notNull(),
+			// One of SNAPSHOT_STATUSES.
+			status: text().notNull().default("uploading"),
+			// Client clock at capture.
+			capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+			createdAt: timestamp("created_at", { withTimezone: true })
+				.notNull()
+				.default(sql`now()`),
+		},
+		(table) => [
+			// A bookmark's snapshots, newest capture first.
+			index("snapshots_user_id_bookmark_id_captured_at_idx").on(
+				table.userId,
+				table.bookmarkId,
+				table.capturedAt.desc(),
+			),
+			// The recent list's keyset (created_at desc, id desc).
+			index("snapshots_user_id_created_at_idx").on(
+				table.userId,
+				table.createdAt.desc(),
+				table.id.desc(),
 			),
 		],
 	)
