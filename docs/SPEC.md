@@ -665,7 +665,7 @@ type PageMetadata = {
 
 `id: "reddit-post"`. Matches `reddit.com` hosts (`www.`, `old.`, `new.`, bare) with paths `/r/<sub>/comments/<id>/…`.
 
--   **Source**: `<origin><permalink>.json?limit=500&raw_json=1` (the page's own origin, so old reddit works; a `sort` param on the page URL is passed through). Expand `kind: "more"` stubs with `/api/morechildren.json?api_type=json&link_id=t3_<id>&children=<ids>&raw_json=1&limit_children=false` in batches of ≤ 100, inserting results by `parent_id`. A "continue this thread" stub (`more` with id `_` / count 0) fetches the parent comment's permalink `.json`. Caps: 2000 comments and 50 requests; hitting a cap adds a truncation note to the markdown.
+-   **Source**: `<origin><permalink>.json?limit=500&raw_json=1` (the page's own origin, so old reddit works; a `sort` param on the page URL is passed through). Expand `kind: "more"` stubs with `/api/morechildren.json?api_type=json&link_id=t3_<id>&children=<ids>&raw_json=1&limit_children=false` in batches of ≤ 100, inserting results by `parent_id`. A "continue this thread" stub (`more` with id `_` / count 0) fetches the parent comment's permalink `.json`. Caps: 2000 comments and 150 requests (raised from 50 on 2026-10-01: reddit returns ~20 comments per morechildren call, so 50 requests ended large threads well short of 2000 comments); hitting a cap adds a truncation note to the markdown.
 -   **Fallback**: if the JSON fetch fails, read the rendered DOM (`shreddit-post`, `shreddit-comment` with `author`, `depth`, `score`, `thingid`, `parentid`, `permalink`). No expansion.
 -   **Format**:
 

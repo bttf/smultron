@@ -20,7 +20,7 @@ import type {
 } from "./types";
 
 export const MAX_COMMENTS = 2000;
-export const MAX_REQUESTS = 50;
+export const MAX_REQUESTS = 150;
 /** morechildren takes at most 100 ids per call. */
 export const MORE_BATCH = 100;
 /** Stop expanding after this many failed requests in a row (rate limit, logged out, …). */
