@@ -785,6 +785,7 @@ export function Feed() {
 			pinnedAt: null,
 			// A web add never has a screenshot: only the extension captures.
 			screenshotUrl: null,
+			snapshotCount: 0,
 			highlights: [],
 		};
 		closeComposer();

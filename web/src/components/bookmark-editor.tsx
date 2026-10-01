@@ -11,11 +11,17 @@
 // cycle. Like `LogRow`, this subtree talks to the Feed orchestrator only
 // through props: the bookmark and the PATCH/DELETE callbacks.
 import { Fragment, useEffect, useRef, useState } from "react";
+import { formatDate, formatTimestamp } from "../lib/logTime";
 import { relativeTime } from "../lib/relativeTime";
 import { textFragmentUrl } from "../lib/textFragment";
 import { cn } from "../lib/utils";
 import { ArticleSection } from "./article";
+import { SnapshotsSection } from "./snapshots";
 import { TagChips } from "./tag-chips";
+
+// The log's timestamp formatters moved to `lib/logTime.ts` in m25 (the
+// snapshot views use them too); re-exported so existing importers stay put.
+export { formatDate, formatTimestamp };
 
 export type ApiHighlight = {
 	id: number;
@@ -46,6 +52,10 @@ export type ApiBookmark = {
 	// or null when the row has none yet. The server derives it; nothing here
 	// ever builds a Storage URL. Rendering it is RED-210's job.
 	screenshotUrl: string | null;
+	// m25 (SPEC §17.8): how many page snapshots the row has, incomplete ones
+	// included. Optional for responses served before the m25 backend and for
+	// the optimistic temp row, which has none.
+	snapshotCount?: number;
 	highlights: ApiHighlight[];
 };
 
@@ -80,45 +90,6 @@ export class DuplicateUrlError extends Error {
 		this.name = "DuplicateUrlError";
 		this.conflict = conflict;
 	}
-}
-
-const MONTHS = [
-	"Jan",
-	"Feb",
-	"Mar",
-	"Apr",
-	"May",
-	"Jun",
-	"Jul",
-	"Aug",
-	"Sep",
-	"Oct",
-	"Nov",
-	"Dec",
-];
-
-// Log timestamp: "Aug 1 09:14" (24h, no year) inside the current year,
-// "Jul 3 2025" outside it. Manual formatting keeps the shape byte-stable
-// across locales; this only ever renders client-side (SWR data), so there
-// are no hydration concerns.
-export function formatTimestamp(date: Date, now: Date = new Date()): string {
-	const base = `${MONTHS[date.getMonth()]} ${date.getDate()}`;
-	if (date.getFullYear() !== now.getFullYear()) {
-		return `${base} ${date.getFullYear()}`;
-	}
-	const hh = String(date.getHours()).padStart(2, "0");
-	const mm = String(date.getMinutes()).padStart(2, "0");
-	return `${base} ${hh}:${mm}`;
-}
-
-// Date only, no time: "Aug 1" in-year, "Aug 1 2025" outside it. Used on the
-// compact mobile row, which drops the time from `formatTimestamp` to save
-// horizontal space.
-export function formatDate(date: Date, now: Date = new Date()): string {
-	const base = `${MONTHS[date.getMonth()]} ${date.getDate()}`;
-	return date.getFullYear() !== now.getFullYear()
-		? `${base} ${date.getFullYear()}`
-		: base;
 }
 
 export function BookmarkEditor({
@@ -192,6 +163,15 @@ export function BookmarkEditor({
 			/>
 			{/* Mounted only for the open row, so collapsed rows never fetch. */}
 			<ArticleSection bookmarkId={bookmark.id} />
+			{/* m25: same lazy mount, and only when the row has snapshots — they
+			    come from the extension alone, so an empty section would only
+			    be noise. */}
+			{(bookmark.snapshotCount ?? 0) > 0 ? (
+				<SnapshotsSection
+					bookmarkId={bookmark.id}
+					snapshotCount={bookmark.snapshotCount ?? 0}
+				/>
+			) : null}
 			{bookmark.highlights.length > 0 ? (
 				<Fragment>
 					<span className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
