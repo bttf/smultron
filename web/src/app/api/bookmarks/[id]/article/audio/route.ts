@@ -20,6 +20,7 @@ import {
 import { getAuthedUser } from "../../../../../../lib/auth";
 import { PipelineError } from "../../../../../../lib/pipelineError";
 import {
+	audioBucket,
 	audioObjectPath,
 	createSignedUrl,
 	uploadAudio,
@@ -101,7 +102,7 @@ export async function POST(
 	const cached = await getAudio(db, article.id, kind, voice);
 	if (cached) {
 		try {
-			const signed = await createSignedUrl(cached.storagePath);
+			const signed = await createSignedUrl(audioBucket(), cached.storagePath);
 			return Response.json({
 				kind,
 				voice,
@@ -134,7 +135,7 @@ export async function POST(
 			segmentCount: synthesized.segmentCount,
 		});
 
-		const signed = await createSignedUrl(path);
+		const signed = await createSignedUrl(audioBucket(), path);
 		return Response.json({
 			kind,
 			voice: synthesized.voice,

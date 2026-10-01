@@ -15,7 +15,9 @@
 // session/redirect logic. The by-url entry is a PREFIX, so the whole subtree is
 // excluded with it (m23's /api/bookmarks/by-url/screenshot included). (/api/highlights is Bearer-authed too but shares
 // its path prefix with the session-authed DELETE /api/highlights/:id, so it
-// stays matched — harmless, since matched /api/* is never redirected.)
+// stays matched — harmless, since matched /api/* is never redirected. The m25
+// /api/snapshots family stays matched for the same reason: its Bearer POSTs
+// share the prefix with the session-authed GET/DELETE /api/snapshots/:id.)
 // Other /api/* routes are matched (so their sessions refresh) but are never
 // redirected — they 401 on their own.
 import { createServerClient } from "@supabase/ssr";

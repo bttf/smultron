@@ -45,7 +45,7 @@ import {
 	sql,
 } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { bookmarks, highlights } from "../db/schema";
+import { bookmarks, highlights, snapshots } from "../db/schema";
 import { normalizeUrl } from "./normalizeUrl";
 import { screenshotPublicBase } from "./storage";
 
@@ -90,6 +90,11 @@ export type Bookmark = {
 	 * `screenshot_path`, which is itself never serialized.
 	 */
 	screenshotUrl: string | null;
+	/**
+	 * How many snapshots (m25, SPEC §17.8) the row has, `uploading` ones
+	 * included. A correlated count in the shared column set.
+	 */
+	snapshotCount: number;
 	/** Ordered `created_at asc` (SPEC §8); `[]` when none. */
 	highlights: BookmarkHighlight[];
 };
@@ -105,6 +110,13 @@ export type Bookmark = {
  * with no per-route mapping — and when Storage is unconfigured the whole
  * expression collapses to NULL. `screenshot_path` itself is deliberately
  * absent: clients never build Storage URLs.
+ *
+ * `snapshotCount` (m25, SPEC §17.8) is a correlated count over
+ * `snapshots (user_id, bookmark_id, …)`, which the §17.2 index covers. The
+ * outer row is referenced as `"bookmarks"."id"` in raw SQL on purpose:
+ * Drizzle renders column references UNQUALIFIED inside `INSERT/UPDATE …
+ * RETURNING`, where a bare `"id"` in the subquery would bind to
+ * `snapshots.id` instead.
  */
 export function BOOKMARK_COLUMNS() {
 	const base = screenshotPublicBase();
@@ -126,6 +138,7 @@ export function BOOKMARK_COLUMNS() {
 		archivedAt: bookmarks.archivedAt,
 		pinnedAt: bookmarks.pinnedAt,
 		screenshotUrl,
+		snapshotCount: sql<number>`(select count(*)::int from ${snapshots} where ${snapshots.userId} = "bookmarks"."user_id" and ${snapshots.bookmarkId} = "bookmarks"."id")`,
 	};
 }
 
