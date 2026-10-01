@@ -1,0 +1,266 @@
+[
+	{
+		"kind": "Listing",
+		"data": {
+			"after": null,
+			"before": null,
+			"children": [
+				{
+					"kind": "t3",
+					"data": {
+						"id": "abc123",
+						"name": "t3_abc123",
+						"subreddit": "rust",
+						"subreddit_name_prefixed": "r/rust",
+						"title": "Fixture thread: tree rendering",
+						"author": "carol",
+						"score": 321,
+						"upvote_ratio": 0.97,
+						"created_utc": 1790683200.0,
+						"edited": false,
+						"num_comments": 14,
+						"link_flair_text": "Discussion",
+						"permalink": "/r/rust/comments/abc123/fixture_thread/",
+						"url": "https://www.reddit.com/r/rust/comments/abc123/fixture_thread/",
+						"domain": "self.rust",
+						"is_self": true,
+						"selftext": "Line one of the post.\n\nLine two with **bold**.",
+						"over_18": false,
+						"spoiler": false,
+						"locked": false,
+						"stickied": false,
+						"distinguished": null
+					}
+				}
+			]
+		}
+	},
+	{
+		"kind": "Listing",
+		"data": {
+			"after": null,
+			"before": null,
+			"children": [
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c1",
+						"name": "t1_c1",
+						"parent_id": "t3_abc123",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "RustMod",
+						"body": "Please read the rules.\n\nThis thread is moderated.",
+						"score": 1,
+						"score_hidden": true,
+						"created_utc": 1790760600.0,
+						"edited": false,
+						"distinguished": "moderator",
+						"stickied": true,
+						"is_submitter": false,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c1/",
+						"depth": 0,
+						"replies": ""
+					}
+				},
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c2",
+						"name": "t1_c2",
+						"parent_id": "t3_abc123",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "dave",
+						"body": "Multi-line top level.\nSecond line.",
+						"score": 50,
+						"score_hidden": false,
+						"created_utc": 1790760600.0,
+						"edited": 1790763300.0,
+						"distinguished": null,
+						"stickied": false,
+						"is_submitter": false,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c2/",
+						"depth": 0,
+						"replies": {
+							"kind": "Listing",
+							"data": {
+								"after": null,
+								"before": null,
+								"children": [
+									{
+										"kind": "t1",
+										"data": {
+											"id": "c3",
+											"name": "t1_c3",
+											"parent_id": "t1_c2",
+											"link_id": "t3_abc123",
+											"subreddit": "rust",
+											"author": "carol",
+											"body": "OP reply with a list:\n\n- one\n- two",
+											"score": 20,
+											"score_hidden": false,
+											"created_utc": 1790760600.0,
+											"edited": false,
+											"distinguished": null,
+											"stickied": false,
+											"is_submitter": true,
+											"permalink": "/r/rust/comments/abc123/fixture_thread/c3/",
+											"depth": 1,
+											"replies": {
+												"kind": "Listing",
+												"data": {
+													"after": null,
+													"before": null,
+													"children": [
+														{
+															"kind": "t1",
+															"data": {
+																"id": "c4",
+																"name": "t1_c4",
+																"parent_id": "t1_c3",
+																"link_id": "t3_abc123",
+																"subreddit": "rust",
+																"author": "erin",
+																"body": "Code at depth two:\n\n```rust\nfn main() {}\n\n// blank line above\n```\nAfter the fence.",
+																"score": 5,
+																"score_hidden": false,
+																"created_utc": 1790763300.0,
+																"edited": false,
+																"distinguished": null,
+																"stickied": false,
+																"is_submitter": false,
+																"permalink": "/r/rust/comments/abc123/fixture_thread/c4/",
+																"depth": 2,
+																"replies": {
+																	"kind": "Listing",
+																	"data": {
+																		"after": null,
+																		"before": null,
+																		"children": [
+																			{
+																				"kind": "more",
+																				"data": {
+																					"count": 0,
+																					"name": "t1__",
+																					"id": "_",
+																					"parent_id": "t1_c4",
+																					"depth": 3,
+																					"children": []
+																				}
+																			}
+																		]
+																	}
+																}
+															}
+														}
+													]
+												}
+											}
+										}
+									},
+									{
+										"kind": "t1",
+										"data": {
+											"id": "c5",
+											"name": "t1_c5",
+											"parent_id": "t1_c2",
+											"link_id": "t3_abc123",
+											"subreddit": "rust",
+											"author": "[deleted]",
+											"body": "[deleted]",
+											"score": 2,
+											"score_hidden": false,
+											"created_utc": 1790763300.0,
+											"edited": false,
+											"distinguished": null,
+											"stickied": false,
+											"is_submitter": false,
+											"permalink": "/r/rust/comments/abc123/fixture_thread/c5/",
+											"depth": 1,
+											"replies": ""
+										}
+									},
+									{
+										"kind": "more",
+										"data": {
+											"count": 3,
+											"name": "t1_c6",
+											"id": "c6",
+											"parent_id": "t1_c2",
+											"depth": 1,
+											"children": ["c6", "c8"]
+										}
+									}
+								]
+							}
+						}
+					}
+				},
+				{
+					"kind": "t1",
+					"data": {
+						"id": "c9",
+						"name": "t1_c9",
+						"parent_id": "t3_abc123",
+						"link_id": "t3_abc123",
+						"subreddit": "rust",
+						"author": "[deleted]",
+						"body": "[removed]",
+						"score": 7,
+						"score_hidden": false,
+						"created_utc": 1790760600.0,
+						"edited": false,
+						"distinguished": null,
+						"stickied": false,
+						"is_submitter": false,
+						"permalink": "/r/rust/comments/abc123/fixture_thread/c9/",
+						"depth": 0,
+						"replies": {
+							"kind": "Listing",
+							"data": {
+								"after": null,
+								"before": null,
+								"children": [
+									{
+										"kind": "t1",
+										"data": {
+											"id": "c10",
+											"name": "t1_c10",
+											"parent_id": "t1_c9",
+											"link_id": "t3_abc123",
+											"subreddit": "rust",
+											"author": "frank",
+											"body": "Admin note.",
+											"score": 4,
+											"score_hidden": false,
+											"created_utc": 1790763300.0,
+											"edited": false,
+											"distinguished": "admin",
+											"stickied": false,
+											"is_submitter": false,
+											"permalink": "/r/rust/comments/abc123/fixture_thread/c10/",
+											"depth": 1,
+											"replies": ""
+										}
+									}
+								]
+							}
+						}
+					}
+				},
+				{
+					"kind": "more",
+					"data": {
+						"count": 2,
+						"name": "t1_c11",
+						"id": "c11",
+						"parent_id": "t3_abc123",
+						"depth": 0,
+						"children": ["c11", "c12"]
+					}
+				}
+			]
+		}
+	}
+]
