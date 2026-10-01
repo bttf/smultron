@@ -29,6 +29,14 @@ export default defineConfig({
 		// Deliberately NOT "history": nothing reads Chrome's history store, its
 		// install warning escalates over "tabs"', and an unused permission is
 		// contrary to least-privilege (SPEC §6).
+		// m25 adds "scripting" and "debugger" for page snapshots (SPEC §17.7),
+		// used ONLY after the user clicks Snapshot in the popup, and only on the
+		// active tab: "scripting" injects the `snapshot` unlisted script (no new
+		// install warning — `<all_urls>` is already held); "debugger" captures
+		// the full page over CDP. It adds the "access the page debugger
+		// backend" warning, Chrome disables the extension on update until the
+		// user re-approves, and a "started debugging this browser" bar shows
+		// while a capture runs.
 		permissions: [
 			"bookmarks",
 			"storage",
@@ -38,17 +46,23 @@ export default defineConfig({
 			"activeTab",
 			"tabs",
 			"webNavigation",
+			"scripting",
+			"debugger",
 		],
 		// `<all_urls>` (m23) is the second recorded exception to least
 		// privilege: `chrome.tabs.captureVisibleTab` may only capture a tab
 		// whose origin the extension holds a host permission for, and a Ctrl+D
 		// save is not an extension invocation, so it grants no `activeTab` —
 		// without it a save-time screenshot is impossible. The install warning
-		// escalates to "read and change all your data on all websites"; the
-		// extension never injects scripts or reads a tab's content, only pixels of
-		// the tab being bookmarked. SPEC §6 and §15 record the trade-off. The one
-		// page read anywhere is the m24 speed-dial metadata fill (SPEC §16.2): an
-		// uncredentialed GET, from the Options page, of a URL the user typed there.
+		// escalates to "read and change all your data on all websites". SPEC §6
+		// and §15 record the trade-off. Since m25 (SPEC §6 amendment, §17) the
+		// extension DOES read page content, in exactly one place: after the user
+		// clicks Snapshot in the popup, it injects the `snapshot` script into the
+		// active tab (which may make same-origin requests with the user's
+		// session) and captures that tab over CDP. Nothing else injects or reads
+		// a tab. The other page read is the m24 speed-dial metadata fill (SPEC
+		// §16.2): an uncredentialed GET, from the Options page, of a URL the user
+		// typed there.
 		host_permissions: [
 			"http://localhost:3000/*",
 			"https://smultron.redpine.software/*",

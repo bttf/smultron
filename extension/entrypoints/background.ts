@@ -29,6 +29,16 @@ import {
 } from "@/src/screenshot";
 import { createScreenshotBackfill } from "@/src/screenshotBackfill";
 import {
+	type PageCapture,
+	parsePageCapture,
+	parseSnapshotStartMessage,
+	readSnapshotState,
+	SNAPSHOT_MARKDOWN_KEY,
+	SNAPSHOT_STATE_KEY,
+} from "@/src/snapshot";
+import { createSnapshotRunner } from "@/src/snapshotRun";
+import { captureFullPage, type DebuggerDeps } from "@/src/snapshotScreenshot";
+import {
 	createTrackedCache,
 	type IconState,
 	isTrackableUrl,
@@ -670,6 +680,93 @@ const screenshotBackfill = createScreenshotBackfill({
 	flush: () => outbox.flush(),
 });
 
+// ---------------------------------------------------------------------------
+// Page snapshots (m25, SPEC §17.7).
+//
+// Chrome glue only: the step order, the failure handling and the
+// one-at-a-time rule live in `src/snapshotRun.ts`; the tile plan and the CDP
+// sequence in `src/snapshotScreenshot.ts`. Nothing here runs unless the popup's
+// Snapshot button sends the start message (§17.1).
+
+/**
+ * Step 1: inject the `snapshot` unlisted script (entrypoints/snapshot.ts) into
+ * the tab's TOP frame and parse what it returns. Chrome awaits the script's
+ * promise, so the result is the finished capture.
+ */
+async function readPage(tabId: number): Promise<PageCapture> {
+	const [injection] = await browser.scripting.executeScript({
+		target: { tabId },
+		files: ["/snapshot.js"],
+	});
+	return parsePageCapture(injection?.result);
+}
+
+/** `chrome.debugger` bound to one tab, protocol 1.3 (§17.7 step 2). */
+function debuggerFor(tabId: number): DebuggerDeps {
+	const target = { tabId };
+	return {
+		attach: async () => {
+			try {
+				await browser.debugger.attach(target, "1.3");
+			} catch {
+				// Our own session left attached by a worker that died mid-capture:
+				// drop it and attach once more. Any other cause fails again and
+				// the snapshot continues without tiles.
+				await browser.debugger.detach(target).catch(() => {});
+				await browser.debugger.attach(target, "1.3");
+			}
+		},
+		detach: () => browser.debugger.detach(target),
+		send: (method, params) =>
+			browser.debugger.sendCommand(target, method, params),
+	};
+}
+
+/**
+ * An extension API call every 20 s resets the worker's 30 s idle timer, so a
+ * long upload is not cut off when no other event arrives.
+ */
+const SNAPSHOT_KEEPALIVE_MS = 20_000;
+
+const snapshotRunner = createSnapshotRunner({
+	getTab: async (tabId) => {
+		try {
+			return await browser.tabs.get(tabId);
+		} catch {
+			return undefined; // The tab closed.
+		}
+	},
+	loadConfig: loadWatcherConfig,
+	readPage,
+	captureScreenshot: (tabId, options) =>
+		captureFullPage(debuggerFor(tabId), options),
+	fetch: (url, init) => fetch(url, init),
+	getState: async () =>
+		readSnapshotState(
+			(await browser.storage.session.get(SNAPSHOT_STATE_KEY))[
+				SNAPSHOT_STATE_KEY
+			],
+		),
+	setState: async (state) => {
+		await browser.storage.session.set({ [SNAPSHOT_STATE_KEY]: state });
+	},
+	setMarkdown: async (value) => {
+		if (value === undefined) {
+			await browser.storage.session.remove(SNAPSHOT_MARKDOWN_KEY);
+		} else {
+			await browser.storage.session.set({ [SNAPSHOT_MARKDOWN_KEY]: value });
+		}
+	},
+	now: Date.now,
+	newRunId: () => crypto.randomUUID(),
+	keepAlive: () => {
+		const timer = setInterval(() => {
+			void browser.runtime.getPlatformInfo().catch(() => {});
+		}, SNAPSHOT_KEEPALIVE_MS);
+		return () => clearInterval(timer);
+	},
+});
+
 export default defineBackground(() => {
 	// MV3: all listeners must be registered synchronously at the top level of
 	// the service worker so Chrome can re-deliver events after worker death.
@@ -766,6 +863,17 @@ export default defineBackground(() => {
 		refreshActiveTabIcon({ url: ping.url });
 	});
 
+	// m25 (§17.7): the popup's Snapshot button. The run outlives the popup and
+	// reports through `snapshotState`; the synchronous reply only confirms
+	// receipt, so the popup can tell a missing worker from a started run. A
+	// second start while one runs is ignored by the runner.
+	browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+		const request = parseSnapshotStartMessage(message);
+		if (request === undefined) return;
+		void snapshotRunner.start(request.tabId);
+		sendResponse({ received: true });
+	});
+
 	browser.storage.onChanged.addListener((changes, area) => {
 		if (area !== "local") return;
 
@@ -806,4 +914,8 @@ export default defineBackground(() => {
 			}),
 		);
 	});
+
+	// m25: a snapshot state left "in flight" by a worker that died mid-run is
+	// marked failed, so the popup's button comes back.
+	void snapshotRunner.init();
 });

@@ -2,8 +2,15 @@
 // verify pairing with POST {baseUrl}/api/hello (SPEC §6, §7).
 //
 // Since m24 it also holds the speed dial editor (SPEC §16) — extension-local,
-// independent of pairing, and working without a token.
+// independent of pairing, and working without a token. Since m25 it holds the
+// snapshot adapter toggles (SPEC §17.5).
 
+import { type Adapter, allAdapters, genericAdapter } from "@/src/adapters";
+import {
+	DISABLED_ADAPTERS_KEY,
+	parseDisabledAdapters,
+	setAdapterEnabled,
+} from "@/src/snapshot";
 import {
 	addDial,
 	type DialError,
@@ -281,5 +288,91 @@ browser.storage.onChanged.addListener((changes, area) => {
 	void paintDials();
 });
 
+// ---------------------------------------------------------------------------
+// Snapshot adapters (m25, SPEC §17.5). One checkbox per adapter in
+// `allAdapters`; the generic adapter is always on. The stored value is the
+// list of DISABLED ids in chrome.storage.sync, so a missing key — and an
+// adapter added by a later version — means enabled.
+
+const adapterListEl = mustGet<HTMLDivElement>("#adapter-list");
+const adapterErrorEl = mustGet<HTMLParagraphElement>("#adapter-error");
+
+async function readDisabledAdapters(): Promise<string[]> {
+	try {
+		const stored = await browser.storage.sync.get(DISABLED_ADAPTERS_KEY);
+		return parseDisabledAdapters(stored[DISABLED_ADAPTERS_KEY]);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Toggle writes are read-modify-writes, serialized on one promise chain (the
+ * dial section's pattern) so two quick toggles never build on the same stale
+ * list. The chain always continues, so a failed write never wedges it.
+ */
+let adapterWrites: Promise<unknown> = Promise.resolve();
+
+function toggleAdapter(id: string, enabled: boolean): void {
+	adapterErrorEl.textContent = "";
+	const task = async () => {
+		// A failed read must fail the write, not rebuild the list from [].
+		const stored = await browser.storage.sync.get(DISABLED_ADAPTERS_KEY);
+		const current = parseDisabledAdapters(stored[DISABLED_ADAPTERS_KEY]);
+		await browser.storage.sync.set({
+			[DISABLED_ADAPTERS_KEY]: setAdapterEnabled(current, id, enabled),
+		});
+	};
+	const run = adapterWrites.then(task, task);
+	adapterWrites = run.catch(() => undefined);
+	run.catch(() => {
+		adapterErrorEl.textContent = "couldn't save";
+		void paintAdapters();
+	});
+}
+
+/** Each adapter's checkbox, so a repaint updates them in place (focus survives). */
+const adapterBoxes = new Map<string, HTMLInputElement>();
+
+function renderAdapterRow(adapter: Adapter): HTMLElement {
+	const locked = adapter.id === genericAdapter.id;
+	const row = el("label", locked ? "adapter-row locked" : "adapter-row");
+	const box = el("input");
+	box.type = "checkbox";
+	box.checked = true;
+	box.disabled = locked;
+	adapterBoxes.set(adapter.id, box);
+	box.addEventListener("change", () => {
+		toggleAdapter(adapter.id, box.checked);
+	});
+	const text = el("span", "adapter-text");
+	text.append(
+		el(
+			"span",
+			"adapter-name",
+			locked ? `${adapter.name} · always on` : adapter.name,
+		),
+		el("span", "adapter-desc", adapter.description),
+	);
+	row.append(box, text);
+	return row;
+}
+
+async function paintAdapters(): Promise<void> {
+	const disabled = await readDisabledAdapters();
+	if (adapterBoxes.size === 0)
+		adapterListEl.replaceChildren(...allAdapters.map(renderAdapterRow));
+	for (const [id, box] of adapterBoxes) {
+		box.checked = id === genericAdapter.id || !disabled.includes(id);
+	}
+}
+
+// Another Options window (or a synced device) changed the list.
+browser.storage.onChanged.addListener((changes, area) => {
+	if (area !== "sync" || changes[DISABLED_ADAPTERS_KEY] === undefined) return;
+	void paintAdapters();
+});
+
 void loadConfig();
 void paintDials();
+void paintAdapters();
