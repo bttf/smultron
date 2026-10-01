@@ -46,7 +46,7 @@ export const MARKDOWN_TRUNCATION_NOTE =
  * a stalled request ends the run as a failure instead of leaving it "in
  * flight" (and the popup's button disabled) for the worker's whole life.
  */
-export const READ_TIMEOUT_MS = 120_000;
+export const READ_TIMEOUT_MS = 300_000;
 export const API_TIMEOUT_MS = 60_000;
 export const UPLOAD_TIMEOUT_MS = 300_000;
 
